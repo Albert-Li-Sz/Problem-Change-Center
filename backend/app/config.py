@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+DEFAULT_DATA_DIR = Path.home() / ".p2h-web-ui" / "backend_data"
+
+
 def _int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -29,7 +32,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
-            data_dir=Path(os.getenv("P2H_DATA_DIR", "backend_data")).resolve(),
+            data_dir=Path(os.getenv("P2H_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser().resolve(),
             docker_bin=os.getenv("P2H_DOCKER_BIN", "docker"),
             runner_image=os.getenv("P2H_RUNNER_IMAGE", "p2h-runner"),
             max_upload_bytes=_int_env("P2H_MAX_UPLOAD_BYTES", 512 * 1024 * 1024),

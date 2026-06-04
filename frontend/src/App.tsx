@@ -6,6 +6,12 @@ import { StatusBadge } from "./components/StatusBadge";
 
 type MissingEnv = "warn" | "error";
 
+const targetOptions: Array<{ value: TargetFormat; label: string; hint: string }> = [
+  { value: "hydro", label: "Polygon -> HydroOJ", hint: "Polygon contest zip" },
+  { value: "domjudge", label: "Polygon -> DOMjudge", hint: "Polygon contest zip" },
+  { value: "hydro_to_domjudge", label: "HydroOJ -> DOMjudge", hint: "HydroOJ package zip" }
+];
+
 function splitList(value: string): string[] {
   return value
     .split(",")
@@ -42,6 +48,9 @@ export default function App() {
 
   const isRunning = job?.status === "queued" || job?.status === "running";
   const canStart = Boolean(inspect) && !isRunning && !busy;
+  const usesHydroOptions = target === "hydro";
+  const usesDomjudgeOutputOptions = target === "domjudge" || target === "hydro_to_domjudge";
+  const usesPolygonSource = target === "hydro" || target === "domjudge";
   const domjudgeColorPickerValue = /^#[0-9A-Fa-f]{6}$/.test(domjudgeColor) ? domjudgeColor : "#000000";
 
   const validation = useMemo(() => {
@@ -49,9 +58,11 @@ export default function App() {
       if (!/^[A-Za-z]+[0-9]+$/.test(pidStart)) return "PID 起始值应类似 P1000。";
       if (!Number.isInteger(owner) || owner < 1) return "owner 必须是正整数。";
     }
-    if (target === "domjudge") {
+    if (target === "domjudge" || target === "hydro_to_domjudge") {
       if (!/^[A-Za-z]+$/.test(domjudgeCodeStart)) return "DOMjudge 短名起始值应类似 A。";
       if (!/^#[0-9A-Fa-f]{6}$/.test(domjudgeColor)) return "DOMjudge 颜色必须是 #RRGGBB。";
+    }
+    if (target === "domjudge") {
       if (domjudgeAutoValidator && domjudgeDefaultValidator) return "自动识别 checker 和强制默认 validator 不能同时启用。";
     }
     return null;
@@ -102,7 +113,7 @@ export default function App() {
         owner,
         tags: splitList(tags),
         only: splitList(only),
-        run_doall: runDoall,
+        run_doall: usesPolygonSource && runDoall,
         missing_env: missingEnv,
         domjudge_code_start: domjudgeCodeStart,
         domjudge_color: domjudgeColor,
@@ -149,7 +160,7 @@ export default function App() {
           <Archive size={24} aria-hidden="true" />
           <div>
             <h1>Polygon Converter Web UI</h1>
-            <p>在受限 Docker runner 内转换 Polygon contest 包为 HydroOJ 或 DOMjudge</p>
+            <p>在受限 Docker runner 内转换 Polygon、HydroOJ 与 DOMjudge 题包</p>
           </div>
         </div>
         <div className="security-chip">
@@ -164,14 +175,14 @@ export default function App() {
             <div className="panel-heading">
               <div>
                 <h2>上传题包</h2>
-                <p>仅接受 Polygon contest zip，后端只做 zip 基础校验。</p>
+                <p>接受 Polygon contest、HydroOJ 或 DOMjudge zip，后端只做 zip 基础校验。</p>
               </div>
               <FileArchive size={20} aria-hidden="true" />
             </div>
 
             <label className="drop-zone">
               <UploadCloud size={28} aria-hidden="true" />
-              <span>{file ? file.name : "选择 contest.zip"}</span>
+              <span>{file ? file.name : "选择题包 zip"}</span>
               <small>{file ? formatBytes(file.size) : "文件上传后会生成独立任务目录"}</small>
               <input
                 type="file"
@@ -207,30 +218,26 @@ export default function App() {
             <div className="panel-heading">
               <div>
                 <h2>转换参数</h2>
-                <p>{target === "hydro" ? "这些参数会传给容器内的 p2h CLI。" : "这些参数会传给容器内的 P2D 批量转换入口。"}</p>
+                <p>选择输入与输出格式后，只会显示该方向会使用的参数。</p>
               </div>
             </div>
 
-            <div className="target-switch" aria-label="目标格式">
-              <button
-                type="button"
-                className={target === "hydro" ? "active" : ""}
-                onClick={() => setTarget("hydro")}
-                disabled={isRunning}
-              >
-                HydroOJ
-              </button>
-              <button
-                type="button"
-                className={target === "domjudge" ? "active" : ""}
-                onClick={() => setTarget("domjudge")}
-                disabled={isRunning}
-              >
-                DOMjudge
-              </button>
+            <div className="target-switch" aria-label="转换方向">
+              {targetOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={target === option.value ? "active" : ""}
+                  onClick={() => setTarget(option.value)}
+                  disabled={isRunning}
+                >
+                  <strong>{option.label}</strong>
+                  <small>{option.hint}</small>
+                </button>
+              ))}
             </div>
 
-            {target === "hydro" && (
+            {usesHydroOptions && (
               <>
                 <div className="form-grid">
                   <label>
@@ -256,7 +263,7 @@ export default function App() {
               </>
             )}
 
-            {target === "domjudge" && (
+            {usesDomjudgeOutputOptions && (
               <div className="domjudge-options">
                 <div className="form-grid">
                   <label>
@@ -278,73 +285,81 @@ export default function App() {
                   </label>
                 </div>
 
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={domjudgeAutoValidator}
-                    onChange={(event) => setDomjudgeAutoValidator(event.target.checked)}
-                    disabled={isRunning || domjudgeDefaultValidator}
-                  />
-                  <span>自动识别 Polygon 标准 checker，并替换为 DOMjudge 默认 validator</span>
-                </label>
+                {target === "domjudge" && (
+                  <>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={domjudgeAutoValidator}
+                        onChange={(event) => setDomjudgeAutoValidator(event.target.checked)}
+                        disabled={isRunning || domjudgeDefaultValidator}
+                      />
+                      <span>自动识别 Polygon 标准 checker，并替换为 DOMjudge 默认 validator</span>
+                    </label>
 
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={domjudgeDefaultValidator}
-                    onChange={(event) => setDomjudgeDefaultValidator(event.target.checked)}
-                    disabled={isRunning || domjudgeAutoValidator}
-                  />
-                  <span>强制使用 DOMjudge 默认 validator</span>
-                </label>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={domjudgeDefaultValidator}
+                        onChange={(event) => setDomjudgeDefaultValidator(event.target.checked)}
+                        disabled={isRunning || domjudgeAutoValidator}
+                      />
+                      <span>强制使用 DOMjudge 默认 validator</span>
+                    </label>
 
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={domjudgeWithStatement}
-                    onChange={(event) => setDomjudgeWithStatement(event.target.checked)}
-                    disabled={isRunning}
-                  />
-                  <span>包含 Polygon 包内 PDF statement</span>
-                </label>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={domjudgeWithStatement}
+                        onChange={(event) => setDomjudgeWithStatement(event.target.checked)}
+                        disabled={isRunning}
+                      />
+                      <span>包含 Polygon 包内 PDF statement</span>
+                    </label>
 
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={domjudgeWithAttachments}
-                    onChange={(event) => setDomjudgeWithAttachments(event.target.checked)}
-                    disabled={isRunning}
-                  />
-                  <span>包含 Polygon attachments</span>
-                </label>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={domjudgeWithAttachments}
+                        onChange={(event) => setDomjudgeWithAttachments(event.target.checked)}
+                        disabled={isRunning}
+                      />
+                      <span>包含 Polygon attachments</span>
+                    </label>
+                  </>
+                )}
               </div>
             )}
 
             <label>
-              <span>only slugs</span>
+              <span>only</span>
               <input value={only} onChange={(event) => setOnly(event.target.value)} placeholder="a, b, buy-cpu" disabled={isRunning} />
             </label>
 
-            <div className="safety-box">
-              <div className="safety-title">
-                <AlertTriangle size={18} aria-hidden="true" />
-                doall.sh 执行策略
-              </div>
-              <p>安全模式会强制使用 --no-run-doall。启用脚本执行后，脚本仍会被限制在无网络、非 root、限资源的 Docker 容器中。</p>
-              <p>HydroOJ 与 DOMjudge 转换共用同一套 runner 隔离。如果题包运行 Windows .exe，请先构建 p2h-runner-wine，并用 P2H_RUNNER_IMAGE=p2h-runner-wine 启动后端。</p>
-              <label className="checkbox-row">
-                <input type="checkbox" checked={runDoall} onChange={(event) => setRunDoall(event.target.checked)} disabled={isRunning} />
-                <span>我信任该 Polygon 包，并允许在隔离容器内执行 doall.sh</span>
-              </label>
-            </div>
+            {usesPolygonSource && (
+              <>
+                <div className="safety-box">
+                  <div className="safety-title">
+                    <AlertTriangle size={18} aria-hidden="true" />
+                    doall.sh 执行策略
+                  </div>
+                  <p>安全模式会强制使用 --no-run-doall。启用脚本执行后，脚本仍会被限制在无网络、非 root、限资源的 Docker 容器中。</p>
+                  <p>如果题包运行 Windows .exe，请先构建 p2h-runner-wine，并用 P2H_RUNNER_IMAGE=p2h-runner-wine 启动后端。</p>
+                  <label className="checkbox-row">
+                    <input type="checkbox" checked={runDoall} onChange={(event) => setRunDoall(event.target.checked)} disabled={isRunning} />
+                    <span>我信任该 Polygon 包，并允许在隔离容器内执行 doall.sh</span>
+                  </label>
+                </div>
 
-            <label>
-              <span>缺失环境策略</span>
-              <select value={missingEnv} onChange={(event) => setMissingEnv(event.target.value as MissingEnv)} disabled={isRunning}>
-                <option value="warn">warn · 记录警告后继续</option>
-                <option value="error">error · 缺依赖时直接失败</option>
-              </select>
-            </label>
+                <label>
+                  <span>缺失环境策略</span>
+                  <select value={missingEnv} onChange={(event) => setMissingEnv(event.target.value as MissingEnv)} disabled={isRunning}>
+                    <option value="warn">warn · 记录警告后继续</option>
+                    <option value="error">error · 缺依赖时直接失败</option>
+                  </select>
+                </label>
+              </>
+            )}
 
             {validation && <div className="inline-error">{validation}</div>}
 

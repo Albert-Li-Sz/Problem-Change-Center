@@ -6,7 +6,7 @@ export type InspectResult = {
 };
 
 export type JobStatus = "queued" | "running" | "success" | "failed" | "cancelled";
-export type TargetFormat = "hydro" | "domjudge";
+export type TargetFormat = "hydro" | "domjudge" | "hydro_to_domjudge";
 
 export type JobResponse = {
   id: string;

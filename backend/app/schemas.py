@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 JobStatus = Literal["queued", "running", "success", "failed", "cancelled"]
 MissingEnvPolicy = Literal["warn", "error"]
-TargetFormat = Literal["hydro", "domjudge"]
+TargetFormat = Literal["hydro", "domjudge", "hydro_to_domjudge"]
 
 
 class InspectResponse(BaseModel):

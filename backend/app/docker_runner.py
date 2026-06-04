@@ -14,18 +14,21 @@ def container_name(job_id: str) -> str:
 
 
 def build_docker_command(settings: Settings, job_id: str, paths: JobPaths, request: JobRequest) -> list[str]:
-    cmd = _base_docker_command(settings, job_id, paths)
+    runner_image = _runner_image_for_request(settings.runner_image, request)
+    cmd = _base_docker_command(settings, job_id, paths, runner_image)
 
-    if request.target == "domjudge":
-        _append_domjudge_args(cmd, request)
-    else:
+    if request.target == "hydro":
         _append_hydro_args(cmd, request)
+    elif request.target == "domjudge":
+        _append_domjudge_args(cmd, request)
+    elif request.target == "hydro_to_domjudge":
+        _append_hydro_to_domjudge_args(cmd, request)
 
     return cmd
 
 
-def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths) -> list[str]:
-    return [
+def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths, runner_image: str) -> list[str]:
+    cmd = [
         settings.docker_bin,
         "run",
         "--rm",
@@ -62,8 +65,41 @@ def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths) -> li
         f"{paths.work_dir.resolve()}:/work:rw",
         "-v",
         f"{paths.output_dir.resolve()}:/output:rw",
-        settings.runner_image,
+        runner_image,
     ]
+
+    if _runner_requires_amd64(runner_image):
+        cmd[2:2] = ["--platform", "linux/amd64"]
+
+    return cmd
+
+
+def _runner_image_for_request(image: str, request: JobRequest) -> str:
+    if request.target != "hydro_to_domjudge":
+        return image
+
+    prefix, name, suffix = _split_image_name(image)
+    if name.endswith("-wine"):
+        return f"{prefix}{name.removesuffix('-wine')}{suffix}"
+    return image
+
+
+def _split_image_name(image: str) -> tuple[str, str, str]:
+    name_with_suffix = image.rsplit("/", 1)[-1]
+    prefix = image[: -len(name_with_suffix)]
+    suffix = ""
+    if "@" in name_with_suffix:
+        name_with_suffix, digest = name_with_suffix.split("@", 1)
+        suffix = f"@{digest}"
+    elif ":" in name_with_suffix:
+        name_with_suffix, tag = name_with_suffix.rsplit(":", 1)
+        suffix = f":{tag}"
+    return prefix, name_with_suffix, suffix
+
+
+def _runner_requires_amd64(image: str) -> bool:
+    image_name = image.rsplit("/", 1)[-1].split(":", 1)[0]
+    return image_name.endswith("-wine")
 
 
 def _append_hydro_args(cmd: list[str], request: JobRequest) -> None:
@@ -123,6 +159,25 @@ def _append_domjudge_args(cmd: list[str], request: JobRequest) -> None:
         cmd.append("--with-attachments")
 
     cmd.append("--run-doall" if request.run_doall else "--no-run-doall")
+
+
+def _append_hydro_to_domjudge_args(cmd: list[str], request: JobRequest) -> None:
+    cmd.extend(
+        [
+            "hydro-to-domjudge",
+            "/input/contest.zip",
+            "-o",
+            "/output",
+            "--code-start",
+            request.domjudge_code_start,
+            "--color",
+            request.domjudge_color,
+            "--verbose",
+        ]
+    )
+
+    for slug in request.only:
+        cmd.extend(["--only", slug])
 
 
 def stop_container(settings: Settings, job_id: str) -> None:

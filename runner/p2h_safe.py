@@ -8,6 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from format_bridge import convert_hydro_to_domjudge
 import p2h.convert
 from p2h.polygon_reader import list_problem_slugs_from_names
 
@@ -172,6 +173,17 @@ def _build_domjudge_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_hydro_to_domjudge_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="hydro-to-domjudge")
+    parser.add_argument("source_zip", type=Path)
+    parser.add_argument("-o", "--output", required=True, type=Path)
+    parser.add_argument("--code-start", default="A")
+    parser.add_argument("--color", default="#000000")
+    parser.add_argument("--only", action="append", default=[])
+    parser.add_argument("--verbose", action="store_true")
+    return parser
+
+
 def _convert_domjudge(argv: list[str]) -> int:
     parser = _build_domjudge_parser()
     args = parser.parse_args(argv)
@@ -290,11 +302,32 @@ def _convert_domjudge(argv: list[str]) -> int:
     return 0 if not errors else 1
 
 
+def _convert_hydro_to_domjudge(argv: list[str]) -> int:
+    parser = _build_hydro_to_domjudge_parser()
+    args = parser.parse_args(argv)
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", args.color):
+        parser.error("--color must be in #RRGGBB format")
+    try:
+        return convert_hydro_to_domjudge(
+            args.source_zip,
+            args.output,
+            code_start=args.code_start,
+            color=args.color,
+            only=args.only,
+            verbose=args.verbose,
+        )
+    except Exception as exc:
+        print(f"hydro-to-domjudge failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     p2h.convert._collect_tools_from_script = collect_tools_from_script
 
     if len(sys.argv) > 1 and sys.argv[1] == "domjudge-convert":
         return _convert_domjudge(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "hydro-to-domjudge":
+        return _convert_hydro_to_domjudge(sys.argv[2:])
 
     from p2h.cli import main as cli_main
 

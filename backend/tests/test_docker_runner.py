@@ -23,6 +23,23 @@ def _settings(root: Path) -> Settings:
     )
 
 
+def _settings_with_image(root: Path, image: str) -> Settings:
+    settings = _settings(root)
+    return Settings(
+        data_dir=settings.data_dir,
+        docker_bin=settings.docker_bin,
+        runner_image=image,
+        max_upload_bytes=settings.max_upload_bytes,
+        job_timeout_seconds=settings.job_timeout_seconds,
+        job_ttl_seconds=settings.job_ttl_seconds,
+        docker_memory=settings.docker_memory,
+        docker_cpus=settings.docker_cpus,
+        docker_pids_limit=settings.docker_pids_limit,
+        docker_tmp_size=settings.docker_tmp_size,
+        docker_work_size=settings.docker_work_size,
+    )
+
+
 def test_docker_command_includes_security_flags_and_safe_mode() -> None:
     with TemporaryDirectory() as td:
         root = Path(td)
@@ -48,6 +65,19 @@ def test_docker_command_includes_security_flags_and_safe_mode() -> None:
     assert f"{paths.work_dir.resolve()}:/work:rw" in cmd
     assert "--no-run-doall" in cmd
     assert "--run-doall" not in cmd
+
+
+def test_wine_runner_requests_amd64_platform() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        paths = JobPaths(root / "jobs" / ("a" * 32))
+        paths.input_dir.mkdir(parents=True)
+        paths.output_dir.mkdir(parents=True)
+        request = JobRequest(job_id="a" * 32, pid_start="P1000", owner=1)
+
+        cmd = build_docker_command(_settings_with_image(root, "p2h-runner-wine"), request.job_id, paths, request)
+
+    assert cmd[:5] == ["docker", "run", "--platform", "linux/amd64", "--rm"]
 
 
 def test_docker_command_allows_explicit_doall_and_passes_lists() -> None:
@@ -135,3 +165,54 @@ def test_domjudge_command_can_force_default_validator() -> None:
 
     assert "--default-validator" in cmd
     assert "--auto-validator" not in cmd
+
+
+def test_hydro_to_domjudge_command_uses_bridge_args() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        paths = JobPaths(root / "jobs" / ("e" * 32))
+        paths.input_dir.mkdir(parents=True)
+        paths.output_dir.mkdir(parents=True)
+        request = JobRequest(
+            job_id="e" * 32,
+            target="hydro_to_domjudge",
+            only=["sum"],
+            domjudge_code_start="B",
+            domjudge_color="#00AA11",
+            run_doall=True,
+        )
+
+        cmd = build_docker_command(_settings(root), request.job_id, paths, request)
+
+    assert "hydro-to-domjudge" in cmd
+    assert "domjudge-convert" not in cmd
+    assert "convert" not in cmd
+    assert "--code-start" in cmd
+    assert "B" in cmd
+    assert "--color" in cmd
+    assert "#00AA11" in cmd
+    assert "--only" in cmd
+    assert "sum" in cmd
+    assert "--run-doall" not in cmd
+    assert "--no-run-doall" not in cmd
+    assert "--missing-env" not in cmd
+
+
+def test_hydro_to_domjudge_uses_normal_runner_when_wine_is_configured() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        paths = JobPaths(root / "jobs" / ("f" * 32))
+        paths.input_dir.mkdir(parents=True)
+        paths.output_dir.mkdir(parents=True)
+        request = JobRequest(
+            job_id="f" * 32,
+            target="hydro_to_domjudge",
+        )
+
+        cmd = build_docker_command(_settings_with_image(root, "p2h-runner-wine"), request.job_id, paths, request)
+
+    assert cmd[:2] == ["docker", "run"]
+    assert "--platform" not in cmd
+    assert "p2h-runner" in cmd
+    assert "p2h-runner-wine" not in cmd
+    assert "hydro-to-domjudge" in cmd

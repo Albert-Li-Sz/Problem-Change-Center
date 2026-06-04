@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BASE_IMAGE="${P2H_PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
 
 BUILD_RUNNER=1
 BUILD_WINE=0
@@ -36,12 +37,14 @@ Options:
   --skip-frontend        Skip frontend npm install.
   --no-frontend-build    Skip npm run build after installing frontend deps.
   --python PATH          Python interpreter used to create backend/.venv.
+  --base-image IMAGE     Docker base image used for runner builds.
   -h, --help             Show this help.
 
 Examples:
   ./install.sh
   ./install.sh --wine
   ./install.sh --skip-runner
+  ./install.sh --base-image registry.example.com/library/python:3.12-slim-bookworm
 EOF
 }
 
@@ -66,6 +69,11 @@ while [[ $# -gt 0 ]]; do
     --python)
       [[ $# -ge 2 ]] || die "--python requires a path"
       PYTHON_BIN="$2"
+      shift
+      ;;
+    --base-image)
+      [[ $# -ge 2 ]] || die "--base-image requires an image name"
+      PYTHON_BASE_IMAGE="$2"
       shift
       ;;
     -h|--help)
@@ -140,13 +148,14 @@ build_runner() {
   require_cmd docker
   docker info >/dev/null 2>&1 || die "Docker daemon is not running or not reachable"
   compose_command
+  export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
 
   if ! "${COMPOSE_CMD[@]}" --profile runner build runner; then
     cat >&2 <<'EOF'
 
 Docker runner build failed. Common causes:
   - Docker Hub token/metadata request timed out.
-  - GitHub archive download for pinned converter commits failed.
+  - GitHub download/clone for pinned converter commits failed.
   - Docker daemon lacks network access.
 
 Retry:
@@ -154,6 +163,9 @@ Retry:
 
 If you only want to install Python/Node dependencies first:
   ./install.sh --skip-runner
+
+If Docker Hub is timing out, use an accessible mirror for the Python base image:
+  ./install.sh --base-image <registry>/library/python:3.12-slim-bookworm
 EOF
     exit 1
   fi
@@ -186,13 +198,17 @@ write_env_file() {
     if [[ "$BUILD_WINE" -eq 1 ]] && ! grep -q '^P2H_RUNNER_IMAGE=p2h-runner-wine$' "$env_file"; then
       warn "Wine runner was built, but existing .env was not changed. Set P2H_RUNNER_IMAGE=p2h-runner-wine manually if needed."
     fi
+    if [[ "$PYTHON_BASE_IMAGE" != "python:3.12-slim-bookworm" ]] && ! grep -q '^P2H_PYTHON_BASE_IMAGE=' "$env_file"; then
+      warn "Custom base image was used for this build, but existing .env was not changed. Add P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE if you want future manual builds to reuse it."
+    fi
     return
   fi
 
   log "Writing local .env"
   cat >"$env_file" <<EOF
-P2H_DATA_DIR=backend_data
+P2H_DATA_DIR=~/.p2h-web-ui/backend_data
 P2H_RUNNER_IMAGE=$runner_image
+P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE
 P2H_MAX_UPLOAD_BYTES=536870912
 P2H_JOB_TIMEOUT_SECONDS=600
 P2H_DOCKER_MEMORY=1g

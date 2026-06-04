@@ -264,20 +264,40 @@ button:disabled {
 }
 
 .target-switch button {
-  min-height: 36px;
+  display: grid;
+  gap: 3px;
+  min-height: 52px;
+  align-content: center;
   border: 0;
   border-radius: 6px;
+  padding: 7px 8px;
   background: transparent;
   color: #536271;
-  font-size: 13px;
-  font-weight: 800;
   cursor: pointer;
+}
+
+.target-switch button strong {
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.2;
+  font-weight: 800;
+}
+
+.target-switch button small {
+  color: #66717d;
+  font-size: 11px;
+  line-height: 1.25;
+  font-weight: 650;
 }
 
 .target-switch button.active {
   background: #ffffff;
   color: #146c5c;
   box-shadow: 0 1px 4px rgba(25, 40, 55, 0.12);
+}
+
+.target-switch button.active small {
+  color: #4d6e65;
 }
 
 .form-grid {

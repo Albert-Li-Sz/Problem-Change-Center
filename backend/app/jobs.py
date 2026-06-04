@@ -19,6 +19,7 @@ from .storage import JobMetadata, Storage, utc_now_iso
 _PID_RE = re.compile(r"^[A-Za-z]+[0-9]+$")
 _DOMJUDGE_CODE_RE = re.compile(r"^[A-Za-z]+$")
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_TARGETS = {"hydro", "domjudge", "hydro_to_domjudge"}
 
 
 @dataclass
@@ -187,8 +188,11 @@ class JobManager:
             selector.close()
 
     def _validate_request(self, request: JobRequest) -> None:
-        if request.target not in {"hydro", "domjudge"}:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="target must be hydro or domjudge")
+        if request.target not in _TARGETS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="target must be hydro, domjudge, or hydro_to_domjudge",
+            )
         if request.target == "hydro" and not _PID_RE.fullmatch(request.pid_start):
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="pid_start must look like P1000")
         if request.owner < 1:
@@ -199,7 +203,7 @@ class JobManager:
         request.only[:] = [item.strip() for item in request.only if item.strip()]
         request.domjudge_code_start = request.domjudge_code_start.strip().upper()
         request.domjudge_color = request.domjudge_color.strip()
-        if request.target == "domjudge":
+        if request.target in {"domjudge", "hydro_to_domjudge"}:
             if not _DOMJUDGE_CODE_RE.fullmatch(request.domjudge_code_start):
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -210,6 +214,7 @@ class JobManager:
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail="domjudge_color must be in #RRGGBB format",
                 )
+        if request.target == "domjudge":
             if request.domjudge_auto_validator and request.domjudge_default_validator:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

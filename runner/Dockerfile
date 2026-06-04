@@ -1,4 +1,5 @@
-FROM python:3.12-slim-bookworm
+ARG PYTHON_BASE_IMAGE=python:3.12-slim-bookworm
+FROM ${PYTHON_BASE_IMAGE}
 
 ARG P2H_REF=93aca21
 ARG P2D_REF=8b0919a2a3e0946faaf677ec5cb2cad65fee7e30
@@ -9,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     coreutils \
     g++ \
     gcc \
+    git \
     make \
     openjdk-17-jdk-headless \
     unzip \
@@ -16,8 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
+  "PyYAML>=6,<7" \
   "https://github.com/KisuraOP/polygon2hydro/archive/${P2H_REF}.tar.gz" \
-  "https://github.com/cn-xcpc-tools/Polygon2DOMjudge/archive/${P2D_REF}.tar.gz"
+  "git+https://github.com/cn-xcpc-tools/Polygon2DOMjudge.git@${P2D_REF}" \
+  && apt-get purge -y --auto-remove git
 
 RUN groupadd -g 10001 app \
   && useradd -u 10001 -g app -m app \
@@ -25,6 +29,7 @@ RUN groupadd -g 10001 app \
   && chown app:app /work
 
 COPY entrypoint.sh /usr/local/bin/p2h-entrypoint
+COPY format_bridge.py /opt/format_bridge.py
 COPY p2h_safe.py /opt/p2h_safe.py
 RUN chmod +x /usr/local/bin/p2h-entrypoint
 
