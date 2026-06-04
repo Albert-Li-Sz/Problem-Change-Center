@@ -125,7 +125,10 @@ class Storage:
     def write_metadata(self, metadata: JobMetadata) -> None:
         paths = self.paths_for(metadata.id)
         paths.root.mkdir(parents=True, exist_ok=True)
-        paths.metadata_path.write_text(json.dumps(asdict(metadata), ensure_ascii=False, indent=2), encoding="utf-8")
+        content = json.dumps(asdict(metadata), ensure_ascii=False, indent=2)
+        tmp_path = paths.metadata_path.with_name(f"{paths.metadata_path.name}.tmp")
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(paths.metadata_path)
 
     def append_log(self, job_id: str, text: str) -> None:
         paths = self.paths_for(job_id)

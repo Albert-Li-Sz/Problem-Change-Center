@@ -1,6 +1,11 @@
-# Polygon2Hydro Web UI
+# Polygon Converter Web UI
 
-本项目是 `polygon2hydro` 的本地 Web UI。前端负责上传题包、配置参数、查看日志和下载结果；后端不直接执行转换逻辑，而是为每个任务启动一次性 Docker runner 容器。
+本项目是 Polygon contest 包的本地 Web UI 转换工具。前端负责上传题包、配置参数、查看日志和下载结果；后端不直接执行转换逻辑，而是为每个任务启动一次性 Docker runner 容器。
+
+当前支持两种输出：
+
+- HydroOJ：通过 `polygon2hydro` 转换。
+- DOMjudge/Kattis problem package：通过 `cn-xcpc-tools/Polygon2DOMjudge` 的 `p2d` API 逐题转换。
 
 ## 安全模型
 
@@ -15,7 +20,7 @@
 ```text
 backend/   FastAPI API、任务状态、Docker runner 调度
 frontend/  React + Vite + TypeScript 单页工具
-runner/    p2h-runner Docker 镜像
+runner/    p2h-runner Docker 镜像与转换入口
 ```
 
 ## 准备 runner 镜像
@@ -24,7 +29,12 @@ runner/    p2h-runner Docker 镜像
 docker compose --profile runner build runner
 ```
 
-镜像名为 `p2h-runner`，默认安装 `polygon2hydro` 提交 `93aca21`。runner 基础镜像固定为 `python:3.12-slim-bookworm`，因为当前 `python:3.12-slim` 可能解析到 Debian trixie，而 trixie 不提供 `openjdk-17-jdk-headless`。镜像不安装 `wine`；如果题包依赖 Windows `.exe` 生成器，需要维护单独扩展镜像。
+镜像名为 `p2h-runner`，默认安装：
+
+- `polygon2hydro` 提交 `93aca21`
+- `Polygon2DOMjudge` 提交 `8b0919a2a3e0946faaf677ec5cb2cad65fee7e30`
+
+runner 基础镜像固定为 `python:3.12-slim-bookworm`，因为当前 `python:3.12-slim` 可能解析到 Debian trixie，而 trixie 不提供 `openjdk-17-jdk-headless`。普通镜像不安装 `wine`；如果题包依赖 Windows `.exe` 生成器，请使用 Wine runner。
 
 如果题包的 `doall.sh` 会运行 Windows `.exe`，构建 Wine runner：
 
@@ -77,11 +87,20 @@ npm run dev
 ## API
 
 - `POST /api/inspect`：上传并基础检查 zip，返回 `job_id`。
-- `POST /api/jobs`：启动转换任务。
+- `POST /api/jobs`：启动转换任务，`target` 可为 `hydro` 或 `domjudge`，默认 `hydro`。
 - `GET /api/jobs/{job_id}`：查询任务状态。
 - `GET /api/jobs/{job_id}/logs`：读取纯文本日志。
 - `GET /api/jobs/{job_id}/download`：下载转换结果。
 - `DELETE /api/jobs/{job_id}`：取消运行中任务或清理已完成任务。
+
+DOMjudge 转换说明：
+
+- 上传入口仍是 Polygon contest zip。
+- runner 会安全解压 contest zip，按 `problems/<slug>` 找到题目。
+- 不指定 `only slugs` 时会按 slug 排序逐题转换。
+- 输出目录里会生成 `A-slug.zip`、`B-slug.zip` 这类 DOMjudge/Kattis problem package，后端再统一打包成一个下载文件。
+- `doall.sh` 默认不执行。若启用，仍在同一个受限 Docker runner 内执行。
+- P2D 的 contest 辅助入口目前不能直接批量转换 contest zip，本项目在 runner 里补了一层批量包装逻辑。
 
 ## 测试
 
@@ -104,4 +123,5 @@ runner：
 ```bash
 docker compose --profile runner build runner
 docker run --rm p2h-runner --help
+docker run --rm p2h-runner domjudge-convert --help
 ```

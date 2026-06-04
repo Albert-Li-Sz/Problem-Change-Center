@@ -1,6 +1,6 @@
 import { AlertTriangle, Archive, CheckCircle2, Download, FileArchive, RotateCcw, Shield, Trash2, UploadCloud } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { deleteJob, downloadUrl, getJob, getLogs, inspectZip, JobResponse, startJob } from "./api";
+import { deleteJob, downloadUrl, getJob, getLogs, inspectZip, JobResponse, startJob, TargetFormat } from "./api";
 import { LogViewer } from "./components/LogViewer";
 import { StatusBadge } from "./components/StatusBadge";
 
@@ -24,23 +24,38 @@ export default function App() {
   const [inspect, setInspect] = useState<{ job_id: string; filename: string; size: number; warnings: string[] } | null>(null);
   const [job, setJob] = useState<JobResponse | null>(null);
   const [logs, setLogs] = useState("");
+  const [target, setTarget] = useState<TargetFormat>("hydro");
   const [pidStart, setPidStart] = useState("P1000");
   const [owner, setOwner] = useState(1);
   const [tags, setTags] = useState("");
   const [only, setOnly] = useState("");
   const [runDoall, setRunDoall] = useState(false);
   const [missingEnv, setMissingEnv] = useState<MissingEnv>("warn");
+  const [domjudgeCodeStart, setDomjudgeCodeStart] = useState("A");
+  const [domjudgeColor, setDomjudgeColor] = useState("#000000");
+  const [domjudgeWithStatement, setDomjudgeWithStatement] = useState(false);
+  const [domjudgeWithAttachments, setDomjudgeWithAttachments] = useState(false);
+  const [domjudgeAutoValidator, setDomjudgeAutoValidator] = useState(true);
+  const [domjudgeDefaultValidator, setDomjudgeDefaultValidator] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isRunning = job?.status === "queued" || job?.status === "running";
   const canStart = Boolean(inspect) && !isRunning && !busy;
+  const domjudgeColorPickerValue = /^#[0-9A-Fa-f]{6}$/.test(domjudgeColor) ? domjudgeColor : "#000000";
 
   const validation = useMemo(() => {
-    if (!/^[A-Za-z]+[0-9]+$/.test(pidStart)) return "PID 起始值应类似 P1000。";
-    if (!Number.isInteger(owner) || owner < 1) return "owner 必须是正整数。";
+    if (target === "hydro") {
+      if (!/^[A-Za-z]+[0-9]+$/.test(pidStart)) return "PID 起始值应类似 P1000。";
+      if (!Number.isInteger(owner) || owner < 1) return "owner 必须是正整数。";
+    }
+    if (target === "domjudge") {
+      if (!/^[A-Za-z]+$/.test(domjudgeCodeStart)) return "DOMjudge 短名起始值应类似 A。";
+      if (!/^#[0-9A-Fa-f]{6}$/.test(domjudgeColor)) return "DOMjudge 颜色必须是 #RRGGBB。";
+      if (domjudgeAutoValidator && domjudgeDefaultValidator) return "自动识别 checker 和强制默认 validator 不能同时启用。";
+    }
     return null;
-  }, [owner, pidStart]);
+  }, [domjudgeAutoValidator, domjudgeCodeStart, domjudgeColor, domjudgeDefaultValidator, owner, pidStart, target]);
 
   useEffect(() => {
     if (!job || (job.status !== "queued" && job.status !== "running")) return;
@@ -82,12 +97,19 @@ export default function App() {
     try {
       const nextJob = await startJob({
         job_id: inspect.job_id,
+        target,
         pid_start: pidStart,
         owner,
         tags: splitList(tags),
         only: splitList(only),
         run_doall: runDoall,
-        missing_env: missingEnv
+        missing_env: missingEnv,
+        domjudge_code_start: domjudgeCodeStart,
+        domjudge_color: domjudgeColor,
+        domjudge_with_statement: domjudgeWithStatement,
+        domjudge_with_attachments: domjudgeWithAttachments,
+        domjudge_auto_validator: domjudgeAutoValidator,
+        domjudge_default_validator: domjudgeDefaultValidator
       });
       setJob(nextJob);
     } catch (err) {
@@ -111,6 +133,13 @@ export default function App() {
     setLogs("");
     setError(null);
     setRunDoall(false);
+    setTarget("hydro");
+    setDomjudgeCodeStart("A");
+    setDomjudgeColor("#000000");
+    setDomjudgeWithStatement(false);
+    setDomjudgeWithAttachments(false);
+    setDomjudgeAutoValidator(true);
+    setDomjudgeDefaultValidator(false);
   }
 
   return (
@@ -119,8 +148,8 @@ export default function App() {
         <div className="brand">
           <Archive size={24} aria-hidden="true" />
           <div>
-            <h1>Polygon2Hydro Web UI</h1>
-            <p>在受限 Docker runner 内转换 Polygon contest 包</p>
+            <h1>Polygon Converter Web UI</h1>
+            <p>在受限 Docker runner 内转换 Polygon contest 包为 HydroOJ 或 DOMjudge</p>
           </div>
         </div>
         <div className="security-chip">
@@ -178,31 +207,118 @@ export default function App() {
             <div className="panel-heading">
               <div>
                 <h2>转换参数</h2>
-                <p>这些参数会原样传给容器内的 p2h CLI。</p>
+                <p>{target === "hydro" ? "这些参数会传给容器内的 p2h CLI。" : "这些参数会传给容器内的 P2D 批量转换入口。"}</p>
               </div>
             </div>
 
-            <div className="form-grid">
-              <label>
-                <span>PID 起始值</span>
-                <input value={pidStart} onChange={(event) => setPidStart(event.target.value)} disabled={isRunning} />
-              </label>
-              <label>
-                <span>owner</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={owner}
-                  onChange={(event) => setOwner(Number(event.target.value))}
-                  disabled={isRunning}
-                />
-              </label>
+            <div className="target-switch" aria-label="目标格式">
+              <button
+                type="button"
+                className={target === "hydro" ? "active" : ""}
+                onClick={() => setTarget("hydro")}
+                disabled={isRunning}
+              >
+                HydroOJ
+              </button>
+              <button
+                type="button"
+                className={target === "domjudge" ? "active" : ""}
+                onClick={() => setTarget("domjudge")}
+                disabled={isRunning}
+              >
+                DOMjudge
+              </button>
             </div>
 
-            <label>
-              <span>tags</span>
-              <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="校赛, 2026" disabled={isRunning} />
-            </label>
+            {target === "hydro" && (
+              <>
+                <div className="form-grid">
+                  <label>
+                    <span>PID 起始值</span>
+                    <input value={pidStart} onChange={(event) => setPidStart(event.target.value)} disabled={isRunning} />
+                  </label>
+                  <label>
+                    <span>owner</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={owner}
+                      onChange={(event) => setOwner(Number(event.target.value))}
+                      disabled={isRunning}
+                    />
+                  </label>
+                </div>
+
+                <label>
+                  <span>tags</span>
+                  <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="校赛, 2026" disabled={isRunning} />
+                </label>
+              </>
+            )}
+
+            {target === "domjudge" && (
+              <div className="domjudge-options">
+                <div className="form-grid">
+                  <label>
+                    <span>短名起始值</span>
+                    <input value={domjudgeCodeStart} onChange={(event) => setDomjudgeCodeStart(event.target.value)} disabled={isRunning} />
+                  </label>
+                  <label>
+                    <span>题目颜色</span>
+                    <div className="color-control">
+                      <input
+                        aria-label="选择 DOMjudge 题目颜色"
+                        type="color"
+                        value={domjudgeColorPickerValue}
+                        onChange={(event) => setDomjudgeColor(event.target.value)}
+                        disabled={isRunning}
+                      />
+                      <input value={domjudgeColor} onChange={(event) => setDomjudgeColor(event.target.value)} disabled={isRunning} />
+                    </div>
+                  </label>
+                </div>
+
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={domjudgeAutoValidator}
+                    onChange={(event) => setDomjudgeAutoValidator(event.target.checked)}
+                    disabled={isRunning || domjudgeDefaultValidator}
+                  />
+                  <span>自动识别 Polygon 标准 checker，并替换为 DOMjudge 默认 validator</span>
+                </label>
+
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={domjudgeDefaultValidator}
+                    onChange={(event) => setDomjudgeDefaultValidator(event.target.checked)}
+                    disabled={isRunning || domjudgeAutoValidator}
+                  />
+                  <span>强制使用 DOMjudge 默认 validator</span>
+                </label>
+
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={domjudgeWithStatement}
+                    onChange={(event) => setDomjudgeWithStatement(event.target.checked)}
+                    disabled={isRunning}
+                  />
+                  <span>包含 Polygon 包内 PDF statement</span>
+                </label>
+
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={domjudgeWithAttachments}
+                    onChange={(event) => setDomjudgeWithAttachments(event.target.checked)}
+                    disabled={isRunning}
+                  />
+                  <span>包含 Polygon attachments</span>
+                </label>
+              </div>
+            )}
 
             <label>
               <span>only slugs</span>
@@ -215,7 +331,7 @@ export default function App() {
                 doall.sh 执行策略
               </div>
               <p>安全模式会强制使用 --no-run-doall。启用脚本执行后，脚本仍会被限制在无网络、非 root、限资源的 Docker 容器中。</p>
-              <p>如果题包运行 Windows .exe，请先构建 p2h-runner-wine，并用 P2H_RUNNER_IMAGE=p2h-runner-wine 启动后端。</p>
+              <p>HydroOJ 与 DOMjudge 转换共用同一套 runner 隔离。如果题包运行 Windows .exe，请先构建 p2h-runner-wine，并用 P2H_RUNNER_IMAGE=p2h-runner-wine 启动后端。</p>
               <label className="checkbox-row">
                 <input type="checkbox" checked={runDoall} onChange={(event) => setRunDoall(event.target.checked)} disabled={isRunning} />
                 <span>我信任该 Polygon 包，并允许在隔离容器内执行 doall.sh</span>

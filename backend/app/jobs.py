@@ -17,6 +17,8 @@ from .storage import JobMetadata, Storage, utc_now_iso
 
 
 _PID_RE = re.compile(r"^[A-Za-z]+[0-9]+$")
+_DOMJUDGE_CODE_RE = re.compile(r"^[A-Za-z]+$")
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
 @dataclass
@@ -185,7 +187,9 @@ class JobManager:
             selector.close()
 
     def _validate_request(self, request: JobRequest) -> None:
-        if not _PID_RE.fullmatch(request.pid_start):
+        if request.target not in {"hydro", "domjudge"}:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="target must be hydro or domjudge")
+        if request.target == "hydro" and not _PID_RE.fullmatch(request.pid_start):
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="pid_start must look like P1000")
         if request.owner < 1:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="owner must be positive")
@@ -193,6 +197,24 @@ class JobManager:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="missing_env must be warn or error")
         request.tags[:] = [item.strip() for item in request.tags if item.strip()]
         request.only[:] = [item.strip() for item in request.only if item.strip()]
+        request.domjudge_code_start = request.domjudge_code_start.strip().upper()
+        request.domjudge_color = request.domjudge_color.strip()
+        if request.target == "domjudge":
+            if not _DOMJUDGE_CODE_RE.fullmatch(request.domjudge_code_start):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="domjudge_code_start must contain letters only, for example A",
+                )
+            if not _HEX_COLOR_RE.fullmatch(request.domjudge_color):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="domjudge_color must be in #RRGGBB format",
+                )
+            if request.domjudge_auto_validator and request.domjudge_default_validator:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="domjudge_auto_validator and domjudge_default_validator cannot both be enabled",
+                )
 
 
 def _quote_command(cmd: list[str]) -> str:

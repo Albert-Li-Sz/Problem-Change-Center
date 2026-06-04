@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 JobStatus = Literal["queued", "running", "success", "failed", "cancelled"]
 MissingEnvPolicy = Literal["warn", "error"]
+TargetFormat = Literal["hydro", "domjudge"]
 
 
 class InspectResponse(BaseModel):
@@ -18,12 +19,19 @@ class InspectResponse(BaseModel):
 
 class JobRequest(BaseModel):
     job_id: str
-    pid_start: str
+    target: TargetFormat = "hydro"
+    pid_start: str = "P1000"
     owner: int = Field(default=1, ge=1)
     tags: list[str] = Field(default_factory=list)
     only: list[str] = Field(default_factory=list)
     run_doall: bool = False
     missing_env: MissingEnvPolicy = "warn"
+    domjudge_code_start: str = "A"
+    domjudge_color: str = "#000000"
+    domjudge_with_statement: bool = False
+    domjudge_with_attachments: bool = False
+    domjudge_auto_validator: bool = True
+    domjudge_default_validator: bool = False
 
 
 class JobResponse(BaseModel):

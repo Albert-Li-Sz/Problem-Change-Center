@@ -14,7 +14,18 @@ def container_name(job_id: str) -> str:
 
 
 def build_docker_command(settings: Settings, job_id: str, paths: JobPaths, request: JobRequest) -> list[str]:
-    cmd = [
+    cmd = _base_docker_command(settings, job_id, paths)
+
+    if request.target == "domjudge":
+        _append_domjudge_args(cmd, request)
+    else:
+        _append_hydro_args(cmd, request)
+
+    return cmd
+
+
+def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths) -> list[str]:
+    return [
         settings.docker_bin,
         "run",
         "--rm",
@@ -52,18 +63,25 @@ def build_docker_command(settings: Settings, job_id: str, paths: JobPaths, reque
         "-v",
         f"{paths.output_dir.resolve()}:/output:rw",
         settings.runner_image,
-        "convert",
-        "/input/contest.zip",
-        "-o",
-        "/output",
-        "--pid-start",
-        request.pid_start,
-        "--owner",
-        str(request.owner),
-        "--missing-env",
-        request.missing_env,
-        "--verbose",
     ]
+
+
+def _append_hydro_args(cmd: list[str], request: JobRequest) -> None:
+    cmd.extend(
+        [
+            "convert",
+            "/input/contest.zip",
+            "-o",
+            "/output",
+            "--pid-start",
+            request.pid_start,
+            "--owner",
+            str(request.owner),
+            "--missing-env",
+            request.missing_env,
+            "--verbose",
+        ]
+    )
 
     for tag in request.tags:
         cmd.extend(["--tag", tag])
@@ -72,7 +90,39 @@ def build_docker_command(settings: Settings, job_id: str, paths: JobPaths, reque
         cmd.extend(["--only", slug])
 
     cmd.append("--run-doall" if request.run_doall else "--no-run-doall")
-    return cmd
+
+
+def _append_domjudge_args(cmd: list[str], request: JobRequest) -> None:
+    cmd.extend(
+        [
+            "domjudge-convert",
+            "/input/contest.zip",
+            "-o",
+            "/output",
+            "--code-start",
+            request.domjudge_code_start,
+            "--color",
+            request.domjudge_color,
+            "--missing-env",
+            request.missing_env,
+            "--verbose",
+        ]
+    )
+
+    for slug in request.only:
+        cmd.extend(["--only", slug])
+
+    if request.domjudge_default_validator:
+        cmd.append("--default-validator")
+    elif request.domjudge_auto_validator:
+        cmd.append("--auto-validator")
+
+    if request.domjudge_with_statement:
+        cmd.append("--with-statement")
+    if request.domjudge_with_attachments:
+        cmd.append("--with-attachments")
+
+    cmd.append("--run-doall" if request.run_doall else "--no-run-doall")
 
 
 def stop_container(settings: Settings, job_id: str) -> None:

@@ -6,6 +6,9 @@ import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+from fastapi import HTTPException
+
 from app.config import Settings
 from app.jobs import JobManager
 from app.schemas import JobRequest
@@ -146,3 +149,25 @@ sleep 5
         assert response.status == "failed"
         assert response.error is not None
         assert "timed out" in response.error
+
+
+def test_domjudge_validation_rejects_invalid_color_and_validator_combo() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        settings = _settings(root, root / "fake-docker")
+        manager = JobManager(settings, Storage(settings))
+
+        with pytest.raises(HTTPException) as bad_color:
+            manager.start(JobRequest(job_id="f" * 32, target="domjudge", domjudge_color="black"))
+        assert bad_color.value.status_code == 422
+
+        with pytest.raises(HTTPException) as bad_validator:
+            manager.start(
+                JobRequest(
+                    job_id="f" * 32,
+                    target="domjudge",
+                    domjudge_auto_validator=True,
+                    domjudge_default_validator=True,
+                )
+            )
+        assert bad_validator.value.status_code == 422

@@ -10,7 +10,7 @@ from .schemas import DeleteResponse, InspectResponse, JobRequest, JobResponse
 from .storage import Storage
 
 
-app = FastAPI(title="Polygon2Hydro Web UI", version="0.1.0")
+app = FastAPI(title="Polygon Converter Web UI", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,7 +55,7 @@ def download(job_id: str) -> FileResponse:
     paths = storage.paths_for(job_id)
     if response.status != "success" or not paths.result_path.exists():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Download is not ready")
-    return FileResponse(paths.result_path, filename=f"p2h-{job_id}.zip", media_type="application/zip")
+    return FileResponse(paths.result_path, filename=f"polygon-convert-{job_id}.zip", media_type="application/zip")
 
 
 @app.delete("/api/jobs/{job_id}", response_model=DeleteResponse)

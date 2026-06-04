@@ -1,6 +1,7 @@
 FROM python:3.12-slim-bookworm
 
 ARG P2H_REF=93aca21
+ARG P2D_REF=8b0919a2a3e0946faaf677ec5cb2cad65fee7e30
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
@@ -14,7 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
   && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir "https://github.com/KisuraOP/polygon2hydro/archive/${P2H_REF}.tar.gz"
+RUN pip install --no-cache-dir \
+  "https://github.com/KisuraOP/polygon2hydro/archive/${P2H_REF}.tar.gz" \
+  "https://github.com/cn-xcpc-tools/Polygon2DOMjudge/archive/${P2D_REF}.tar.gz"
 
 RUN groupadd -g 10001 app \
   && useradd -u 10001 -g app -m app \

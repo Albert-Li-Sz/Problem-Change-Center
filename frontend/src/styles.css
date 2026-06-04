@@ -253,10 +253,54 @@ button:disabled {
   gap: 14px;
 }
 
+.target-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #cdd6dd;
+  border-radius: 8px;
+  background: #f4f7f9;
+}
+
+.target-switch button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #536271;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.target-switch button.active {
+  background: #ffffff;
+  color: #146c5c;
+  box-shadow: 0 1px 4px rgba(25, 40, 55, 0.12);
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 120px;
   gap: 12px;
+}
+
+.domjudge-options {
+  display: grid;
+  gap: 12px;
+}
+
+.color-control {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.color-control input[type="color"] {
+  min-height: 38px;
+  padding: 3px;
+  cursor: pointer;
 }
 
 label {

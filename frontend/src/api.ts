@@ -6,6 +6,7 @@ export type InspectResult = {
 };
 
 export type JobStatus = "queued" | "running" | "success" | "failed" | "cancelled";
+export type TargetFormat = "hydro" | "domjudge";
 
 export type JobResponse = {
   id: string;
@@ -20,12 +21,19 @@ export type JobResponse = {
 
 export type JobRequest = {
   job_id: string;
+  target: TargetFormat;
   pid_start: string;
   owner: number;
   tags: string[];
   only: string[];
   run_doall: boolean;
   missing_env: "warn" | "error";
+  domjudge_code_start: string;
+  domjudge_color: string;
+  domjudge_with_statement: boolean;
+  domjudge_with_attachments: boolean;
+  domjudge_auto_validator: boolean;
+  domjudge_default_validator: boolean;
 };
 
 async function parseResponse<T>(response: Response): Promise<T> {
