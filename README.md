@@ -23,7 +23,55 @@ frontend/  React + Vite + TypeScript 单页工具
 runner/    p2h-runner Docker 镜像与转换入口
 ```
 
-## 准备 runner 镜像
+## 一键安装
+
+推荐在 macOS、Linux 或 Windows WSL2 中使用：
+
+```bash
+./install.sh
+```
+
+安装脚本会执行：
+
+- 检查 Python、Node/npm、Docker 和 Docker Compose。
+- 创建 `backend/.venv` 并安装 FastAPI 后端依赖。
+- 使用 `npm ci` 安装前端依赖，并执行一次前端生产构建检查。
+- 构建 `p2h-runner` Docker 镜像。
+- 生成本地 `.env`，用于启动脚本读取端口、runner 镜像和资源限制。
+
+如果题包需要执行 Windows `.exe`，使用 Wine runner：
+
+```bash
+./install.sh --wine
+```
+
+如果 Docker Hub 或 GitHub 下载临时超时，可以先安装 Python/Node 依赖，稍后再构建 runner：
+
+```bash
+./install.sh --skip-runner
+docker compose --profile runner build runner
+```
+
+启动：
+
+```bash
+./scripts/start.sh
+```
+
+访问 [http://127.0.0.1:5173](http://127.0.0.1:5173)。停止时按 `Ctrl+C`。
+
+常用安装选项：
+
+```text
+--wine                 同时构建 p2h-runner-wine，并在新 .env 中使用它
+--skip-runner          跳过 Docker runner 构建
+--skip-backend         跳过后端依赖安装
+--skip-frontend        跳过前端依赖安装
+--no-frontend-build    跳过 npm run build
+--python PATH          指定创建 backend/.venv 的 Python
+```
+
+## 手动准备 runner 镜像
 
 ```bash
 docker compose --profile runner build runner
@@ -50,7 +98,7 @@ export P2H_RUNNER_IMAGE=p2h-runner-wine
 
 `p2h-runner-wine` 使用 `linux/amd64` 并安装 32/64 位 Wine，适合同时包含 `PE32` 和 `PE32+` 可执行文件的 Polygon 包。它明显更大，且在 Apple Silicon 上会通过 Docker 的 amd64 仿真运行，速度比普通 runner 慢。
 
-## 启动后端
+## 手动启动后端
 
 ```bash
 cd backend
@@ -74,7 +122,7 @@ P2H_DOCKER_PIDS_LIMIT=256
 
 后端会为每个 job 创建独立的 `work/` 和 `output/` 目录并挂载到 runner。`/tmp` 仍以 `noexec` tmpfs 挂载；`/work` 使用 job 专属目录，因为真实 Polygon `doall.sh` 可能生成超过 1GB 的测试数据，不能可靠地放在 tmpfs 里。
 
-## 启动前端
+## 手动启动前端
 
 ```bash
 cd frontend
