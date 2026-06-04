@@ -1,0 +1,20 @@
+services:
+  runner:
+    build:
+      context: ./runner
+      args:
+        P2H_REF: 93aca21
+    image: p2h-runner
+    profiles:
+      - runner
+  runner-wine:
+    platform: linux/amd64
+    build:
+      context: ./runner
+      dockerfile: Dockerfile.wine
+      args:
+        P2H_REF: 93aca21
+    image: p2h-runner-wine
+    profiles:
+      - runner
+      - wine
