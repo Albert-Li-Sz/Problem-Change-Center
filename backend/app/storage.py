@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
 
+from .auth import AuthenticatedUser
 from .config import Settings
 from .schemas import InspectResponse, JobStatus
 
@@ -25,6 +26,10 @@ class JobMetadata:
     size: int
     status: JobStatus
     created_at: str
+    user_id: str | None = None
+    run_requested: bool = False
+    quota_reserved: bool = False
+    quota_finalized: bool = False
     started_at: str | None = None
     finished_at: str | None = None
     exit_code: int | None = None
@@ -54,7 +59,7 @@ class Storage:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job")
         return JobPaths(self.jobs_dir / job_id)
 
-    async def save_upload(self, upload: UploadFile) -> InspectResponse:
+    async def save_upload(self, upload: UploadFile, user: AuthenticatedUser) -> InspectResponse:
         filename = Path(upload.filename or "").name
         if not filename.lower().endswith(".zip"):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only .zip files are accepted")
@@ -103,6 +108,7 @@ class Storage:
             size=size,
             status="queued",
             created_at=utc_now_iso(),
+            user_id=user.id,
         )
         self.write_metadata(metadata)
         return InspectResponse(
@@ -122,6 +128,18 @@ class Storage:
         data = json.loads(paths.metadata_path.read_text(encoding="utf-8"))
         return JobMetadata(**data)
 
+    def iter_metadata(self) -> list[JobMetadata]:
+        items: list[JobMetadata] = []
+        if not self.jobs_dir.exists():
+            return items
+        for metadata_path in sorted(self.jobs_dir.glob("*/metadata.json")):
+            try:
+                data = json.loads(metadata_path.read_text(encoding="utf-8"))
+                items.append(JobMetadata(**data))
+            except Exception:
+                continue
+        return items
+
     def write_metadata(self, metadata: JobMetadata) -> None:
         paths = self.paths_for(metadata.id)
         paths.root.mkdir(parents=True, exist_ok=True)
@@ -140,6 +158,28 @@ class Storage:
         if not paths.logs_path.exists():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job")
         return paths.logs_path.read_text(encoding="utf-8", errors="replace")
+
+    def cleanup_runtime_files(self, job_id: str) -> None:
+        paths = self.paths_for(job_id)
+        shutil.rmtree(paths.input_dir, ignore_errors=True)
+        shutil.rmtree(paths.work_dir, ignore_errors=True)
+        shutil.rmtree(paths.output_dir, ignore_errors=True)
+
+    def cleanup_expired_jobs(self) -> None:
+        if self.settings.job_ttl_seconds <= 0:
+            return
+        now = datetime.now(timezone.utc)
+        for metadata in self.iter_metadata():
+            timestamp = metadata.finished_at or metadata.created_at
+            try:
+                parsed = datetime.fromisoformat(timestamp)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                age = now - parsed
+            except Exception:
+                continue
+            if age.total_seconds() > self.settings.job_ttl_seconds:
+                shutil.rmtree(self.paths_for(metadata.id).root, ignore_errors=True)
 
     def delete_job(self, job_id: str) -> None:
         paths = self.paths_for(job_id)

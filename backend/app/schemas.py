@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 JobStatus = Literal["queued", "running", "success", "failed", "cancelled"]
 MissingEnvPolicy = Literal["warn", "error"]
 TargetFormat = Literal["hydro", "domjudge", "hydro_to_domjudge"]
+ApprovalStatus = Literal["pending", "approved", "rejected"]
 
 
 class InspectResponse(BaseModel):
@@ -36,6 +37,7 @@ class JobRequest(BaseModel):
 
 class JobResponse(BaseModel):
     id: str
+    user_id: str | None = None
     status: JobStatus
     created_at: str
     started_at: str | None = None
@@ -49,3 +51,53 @@ class DeleteResponse(BaseModel):
     id: str
     status: JobStatus
     deleted: bool
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+
+class RegisterResponse(BaseModel):
+    email: str
+    approval_status: ApprovalStatus = "pending"
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    is_admin: bool
+    approval_status: ApprovalStatus
+    daily_quota: int
+    daily_used: int
+    daily_pending: int = 0
+    remaining_today: int | None = None
+    reviewed_at: str | None = None
+    reviewed_by: str | None = None
+    created_at: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserResponse
+
+
+class AdminUpdateUserRequest(BaseModel):
+    daily_quota: int | None = Field(default=None, ge=0)
+    daily_used: int | None = Field(default=None, ge=0)
+    is_admin: bool | None = None
+    approval_status: ApprovalStatus | None = None
+
+
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str

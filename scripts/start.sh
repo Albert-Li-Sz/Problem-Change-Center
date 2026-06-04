@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_BACKEND=1
 RUN_FRONTEND=1
+RUN_DATABASE=1
 
 usage() {
   cat <<'EOF'
@@ -14,6 +15,7 @@ Start the local backend and frontend development servers.
 Options:
   --backend-only     Start only FastAPI.
   --frontend-only    Start only Vite.
+  --skip-db          Do not start the PostgreSQL container.
   -h, --help         Show this help.
 EOF
 }
@@ -25,6 +27,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --frontend-only)
       RUN_BACKEND=0
+      RUN_DATABASE=0
+      ;;
+    --skip-db)
+      RUN_DATABASE=0
       ;;
     -h|--help)
       usage
@@ -54,12 +60,37 @@ pids=()
 
 cleanup() {
   local pid
-  for pid in "${pids[@]}"; do
+  for pid in "${pids[@]:-}"; do
     kill "$pid" >/dev/null 2>&1 || true
   done
 }
 
 trap cleanup EXIT INT TERM
+
+compose_command() {
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker compose)
+    return
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker-compose)
+    return
+  fi
+  printf 'error: Docker Compose is required to start PostgreSQL.\n' >&2
+  exit 1
+}
+
+start_database() {
+  command -v docker >/dev/null 2>&1 || {
+    printf 'error: docker is required to start PostgreSQL.\n' >&2
+    exit 1
+  }
+  compose_command
+  (
+    cd "$ROOT_DIR"
+    "${COMPOSE_CMD[@]}" up -d postgres >/dev/null
+  )
+}
 
 start_backend() {
   [[ -x "$ROOT_DIR/backend/.venv/bin/uvicorn" ]] || {
@@ -87,6 +118,10 @@ start_frontend() {
   pids+=("$!")
 }
 
+if [[ "$RUN_DATABASE" -eq 1 ]]; then
+  start_database
+fi
+
 if [[ "$RUN_BACKEND" -eq 1 ]]; then
   start_backend
 fi
@@ -97,6 +132,9 @@ fi
 
 if [[ "$RUN_BACKEND" -eq 1 ]]; then
   printf 'Backend:  http://%s:%s\n' "$P2H_BACKEND_HOST" "$P2H_BACKEND_PORT"
+fi
+if [[ "$RUN_DATABASE" -eq 1 ]]; then
+  printf 'Database: PostgreSQL on %s:%s\n' "${P2H_POSTGRES_HOST:-127.0.0.1}" "${P2H_POSTGRES_PORT:-5432}"
 fi
 if [[ "$RUN_FRONTEND" -eq 1 ]]; then
   printf 'Frontend: http://%s:%s\n' "$P2H_FRONTEND_HOST" "$P2H_FRONTEND_PORT"

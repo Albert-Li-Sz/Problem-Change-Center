@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${P2H_POSTGRES_DB:-p2h}
+      POSTGRES_USER: ${P2H_POSTGRES_USER:-p2h}
+      POSTGRES_PASSWORD: ${P2H_POSTGRES_PASSWORD:-p2h_dev_password}
+    ports:
+      - "${P2H_POSTGRES_HOST:-127.0.0.1}:${P2H_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - p2h-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${P2H_POSTGRES_USER:-p2h} -d ${P2H_POSTGRES_DB:-p2h}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   runner:
     build:
       context: ./runner
@@ -22,3 +38,6 @@ services:
     profiles:
       - runner
       - wine
+
+volumes:
+  p2h-postgres-data:

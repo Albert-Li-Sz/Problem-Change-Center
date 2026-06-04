@@ -10,6 +10,9 @@ BUILD_WINE=0
 INSTALL_BACKEND=1
 INSTALL_FRONTEND=1
 BUILD_FRONTEND=1
+START_DATABASE=1
+MAX_CONCURRENT_JOBS=2
+MAX_CONCURRENT_JOBS_SET=0
 
 log() {
   printf '\033[1;34m==>\033[0m %s\n' "$*"
@@ -36,6 +39,8 @@ Options:
   --skip-backend         Skip backend virtualenv and pip install.
   --skip-frontend        Skip frontend npm install.
   --no-frontend-build    Skip npm run build after installing frontend deps.
+  --skip-db              Do not start the PostgreSQL container during install.
+  --max-containers N     Maximum number of runner containers allowed at once.
   --python PATH          Python interpreter used to create backend/.venv.
   --base-image IMAGE     Docker base image used for runner builds.
   -h, --help             Show this help.
@@ -65,6 +70,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-frontend-build)
       BUILD_FRONTEND=0
+      ;;
+    --skip-db)
+      START_DATABASE=0
+      ;;
+    --max-containers)
+      [[ $# -ge 2 ]] || die "--max-containers requires a number"
+      [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "--max-containers must be a positive integer"
+      MAX_CONCURRENT_JOBS="$2"
+      MAX_CONCURRENT_JOBS_SET=1
+      shift
       ;;
     --python)
       [[ $# -ge 2 ]] || die "--python requires a path"
@@ -186,9 +201,49 @@ EOF
   fi
 }
 
+generate_secret() {
+  "$PYTHON_BIN" - <<'PY'
+import secrets
+
+print(secrets.token_urlsafe(32))
+PY
+}
+
+configure_max_concurrent_jobs() {
+  if [[ "$MAX_CONCURRENT_JOBS_SET" -eq 1 ]]; then
+    return
+  fi
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    return
+  fi
+
+  local answer
+  printf 'Maximum concurrent runner containers [%s]: ' "$MAX_CONCURRENT_JOBS"
+  IFS= read -r answer || answer=""
+  answer="$(printf '%s' "$answer" | tr -d '[:space:]')"
+  if [[ -z "$answer" ]]; then
+    return
+  fi
+  [[ "$answer" =~ ^[1-9][0-9]*$ ]] || die "maximum concurrent containers must be a positive integer"
+  MAX_CONCURRENT_JOBS="$answer"
+}
+
+start_database() {
+  log "Starting PostgreSQL container"
+  require_cmd docker
+  docker info >/dev/null 2>&1 || die "Docker daemon is not running or not reachable"
+  compose_command
+  "${COMPOSE_CMD[@]}" up -d postgres
+}
+
 write_env_file() {
   local env_file="$ROOT_DIR/.env"
   local runner_image="p2h-runner"
+  local auth_secret
+  local bootstrap_admin_email="admin@p2h.local"
+  local bootstrap_admin_password
+  auth_secret="$(generate_secret)"
+  bootstrap_admin_password="$(generate_secret)"
   if [[ "$BUILD_WINE" -eq 1 ]]; then
     runner_image="p2h-runner-wine"
   fi
@@ -196,10 +251,27 @@ write_env_file() {
   if [[ -f "$env_file" ]]; then
     log "Keeping existing .env"
     if [[ "$BUILD_WINE" -eq 1 ]] && ! grep -q '^P2H_RUNNER_IMAGE=p2h-runner-wine$' "$env_file"; then
-      warn "Wine runner was built, but existing .env was not changed. Set P2H_RUNNER_IMAGE=p2h-runner-wine manually if needed."
+      if grep -q '^P2H_RUNNER_IMAGE=p2h-runner$' "$env_file"; then
+        log "Switching existing .env to p2h-runner-wine"
+        sed -i.bak 's/^P2H_RUNNER_IMAGE=p2h-runner$/P2H_RUNNER_IMAGE=p2h-runner-wine/' "$env_file"
+        rm -f "$env_file.bak"
+      elif ! grep -q '^P2H_RUNNER_IMAGE=' "$env_file"; then
+        log "Adding P2H_RUNNER_IMAGE=p2h-runner-wine to existing .env"
+        printf '\nP2H_RUNNER_IMAGE=p2h-runner-wine\n' >>"$env_file"
+      else
+        warn "Wine runner was built, but existing .env uses a custom P2H_RUNNER_IMAGE. Set P2H_RUNNER_IMAGE=p2h-runner-wine manually if needed."
+      fi
     fi
     if [[ "$PYTHON_BASE_IMAGE" != "python:3.12-slim-bookworm" ]] && ! grep -q '^P2H_PYTHON_BASE_IMAGE=' "$env_file"; then
       warn "Custom base image was used for this build, but existing .env was not changed. Add P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE if you want future manual builds to reuse it."
+    fi
+    for required_var in P2H_DATABASE_URL P2H_AUTH_SECRET_KEY P2H_AUTH_TOKEN_TTL_SECONDS P2H_MAX_CONCURRENT_JOBS P2H_DEFAULT_DAILY_QUOTA P2H_JOB_TTL_SECONDS P2H_BOOTSTRAP_ADMIN_EMAIL P2H_BOOTSTRAP_ADMIN_PASSWORD; do
+      if ! grep -q "^${required_var}=" "$env_file"; then
+        warn "Existing .env is missing $required_var. Add it manually or regenerate .env to enable the team-platform features."
+      fi
+    done
+    if grep -q '^P2H_BOOTSTRAP_ADMIN_EMAIL=$' "$env_file" || grep -q '^P2H_BOOTSTRAP_ADMIN_PASSWORD=$' "$env_file"; then
+      warn "Existing .env has an empty bootstrap administrator email or password. Set P2H_BOOTSTRAP_ADMIN_EMAIL and P2H_BOOTSTRAP_ADMIN_PASSWORD to guarantee an administrator account."
     fi
     return
   fi
@@ -209,8 +281,21 @@ write_env_file() {
 P2H_DATA_DIR=~/.p2h-web-ui/backend_data
 P2H_RUNNER_IMAGE=$runner_image
 P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE
-P2H_MAX_UPLOAD_BYTES=536870912
+P2H_MAX_UPLOAD_BYTES=134217728
 P2H_JOB_TIMEOUT_SECONDS=600
+P2H_JOB_TTL_SECONDS=86400
+P2H_MAX_CONCURRENT_JOBS=$MAX_CONCURRENT_JOBS
+P2H_DEFAULT_DAILY_QUOTA=10
+P2H_AUTH_SECRET_KEY=$auth_secret
+P2H_AUTH_TOKEN_TTL_SECONDS=604800
+P2H_BOOTSTRAP_ADMIN_EMAIL=$bootstrap_admin_email
+P2H_BOOTSTRAP_ADMIN_PASSWORD=$bootstrap_admin_password
+P2H_DATABASE_URL=postgresql://p2h:p2h_dev_password@127.0.0.1:5432/p2h
+P2H_POSTGRES_DB=p2h
+P2H_POSTGRES_USER=p2h
+P2H_POSTGRES_PASSWORD=p2h_dev_password
+P2H_POSTGRES_HOST=127.0.0.1
+P2H_POSTGRES_PORT=5432
 P2H_DOCKER_MEMORY=1g
 P2H_DOCKER_CPUS=2
 P2H_DOCKER_PIDS_LIMIT=256
@@ -226,6 +311,7 @@ EOF
 
 main() {
   log "Installing Polygon Converter Web UI"
+  configure_max_concurrent_jobs
 
   if [[ "$INSTALL_BACKEND" -eq 1 ]]; then
     install_backend
@@ -241,9 +327,17 @@ main() {
 
   write_env_file
 
+  if [[ "$START_DATABASE" -eq 1 ]]; then
+    start_database
+  fi
+
   cat <<EOF
 
 Install complete.
+
+Default administrator credentials are stored in .env as:
+  P2H_BOOTSTRAP_ADMIN_EMAIL
+  P2H_BOOTSTRAP_ADMIN_PASSWORD
 
 Start the Web UI:
   ./scripts/start.sh
