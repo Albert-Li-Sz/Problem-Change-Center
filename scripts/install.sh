@@ -113,6 +113,32 @@ compose_command() {
   die "Docker Compose is required. Install Docker Desktop or the docker compose plugin."
 }
 
+check_docker_access() {
+  require_cmd docker
+  if docker info >/dev/null 2>&1; then
+    return
+  fi
+
+  cat >&2 <<'EOF'
+error: Docker daemon is not reachable by the current user.
+
+On Linux, the backend must be able to run `docker run` without an interactive
+sudo prompt. Use one of these setups:
+  1. Add this user to the docker group, then log out and back in:
+       sudo usermod -aG docker "$USER"
+       newgrp docker
+  2. Or run this installer and ./scripts/start.sh from a service/user that can
+     access /var/run/docker.sock.
+
+Verify before retrying:
+  docker info
+
+Do not run only the backend with sudo while the project files remain owned by a
+different user; that commonly creates root-owned uploads, logs, and venv files.
+EOF
+  exit 1
+}
+
 install_backend() {
   log "Installing backend Python dependencies"
   check_python
@@ -145,8 +171,7 @@ install_frontend() {
 
 build_runner() {
   log "Building Docker runner image"
-  require_cmd docker
-  docker info >/dev/null 2>&1 || die "Docker daemon is not running or not reachable"
+  check_docker_access
   compose_command
   export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
 

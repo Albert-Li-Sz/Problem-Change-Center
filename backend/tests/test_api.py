@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import stat
 import zipfile
 from pathlib import Path
 
@@ -47,6 +48,12 @@ def test_inspect_accepts_zip_and_rejects_non_zip(tmp_path: Path) -> None:
     ok = client.post("/api/inspect", files={"file": ("contest.zip", _make_zip(), "application/zip")})
     assert ok.status_code == 200
     assert ok.json()["filename"] == "contest.zip"
+    paths = app.state.storage.paths_for(ok.json()["job_id"])
+    assert stat.S_IMODE(paths.root.stat().st_mode) == 0o755
+    assert stat.S_IMODE(paths.input_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE(paths.upload_path.stat().st_mode) == 0o644
+    assert stat.S_IMODE(paths.work_dir.stat().st_mode) == 0o777
+    assert stat.S_IMODE(paths.output_dir.stat().st_mode) == 0o777
 
     bad_ext = client.post("/api/inspect", files={"file": ("contest.txt", b"x", "text/plain")})
     assert bad_ext.status_code == 400

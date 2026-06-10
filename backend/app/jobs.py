@@ -13,7 +13,7 @@ from fastapi import HTTPException, status
 from .config import Settings
 from .docker_runner import build_docker_command, pack_output, stop_container
 from .schemas import DeleteResponse, JobRequest, JobResponse
-from .storage import JobMetadata, Storage, utc_now_iso
+from .storage import JobMetadata, Storage, prepare_runner_mount_permissions, utc_now_iso
 
 
 _PID_RE = re.compile(r"^[A-Za-z]+[0-9]+$")
@@ -50,8 +50,7 @@ class JobManager:
             shutil.rmtree(paths.output_dir, ignore_errors=True)
             paths.work_dir.mkdir(parents=True, exist_ok=True)
             paths.output_dir.mkdir(parents=True, exist_ok=True)
-            paths.work_dir.chmod(0o777)
-            paths.output_dir.chmod(0o777)
+            prepare_runner_mount_permissions(paths)
             paths.logs_path.write_text("", encoding="utf-8")
             if paths.result_path.exists():
                 paths.result_path.unlink()

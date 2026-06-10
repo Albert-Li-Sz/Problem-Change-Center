@@ -64,6 +64,7 @@ class Storage:
         paths.input_dir.mkdir(parents=True, exist_ok=False)
         paths.work_dir.mkdir(parents=True, exist_ok=True)
         paths.output_dir.mkdir(parents=True, exist_ok=True)
+        prepare_runner_mount_permissions(paths)
         paths.logs_path.write_text("", encoding="utf-8")
 
         size = 0
@@ -93,9 +94,7 @@ class Storage:
             shutil.rmtree(paths.root, ignore_errors=True)
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is not a valid zip")
 
-        # The non-root runner user writes into these host-mounted directories.
-        paths.work_dir.chmod(0o777)
-        paths.output_dir.chmod(0o777)
+        prepare_runner_mount_permissions(paths)
 
         metadata = JobMetadata(
             id=job_id,
@@ -150,3 +149,16 @@ class Storage:
 
 def _is_safe_job_id(job_id: str) -> bool:
     return len(job_id) == 32 and all(ch in "0123456789abcdef" for ch in job_id)
+
+
+def prepare_runner_mount_permissions(paths: JobPaths) -> None:
+    # Docker runs the converter as fixed uid/gid 10001:10001. On Linux bind
+    # mounts keep host ownership, so use mode bits instead of host chown.
+    for directory in (paths.root, paths.input_dir):
+        if directory.exists():
+            directory.chmod(0o755)
+    if paths.upload_path.exists():
+        paths.upload_path.chmod(0o644)
+    for directory in (paths.work_dir, paths.output_dir):
+        if directory.exists():
+            directory.chmod(0o777)

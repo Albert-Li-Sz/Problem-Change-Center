@@ -52,6 +52,28 @@ P2H_FRONTEND_PORT="${P2H_FRONTEND_PORT:-5173}"
 
 pids=()
 
+check_docker_access() {
+  command -v docker >/dev/null 2>&1 || {
+    printf 'error: docker command not found. Install Docker before starting the backend.\n' >&2
+    exit 1
+  }
+  docker info >/dev/null 2>&1 || {
+    cat >&2 <<'EOF'
+error: Docker daemon is not reachable by the current user.
+
+On Linux, add this user to the docker group and start a new login session:
+  sudo usermod -aG docker "$USER"
+  newgrp docker
+
+Then verify:
+  docker info
+
+The backend needs this because each conversion starts a restricted Docker runner.
+EOF
+    exit 1
+  }
+}
+
 cleanup() {
   local pid
   for pid in "${pids[@]}"; do
@@ -88,6 +110,7 @@ start_frontend() {
 }
 
 if [[ "$RUN_BACKEND" -eq 1 ]]; then
+  check_docker_access
   start_backend
 fi
 

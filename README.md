@@ -40,6 +40,24 @@ runner/    p2h-runner Docker 镜像与转换入口
 - 构建 `p2h-runner` Docker 镜像。
 - 生成本地 `.env`，用于启动脚本读取端口、runner 镜像和资源限制。
 
+### Linux Docker 权限
+
+Linux 上后端需要能以当前用户直接执行 `docker run`，因为每个转换任务都会启动一个受限 runner 容器。安装或启动前先确认：
+
+```bash
+docker info
+```
+
+如果提示没有权限访问 Docker daemon，推荐把当前用户加入 `docker` 组，然后重新登录：
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker
+docker info
+```
+
+不要只用 `sudo ./scripts/start.sh` 临时绕过权限；这容易在项目目录、`backend/.venv` 或数据目录里留下 root 拥有的文件，之后普通用户运行会遇到写入失败。生产部署时也可以让后端运行在一个有权访问 `/var/run/docker.sock` 的专用服务用户下。
+
 如果题包需要执行 Windows `.exe`，使用 Wine runner：
 
 ```bash
@@ -135,7 +153,15 @@ P2H_DOCKER_CPUS=2
 P2H_DOCKER_PIDS_LIMIT=1024
 ```
 
-后端会为每个 job 创建独立的 `work/` 和 `output/` 目录并挂载到 runner。默认数据目录放在 `~/.p2h-web-ui/backend_data`，避免 macOS Docker Desktop 无法 bind mount 外接卷或 `/Volumes/...` 路径。`/tmp` 仍以 `noexec` tmpfs 挂载；`/work` 使用 job 专属目录，因为真实 Polygon `doall.sh` 可能生成超过 1GB 的测试数据，不能可靠地放在 tmpfs 里。
+后端会为每个 job 创建独立的 `input/`、`work/` 和 `output/` 目录并挂载到 runner。默认数据目录放在 `~/.p2h-web-ui/backend_data`，避免 macOS Docker Desktop 无法 bind mount 外接卷或 `/Volumes/...` 路径。`/tmp` 仍以 `noexec` tmpfs 挂载；`/work` 使用 job 专属目录，因为真实 Polygon `doall.sh` 可能生成超过 1GB 的测试数据，不能可靠地放在 tmpfs 里。
+
+runner 容器内固定使用非 root 用户 `10001:10001`，并且根文件系统是只读的。Linux bind mount 会保留宿主机文件所有权，所以后端会显式设置：
+
+- job 根目录和 `input/` 为 `0755`，让容器可以遍历并读取上传包。
+- 上传的 `contest.zip` 为 `0644`。
+- `work/` 和 `output/` 为 `0777`，让容器内固定 uid/gid 可以写入生成数据和结果。
+
+如果你把 `P2H_DATA_DIR` 改到自定义路径，确保启动后端的用户能创建和修改该目录；不要把它放在 root-only 目录下。
 
 ## 手动启动前端
 
