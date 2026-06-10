@@ -2,15 +2,34 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import shlex
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from format_bridge import convert_hydro_to_domjudge
-import p2h.convert
-from p2h.polygon_reader import list_problem_slugs_from_names
+
+
+EXECUTABLE_SUFFIXES = {".sh", ".bash", ".exe"}
+
+STRICT_DOALL_BASH_ENV = """\
+read() {
+    if [ "$#" -gt 0 ] && ! { [ "$#" -eq 1 ] && [ "$1" = "-r" ]; }; then
+        builtin read "$@"
+        return "$?"
+    fi
+
+    builtin read "$@"
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        exit "$status"
+    fi
+    return 0
+}
+"""
 
 
 SHELL_WORDS = {
@@ -119,6 +138,76 @@ def collect_tools_from_script(script_path: Path, tools: set[str]) -> None:
         tools.add(first)
 
 
+def normalize_polygon_executable_bits(root: Path) -> int:
+    fixed = 0
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if not _should_be_executable(path):
+            continue
+
+        current_mode = path.stat().st_mode
+        executable_mode = current_mode | 0o111
+        if executable_mode == current_mode:
+            continue
+        path.chmod(executable_mode)
+        fixed += 1
+    return fixed
+
+
+def _should_be_executable(path: Path) -> bool:
+    if path.suffix.lower() in EXECUTABLE_SUFFIXES:
+        return True
+
+    try:
+        with path.open("rb") as handle:
+            return handle.read(2) == b"#!"
+    except OSError:
+        return False
+
+
+def _load_p2h_convert() -> Any:
+    import p2h.convert as p2h_convert
+
+    return p2h_convert
+
+
+def _install_p2h_patches() -> Any:
+    p2h_convert = _load_p2h_convert()
+    p2h_convert._collect_tools_from_script = collect_tools_from_script
+
+    original = getattr(p2h_convert, "_run_doall_for_all", None)
+    if original is not None and not getattr(original, "_p2h_safe_executable_patch", False):
+
+        def run_doall_with_executable_fix(work_root: Path, slugs: list[str], *args: Any, **kwargs: Any) -> Any:
+            work_root = Path(work_root)
+            fixed = normalize_polygon_executable_bits(work_root)
+            if fixed and kwargs.get("verbose"):
+                print(f"fixed executable bit on {fixed} extracted file(s) before doall")
+
+            bash_env = _write_strict_doall_bash_env(work_root)
+            previous_bash_env = os.environ.get("BASH_ENV")
+            os.environ["BASH_ENV"] = str(bash_env)
+            try:
+                return original(work_root, slugs, *args, **kwargs)
+            finally:
+                if previous_bash_env is None:
+                    os.environ.pop("BASH_ENV", None)
+                else:
+                    os.environ["BASH_ENV"] = previous_bash_env
+
+        run_doall_with_executable_fix._p2h_safe_executable_patch = True  # type: ignore[attr-defined]
+        p2h_convert._run_doall_for_all = run_doall_with_executable_fix
+
+    return p2h_convert
+
+
+def _write_strict_doall_bash_env(work_root: Path) -> Path:
+    path = work_root / ".p2h-doall-bash-env"
+    path.write_text(STRICT_DOALL_BASH_ENV, encoding="utf-8")
+    return path
+
+
 def _code_to_index(code: str) -> int:
     if not re.fullmatch(r"[A-Za-z]+", code):
         raise ValueError("code-start must contain letters only, for example A")
@@ -206,6 +295,9 @@ def _convert_domjudge(argv: list[str]) -> int:
     )
 
     from p2d import ConvertOptions, DomjudgeOptions, convert
+    from p2h.polygon_reader import list_problem_slugs_from_names
+
+    p2h_convert = _install_p2h_patches()
 
     args.output.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
@@ -214,7 +306,7 @@ def _convert_domjudge(argv: list[str]) -> int:
     with tempfile.TemporaryDirectory(prefix="p2h-domjudge-contest-") as td:
         work_root = Path(td)
         try:
-            names = p2h.convert._safe_extract_contest_zip(args.contest_zip, work_root)
+            names = p2h_convert._safe_extract_contest_zip(args.contest_zip, work_root)
         except Exception as exc:
             print(f"invalid contest zip: {exc}", file=sys.stderr)
             return 1
@@ -242,7 +334,7 @@ def _convert_domjudge(argv: list[str]) -> int:
         )
 
         if args.run_doall:
-            missing_tools = p2h.convert._detect_missing_doall_tools(work_root, slugs)
+            missing_tools = p2h_convert._detect_missing_doall_tools(work_root, slugs)
             if missing_tools:
                 missing_text = ", ".join(missing_tools)
                 msg = (
@@ -255,7 +347,7 @@ def _convert_domjudge(argv: list[str]) -> int:
                 print(f"warning: {msg}", file=sys.stderr)
 
             try:
-                p2h.convert._run_doall_for_all(work_root, slugs, verbose=args.verbose)
+                p2h_convert._run_doall_for_all(work_root, slugs, verbose=args.verbose)
             except Exception as exc:
                 print(f"doall failed: {exc}", file=sys.stderr)
                 return 1
@@ -322,12 +414,12 @@ def _convert_hydro_to_domjudge(argv: list[str]) -> int:
 
 
 def main() -> int:
-    p2h.convert._collect_tools_from_script = collect_tools_from_script
-
     if len(sys.argv) > 1 and sys.argv[1] == "domjudge-convert":
         return _convert_domjudge(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "hydro-to-domjudge":
         return _convert_hydro_to_domjudge(sys.argv[2:])
+
+    _install_p2h_patches()
 
     from p2h.cli import main as cli_main
 

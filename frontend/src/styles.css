@@ -464,6 +464,39 @@ select:focus {
   min-height: 430px;
 }
 
+.log-panel .panel-heading {
+  align-items: center;
+}
+
+.log-title,
+.log-controls {
+  display: flex;
+  align-items: center;
+}
+
+.log-title {
+  gap: 8px;
+}
+
+.log-title svg {
+  color: #607080;
+}
+
+.log-controls {
+  gap: 10px;
+  color: #66717d;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.log-line-select {
+  width: auto;
+  min-width: 126px;
+  min-height: 34px;
+  padding: 0 9px;
+}
+
 .log-viewer {
   height: 430px;
   margin: 0;

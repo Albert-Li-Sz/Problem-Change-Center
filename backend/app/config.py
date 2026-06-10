@@ -40,7 +40,7 @@ class Settings:
             job_ttl_seconds=_int_env("P2H_JOB_TTL_SECONDS", 24 * 60 * 60),
             docker_memory=os.getenv("P2H_DOCKER_MEMORY", "1g"),
             docker_cpus=os.getenv("P2H_DOCKER_CPUS", "2"),
-            docker_pids_limit=_int_env("P2H_DOCKER_PIDS_LIMIT", 256),
+            docker_pids_limit=_int_env("P2H_DOCKER_PIDS_LIMIT", 1024),
             docker_tmp_size=os.getenv("P2H_DOCKER_TMP_SIZE", "512m"),
             docker_work_size=os.getenv("P2H_DOCKER_WORK_SIZE", "1g"),
         )

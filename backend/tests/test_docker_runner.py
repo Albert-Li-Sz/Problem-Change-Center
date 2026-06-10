@@ -2,7 +2,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.config import Settings
-from app.docker_runner import build_docker_command
+import zipfile
+
+from app.docker_runner import build_docker_command, pack_output
 from app.schemas import JobRequest
 from app.storage import JobPaths
 
@@ -17,7 +19,7 @@ def _settings(root: Path) -> Settings:
         job_ttl_seconds=3600,
         docker_memory="1g",
         docker_cpus="2",
-        docker_pids_limit=256,
+        docker_pids_limit=1024,
         docker_tmp_size="512m",
         docker_work_size="1g",
     )
@@ -216,3 +218,35 @@ def test_hydro_to_domjudge_uses_normal_runner_when_wine_is_configured() -> None:
     assert "p2h-runner" in cmd
     assert "p2h-runner-wine" not in cmd
     assert "hydro-to-domjudge" in cmd
+
+
+def test_pack_output_merges_hydro_problem_packages() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        output_dir = root / "output"
+        output_dir.mkdir()
+        result_path = root / "result.zip"
+
+        with zipfile.ZipFile(output_dir / "a.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("P1000/problem.yaml", "title: A\n")
+        with zipfile.ZipFile(output_dir / "b.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("P1001/problem.yaml", "title: B\n")
+
+        pack_output(output_dir, result_path, target="hydro")
+
+        with zipfile.ZipFile(result_path) as archive:
+            assert archive.namelist() == ["P1000/problem.yaml", "P1001/problem.yaml"]
+
+
+def test_pack_output_keeps_non_hydro_packages_nested() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        output_dir = root / "output"
+        output_dir.mkdir()
+        result_path = root / "result.zip"
+        (output_dir / "a.zip").write_bytes(b"not a nested package")
+
+        pack_output(output_dir, result_path, target="domjudge")
+
+        with zipfile.ZipFile(result_path) as archive:
+            assert archive.namelist() == ["a.zip"]

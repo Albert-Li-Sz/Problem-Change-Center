@@ -134,7 +134,7 @@ class JobManager:
             metadata.exit_code = exit_code
             metadata.finished_at = utc_now_iso()
             if exit_code == 0:
-                pack_output(paths.output_dir, paths.result_path)
+                pack_output(paths.output_dir, paths.result_path, target=request.target)
                 metadata.status = "success"
             else:
                 metadata.status = "failed"

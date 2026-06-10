@@ -132,7 +132,7 @@ P2H_MAX_UPLOAD_BYTES=536870912
 P2H_JOB_TIMEOUT_SECONDS=600
 P2H_DOCKER_MEMORY=1g
 P2H_DOCKER_CPUS=2
-P2H_DOCKER_PIDS_LIMIT=256
+P2H_DOCKER_PIDS_LIMIT=1024
 ```
 
 后端会为每个 job 创建独立的 `work/` 和 `output/` 目录并挂载到 runner。默认数据目录放在 `~/.p2h-web-ui/backend_data`，避免 macOS Docker Desktop 无法 bind mount 外接卷或 `/Volumes/...` 路径。`/tmp` 仍以 `noexec` tmpfs 挂载；`/work` 使用 job 专属目录，因为真实 Polygon `doall.sh` 可能生成超过 1GB 的测试数据，不能可靠地放在 tmpfs 里。

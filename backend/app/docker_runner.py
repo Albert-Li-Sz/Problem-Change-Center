@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .config import Settings
 from .schemas import JobRequest
@@ -189,10 +189,48 @@ def stop_container(settings: Settings, job_id: str) -> None:
     )
 
 
-def pack_output(output_dir: Path, result_path: Path) -> None:
+def pack_output(output_dir: Path, result_path: Path, *, target: str = "archive") -> None:
     if result_path.exists():
         result_path.unlink()
+    if target == "hydro":
+        hydro_packages = sorted(path for path in output_dir.iterdir() if path.is_file() and path.suffix.lower() == ".zip")
+        if hydro_packages:
+            _pack_hydro_packages(hydro_packages, result_path)
+            return
+
+    _pack_directory(output_dir, result_path)
+
+
+def _pack_directory(output_dir: Path, result_path: Path) -> None:
     with zipfile.ZipFile(result_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(output_dir.rglob("*")):
             if path.is_file():
                 archive.write(path, path.relative_to(output_dir).as_posix())
+
+
+def _pack_hydro_packages(package_paths: list[Path], result_path: Path) -> None:
+    seen: set[str] = set()
+    with zipfile.ZipFile(result_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for package_path in package_paths:
+            with zipfile.ZipFile(package_path) as package:
+                for info in package.infolist():
+                    if info.is_dir():
+                        continue
+                    name = _safe_zip_member_name(info.filename)
+                    if name in seen:
+                        raise ValueError(f"duplicate Hydro package member while merging: {name}")
+                    seen.add(name)
+
+                    target_info = zipfile.ZipInfo(filename=name, date_time=info.date_time)
+                    target_info.comment = info.comment
+                    target_info.external_attr = info.external_attr
+                    target_info.compress_type = zipfile.ZIP_DEFLATED
+                    archive.writestr(target_info, package.read(info))
+
+
+def _safe_zip_member_name(name: str) -> str:
+    normalized = name.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or ".." in path.parts or not normalized or normalized.endswith("/"):
+        raise ValueError(f"unsafe zip member path: {name}")
+    return normalized

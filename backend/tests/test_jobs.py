@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -25,7 +26,7 @@ def _settings(root: Path, docker_bin: Path, timeout: int = 5) -> Settings:
         job_ttl_seconds=3600,
         docker_memory="1g",
         docker_cpus="2",
-        docker_pids_limit=256,
+        docker_pids_limit=1024,
         docker_tmp_size="512m",
         docker_work_size="1g",
     )
@@ -59,16 +60,23 @@ def test_job_success_creates_download_zip_and_logs_output() -> None:
         fake_docker = root / "fake-docker"
         _write_fake_docker(
             fake_docker,
-            """#!/usr/bin/env bash
+            f"""#!/usr/bin/env bash
 set -e
-if [ "${1:-}" = "rm" ]; then exit 0; fi
+if [ "${{1:-}}" = "rm" ]; then exit 0; fi
 echo "fake docker started"
 for arg in "$@"; do
   case "$arg" in
     *:/output:rw)
-      host="${arg%%:/output:rw}"
+      host="${{arg%%:/output:rw}}"
       mkdir -p "$host"
-      printf 'ok' > "$host/a.zip"
+      "{sys.executable}" - "$host/a.zip" <<'PY'
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1], "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    archive.writestr("P1000/problem.yaml", "title: A\\n")
+    archive.writestr("P1000/testdata/1.in", "1\\n")
+PY
       ;;
   esac
 done
@@ -92,7 +100,7 @@ done
         assert response.download_ready is True
         assert "fake docker started" in storage.read_logs(job_id)
         with zipfile.ZipFile(paths.result_path) as archive:
-            assert archive.namelist() == ["a.zip"]
+            assert archive.namelist() == ["P1000/problem.yaml", "P1000/testdata/1.in"]
 
 
 def test_job_failure_records_exit_code_and_error() -> None:

@@ -29,7 +29,7 @@ def test_inspect_accepts_zip_and_rejects_non_zip(tmp_path: Path) -> None:
         job_ttl_seconds=3600,
         docker_memory="1g",
         docker_cpus="2",
-        docker_pids_limit=256,
+        docker_pids_limit=1024,
         docker_tmp_size="512m",
         docker_work_size="1g",
     )
