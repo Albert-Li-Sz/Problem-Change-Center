@@ -167,6 +167,8 @@ export P2H_RUNNER_IMAGE=p2h-runner-wine
 
 Wine runner 会把 Wine 的 `HOME`、`TMPDIR` 和 `WINEPREFIX` 放到容器内独立 tmpfs，而不是 `/work`。Linux bind mount 的 `/work` 可能不是容器内 uid `10001` 拥有的目录，Wine 会拒绝在那里创建配置目录并报 `'/work' is not owned by you`。Wine prefix 初始化可能占用 1GB 以上；如果 tmpfs 过小，可能继续报 `could not load kernel32.dll` 或 `No space left on device`，可调大 `P2H_DOCKER_WINE_HOME_SIZE`。
 
+Wine runner 的 `/home/app` tmpfs 会显式开启 `exec`，用于执行 Polygon `doall.sh` 内部的 `scripts/*.sh`。如果这里保持 Docker 默认 `noexec`，即使脚本已经 chmod 为可执行，也会报 `scripts/xxx.sh: Permission denied`。
+
 ## 手动启动后端
 
 ```bash

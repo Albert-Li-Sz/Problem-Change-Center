@@ -40,7 +40,7 @@ def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths, runne
         ]
         extra_tmpfs = [
             "--tmpfs",
-            f"/home/app:rw,nosuid,nodev,size={settings.docker_wine_home_size},uid=10001,gid=10001,mode=700",
+            f"/home/app:rw,exec,nosuid,nodev,size={settings.docker_wine_home_size},uid=10001,gid=10001,mode=700",
         ]
 
     cmd = [

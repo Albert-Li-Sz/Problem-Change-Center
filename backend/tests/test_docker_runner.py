@@ -85,7 +85,7 @@ def test_wine_runner_requests_amd64_platform() -> None:
 
     assert cmd[:5] == ["docker", "run", "--platform", "linux/amd64", "--rm"]
     assert cmd[cmd.index("--pids-limit") + 1] == "4096"
-    assert "/home/app:rw,nosuid,nodev,size=4g,uid=10001,gid=10001,mode=700" in cmd
+    assert "/home/app:rw,exec,nosuid,nodev,size=4g,uid=10001,gid=10001,mode=700" in cmd
     assert "TMPDIR=/home/app" in cmd
     assert "HOME=/home/app" in cmd
     assert "WINEPREFIX=/home/app/.wine" in cmd
