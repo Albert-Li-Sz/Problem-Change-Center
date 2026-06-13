@@ -26,7 +26,7 @@ runner/    p2h-runner Docker 镜像与转换入口
 
 ## 一键安装
 
-推荐在 macOS、Linux 或 Windows WSL2 中使用：
+推荐在 macOS、Linux 或 Windows WSL2 中使用。安装脚本使用 Bash，macOS 自带的 `/bin/bash` 和常见 Linux 发行版的 Bash 都可运行。
 
 ```bash
 ./install.sh
@@ -39,6 +39,16 @@ runner/    p2h-runner Docker 镜像与转换入口
 - 使用 `npm ci` 安装前端依赖，并执行一次前端生产构建检查。
 - 构建 `p2h-runner` Docker 镜像。
 - 生成本地 `.env`，用于启动脚本读取端口、runner 镜像和资源限制。
+
+### macOS Docker Desktop
+
+macOS 上请先安装并启动 Docker Desktop，再确认终端可以访问 Docker：
+
+```bash
+docker info
+```
+
+不要用 `sudo ./install.sh` 或 `sudo ./scripts/start.sh` 启动本项目；Docker Desktop 应该能从普通用户 shell 访问。Apple Silicon 上构建或运行 Wine runner 时会使用 `linux/amd64` 仿真，速度会慢一些。
 
 ### Linux Docker 权限
 
@@ -130,6 +140,8 @@ export P2H_RUNNER_IMAGE=p2h-runner-wine
 
 `p2h-runner-wine` 使用 `linux/amd64` 并安装 32/64 位 Wine，适合同时包含 `PE32` 和 `PE32+` 可执行文件的 Polygon 包。它明显更大，且在 Apple Silicon 上会通过 Docker 的 amd64 仿真运行，速度比普通 runner 慢。
 
+如果日志里出现 `qemu: qemu_thread_create: Resource temporarily unavailable`，通常是 Apple Silicon 上 Wine/QEMU 创建线程时触达容器 pid 限制。后端会对 Wine runner 默认使用 `P2H_DOCKER_WINE_PIDS_LIMIT=4096`；如果题包测试很多或 Wine 进程仍然失败，可以继续调高这个值，或临时设为 `-1` 取消 Docker 的 pid 限制。
+
 ## 手动启动后端
 
 ```bash
@@ -151,6 +163,7 @@ P2H_JOB_TIMEOUT_SECONDS=600
 P2H_DOCKER_MEMORY=1g
 P2H_DOCKER_CPUS=2
 P2H_DOCKER_PIDS_LIMIT=1024
+P2H_DOCKER_WINE_PIDS_LIMIT=4096
 ```
 
 后端会为每个 job 创建独立的 `input/`、`work/` 和 `output/` 目录并挂载到 runner。默认数据目录放在 `~/.p2h-web-ui/backend_data`，避免 macOS Docker Desktop 无法 bind mount 外接卷或 `/Volumes/...` 路径。`/tmp` 仍以 `noexec` tmpfs 挂载；`/work` 使用 job 专属目录，因为真实 Polygon `doall.sh` 可能生成超过 1GB 的测试数据，不能可靠地放在 tmpfs 里。

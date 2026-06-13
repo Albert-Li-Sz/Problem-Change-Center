@@ -20,6 +20,7 @@ def _settings(root: Path) -> Settings:
         docker_memory="1g",
         docker_cpus="2",
         docker_pids_limit=1024,
+        docker_wine_pids_limit=4096,
         docker_tmp_size="512m",
         docker_work_size="1g",
     )
@@ -37,6 +38,7 @@ def _settings_with_image(root: Path, image: str) -> Settings:
         docker_memory=settings.docker_memory,
         docker_cpus=settings.docker_cpus,
         docker_pids_limit=settings.docker_pids_limit,
+        docker_wine_pids_limit=settings.docker_wine_pids_limit,
         docker_tmp_size=settings.docker_tmp_size,
         docker_work_size=settings.docker_work_size,
     )
@@ -80,6 +82,7 @@ def test_wine_runner_requests_amd64_platform() -> None:
         cmd = build_docker_command(_settings_with_image(root, "p2h-runner-wine"), request.job_id, paths, request)
 
     assert cmd[:5] == ["docker", "run", "--platform", "linux/amd64", "--rm"]
+    assert cmd[cmd.index("--pids-limit") + 1] == "4096"
 
 
 def test_docker_command_allows_explicit_doall_and_passes_lists() -> None:

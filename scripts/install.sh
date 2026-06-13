@@ -4,6 +4,8 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 PYTHON_BASE_IMAGE="${P2H_PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
+ARCH_NAME="$(uname -m 2>/dev/null || printf 'unknown')"
 
 BUILD_RUNNER=1
 BUILD_WINE=0
@@ -22,6 +24,14 @@ warn() {
 die() {
   printf '\033[1;31merror:\033[0m %s\n' "$*" >&2
   exit 1
+}
+
+is_macos() {
+  [[ "$OS_NAME" == "Darwin" ]]
+}
+
+is_linux() {
+  [[ "$OS_NAME" == "Linux" ]]
 }
 
 usage() {
@@ -88,7 +98,35 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+  if command -v "$1" >/dev/null 2>&1; then
+    return
+  fi
+
+  case "$1" in
+    docker)
+      if is_macos; then
+        die "missing required command: docker. Install Docker Desktop for Mac and start it."
+      elif is_linux; then
+        die "missing required command: docker. Install Docker Engine and the Docker Compose plugin."
+      fi
+      ;;
+    npm)
+      if is_macos; then
+        die "missing required command: npm. Install Node.js, for example with Homebrew: brew install node"
+      elif is_linux; then
+        die "missing required command: npm. Install Node.js/npm with your distribution package manager or NodeSource."
+      fi
+      ;;
+    "$PYTHON_BIN")
+      if is_macos; then
+        die "missing required command: $1. Install Python 3.10 or newer, for example with Homebrew: brew install python"
+      elif is_linux; then
+        die "missing required command: $1. Install Python 3.10+ and venv support, for example python3 python3-venv."
+      fi
+      ;;
+  esac
+
+  die "missing required command: $1"
 }
 
 check_python() {
@@ -110,16 +148,33 @@ compose_command() {
     COMPOSE_CMD=(docker-compose)
     return
   fi
+
+  if is_macos; then
+    die "Docker Compose is required. Install or update Docker Desktop for Mac."
+  elif is_linux; then
+    die "Docker Compose is required. Install the docker compose plugin or docker-compose."
+  fi
   die "Docker Compose is required. Install Docker Desktop or the docker compose plugin."
 }
 
-check_docker_access() {
-  require_cmd docker
-  if docker info >/dev/null 2>&1; then
+print_docker_unreachable_help() {
+  if is_macos; then
+    cat >&2 <<'EOF'
+error: Docker daemon is not reachable by the current user.
+
+On macOS:
+  1. Start Docker Desktop and wait until it finishes starting.
+  2. Verify from Terminal:
+       docker info
+
+Do not run this project with sudo on macOS; Docker Desktop should be reachable
+from the normal user shell.
+EOF
     return
   fi
 
-  cat >&2 <<'EOF'
+  if is_linux; then
+    cat >&2 <<'EOF'
 error: Docker daemon is not reachable by the current user.
 
 On Linux, the backend must be able to run `docker run` without an interactive
@@ -136,6 +191,24 @@ Verify before retrying:
 Do not run only the backend with sudo while the project files remain owned by a
 different user; that commonly creates root-owned uploads, logs, and venv files.
 EOF
+    return
+  fi
+
+  cat >&2 <<'EOF'
+error: Docker daemon is not reachable by the current user.
+
+Verify Docker is installed, running, and reachable:
+  docker info
+EOF
+}
+
+check_docker_access() {
+  require_cmd docker
+  if docker info >/dev/null 2>&1; then
+    return
+  fi
+
+  print_docker_unreachable_help
   exit 1
 }
 
@@ -144,7 +217,12 @@ install_backend() {
   check_python
 
   if [[ ! -d "$ROOT_DIR/backend/.venv" ]]; then
-    "$PYTHON_BIN" -m venv "$ROOT_DIR/backend/.venv"
+    if ! "$PYTHON_BIN" -m venv "$ROOT_DIR/backend/.venv"; then
+      if is_linux; then
+        die "failed to create backend/.venv. On Debian/Ubuntu, install python3-venv and retry."
+      fi
+      die "failed to create backend/.venv"
+    fi
   fi
 
   "$ROOT_DIR/backend/.venv/bin/python" -m pip install --upgrade pip
@@ -174,6 +252,10 @@ build_runner() {
   check_docker_access
   compose_command
   export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
+
+  if [[ "$BUILD_WINE" -eq 1 && "$ARCH_NAME" != "x86_64" && "$ARCH_NAME" != "amd64" ]]; then
+    warn "Wine runner is linux/amd64; on $OS_NAME/$ARCH_NAME Docker must provide amd64 emulation, and builds/runs will be slower."
+  fi
 
   if ! "${COMPOSE_CMD[@]}" --profile runner build runner; then
     cat >&2 <<'EOF'
@@ -223,6 +305,9 @@ write_env_file() {
     if [[ "$BUILD_WINE" -eq 1 ]] && ! grep -q '^P2H_RUNNER_IMAGE=p2h-runner-wine$' "$env_file"; then
       warn "Wine runner was built, but existing .env was not changed. Set P2H_RUNNER_IMAGE=p2h-runner-wine manually if needed."
     fi
+    if [[ "$BUILD_WINE" -eq 1 ]] && ! grep -q '^P2H_DOCKER_WINE_PIDS_LIMIT=' "$env_file"; then
+      warn "Wine runner works better with P2H_DOCKER_WINE_PIDS_LIMIT=4096, especially on macOS/Apple Silicon."
+    fi
     if [[ "$PYTHON_BASE_IMAGE" != "python:3.12-slim-bookworm" ]] && ! grep -q '^P2H_PYTHON_BASE_IMAGE=' "$env_file"; then
       warn "Custom base image was used for this build, but existing .env was not changed. Add P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE if you want future manual builds to reuse it."
     fi
@@ -239,6 +324,7 @@ P2H_JOB_TIMEOUT_SECONDS=600
 P2H_DOCKER_MEMORY=1g
 P2H_DOCKER_CPUS=2
 P2H_DOCKER_PIDS_LIMIT=1024
+P2H_DOCKER_WINE_PIDS_LIMIT=4096
 P2H_DOCKER_TMP_SIZE=512m
 P2H_DOCKER_WORK_SIZE=1g
 

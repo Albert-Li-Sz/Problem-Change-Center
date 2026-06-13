@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
 RUN_BACKEND=1
 RUN_FRONTEND=1
 
@@ -52,12 +53,40 @@ P2H_FRONTEND_PORT="${P2H_FRONTEND_PORT:-5173}"
 
 pids=()
 
-check_docker_access() {
-  command -v docker >/dev/null 2>&1 || {
+is_macos() {
+  [[ "$OS_NAME" == "Darwin" ]]
+}
+
+is_linux() {
+  [[ "$OS_NAME" == "Linux" ]]
+}
+
+print_missing_docker_help() {
+  if is_macos; then
+    printf 'error: docker command not found. Install Docker Desktop for Mac and start it.\n' >&2
+  elif is_linux; then
+    printf 'error: docker command not found. Install Docker Engine and the Docker Compose plugin.\n' >&2
+  else
     printf 'error: docker command not found. Install Docker before starting the backend.\n' >&2
-    exit 1
-  }
-  docker info >/dev/null 2>&1 || {
+  fi
+}
+
+print_docker_unreachable_help() {
+  if is_macos; then
+    cat >&2 <<'EOF'
+error: Docker daemon is not reachable by the current user.
+
+On macOS:
+  1. Start Docker Desktop and wait until it finishes starting.
+  2. Verify from Terminal:
+       docker info
+
+The backend needs Docker because each conversion starts a restricted runner.
+EOF
+    return
+  fi
+
+  if is_linux; then
     cat >&2 <<'EOF'
 error: Docker daemon is not reachable by the current user.
 
@@ -70,8 +99,27 @@ Then verify:
 
 The backend needs this because each conversion starts a restricted Docker runner.
 EOF
+    return
+  fi
+
+  cat >&2 <<'EOF'
+error: Docker daemon is not reachable by the current user.
+
+Verify Docker is installed, running, and reachable:
+  docker info
+EOF
+}
+
+check_docker_access() {
+  if ! command -v docker >/dev/null 2>&1; then
+    print_missing_docker_help
     exit 1
-  }
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    print_docker_unreachable_help
+    exit 1
+  fi
 }
 
 cleanup() {

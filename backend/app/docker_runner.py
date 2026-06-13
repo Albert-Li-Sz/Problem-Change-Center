@@ -48,7 +48,7 @@ def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths, runne
         "--security-opt",
         "no-new-privileges:true",
         "--pids-limit",
-        str(settings.docker_pids_limit),
+        str(_effective_pids_limit(settings, runner_image)),
         "--memory",
         settings.docker_memory,
         "--cpus",
@@ -100,6 +100,12 @@ def _split_image_name(image: str) -> tuple[str, str, str]:
 def _runner_requires_amd64(image: str) -> bool:
     image_name = image.rsplit("/", 1)[-1].split(":", 1)[0]
     return image_name.endswith("-wine")
+
+
+def _effective_pids_limit(settings: Settings, runner_image: str) -> int:
+    if _runner_requires_amd64(runner_image) and settings.docker_wine_pids_limit is not None:
+        return settings.docker_wine_pids_limit
+    return settings.docker_pids_limit
 
 
 def _append_hydro_args(cmd: list[str], request: JobRequest) -> None:
