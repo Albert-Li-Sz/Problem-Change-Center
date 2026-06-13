@@ -28,6 +28,21 @@ def build_docker_command(settings: Settings, job_id: str, paths: JobPaths, reque
 
 
 def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths, runner_image: str) -> list[str]:
+    is_wine_runner = _runner_requires_amd64(runner_image)
+    env_vars = ["TMPDIR=/work", "XDG_CACHE_HOME=/work/.cache"]
+    extra_tmpfs: list[str] = []
+    if is_wine_runner:
+        env_vars = [
+            "TMPDIR=/work",
+            "HOME=/home/app",
+            "WINEPREFIX=/home/app/.wine",
+            "XDG_CACHE_HOME=/home/app/.cache",
+        ]
+        extra_tmpfs = [
+            "--tmpfs",
+            "/home/app:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=700",
+        ]
+
     cmd = [
         settings.docker_bin,
         "run",
@@ -55,10 +70,8 @@ def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths, runne
         settings.docker_cpus,
         "--tmpfs",
         f"/tmp:rw,noexec,nosuid,nodev,size={settings.docker_tmp_size}",
-        "-e",
-        "TMPDIR=/work",
-        "-e",
-        "XDG_CACHE_HOME=/work/.cache",
+        *extra_tmpfs,
+        *[part for env_var in env_vars for part in ("-e", env_var)],
         "-v",
         f"{paths.input_dir.resolve()}:/input:ro",
         "-v",
@@ -68,7 +81,7 @@ def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths, runne
         runner_image,
     ]
 
-    if _runner_requires_amd64(runner_image):
+    if is_wine_runner:
         cmd[2:2] = ["--platform", "linux/amd64"]
 
     return cmd

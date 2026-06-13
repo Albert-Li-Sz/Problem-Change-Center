@@ -165,6 +165,8 @@ export P2H_RUNNER_IMAGE=p2h-runner-wine
 
 如果日志里出现 `qemu: qemu_thread_create: Resource temporarily unavailable`，通常是 Apple Silicon 上 Wine/QEMU 创建线程时触达容器 pid 限制。后端会对 Wine runner 默认使用 `P2H_DOCKER_WINE_PIDS_LIMIT=4096`；如果题包测试很多或 Wine 进程仍然失败，可以继续调高这个值，或临时设为 `-1` 取消 Docker 的 pid 限制。
 
+Wine runner 会把 Wine 的 `HOME` 和 `WINEPREFIX` 放到容器内独立 tmpfs，而不是 `/work`。Linux bind mount 的 `/work` 可能不是容器内 uid `10001` 拥有的目录，Wine 会拒绝在那里创建配置目录并报 `'/work' is not owned by you`。
+
 ## 手动启动后端
 
 ```bash
