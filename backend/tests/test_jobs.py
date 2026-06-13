@@ -28,6 +28,7 @@ def _settings(root: Path, docker_bin: Path, timeout: int = 5) -> Settings:
         docker_cpus="2",
         docker_pids_limit=1024,
         docker_wine_pids_limit=4096,
+        docker_wine_home_size="4g",
         docker_tmp_size="512m",
         docker_work_size="1g",
     )

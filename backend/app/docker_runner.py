@@ -33,14 +33,14 @@ def _base_docker_command(settings: Settings, job_id: str, paths: JobPaths, runne
     extra_tmpfs: list[str] = []
     if is_wine_runner:
         env_vars = [
-            "TMPDIR=/work",
+            "TMPDIR=/home/app",
             "HOME=/home/app",
             "WINEPREFIX=/home/app/.wine",
             "XDG_CACHE_HOME=/home/app/.cache",
         ]
         extra_tmpfs = [
             "--tmpfs",
-            "/home/app:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=700",
+            f"/home/app:rw,nosuid,nodev,size={settings.docker_wine_home_size},uid=10001,gid=10001,mode=700",
         ]
 
     cmd = [

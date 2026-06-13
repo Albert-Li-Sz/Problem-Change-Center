@@ -27,6 +27,7 @@ class Settings:
     docker_cpus: str
     docker_pids_limit: int
     docker_wine_pids_limit: int | None
+    docker_wine_home_size: str
     docker_tmp_size: str
     docker_work_size: str
 
@@ -43,6 +44,7 @@ class Settings:
             docker_cpus=os.getenv("P2H_DOCKER_CPUS", "2"),
             docker_pids_limit=_int_env("P2H_DOCKER_PIDS_LIMIT", 1024),
             docker_wine_pids_limit=_int_env("P2H_DOCKER_WINE_PIDS_LIMIT", 4096),
+            docker_wine_home_size=os.getenv("P2H_DOCKER_WINE_HOME_SIZE", "4g"),
             docker_tmp_size=os.getenv("P2H_DOCKER_TMP_SIZE", "512m"),
             docker_work_size=os.getenv("P2H_DOCKER_WORK_SIZE", "1g"),
         )

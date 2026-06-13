@@ -21,6 +21,7 @@ def _settings(root: Path) -> Settings:
         docker_cpus="2",
         docker_pids_limit=1024,
         docker_wine_pids_limit=4096,
+        docker_wine_home_size="4g",
         docker_tmp_size="512m",
         docker_work_size="1g",
     )
@@ -39,6 +40,7 @@ def _settings_with_image(root: Path, image: str) -> Settings:
         docker_cpus=settings.docker_cpus,
         docker_pids_limit=settings.docker_pids_limit,
         docker_wine_pids_limit=settings.docker_wine_pids_limit,
+        docker_wine_home_size=settings.docker_wine_home_size,
         docker_tmp_size=settings.docker_tmp_size,
         docker_work_size=settings.docker_work_size,
     )
@@ -83,7 +85,8 @@ def test_wine_runner_requests_amd64_platform() -> None:
 
     assert cmd[:5] == ["docker", "run", "--platform", "linux/amd64", "--rm"]
     assert cmd[cmd.index("--pids-limit") + 1] == "4096"
-    assert "/home/app:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=700" in cmd
+    assert "/home/app:rw,nosuid,nodev,size=4g,uid=10001,gid=10001,mode=700" in cmd
+    assert "TMPDIR=/home/app" in cmd
     assert "HOME=/home/app" in cmd
     assert "WINEPREFIX=/home/app/.wine" in cmd
     assert "XDG_CACHE_HOME=/home/app/.cache" in cmd
