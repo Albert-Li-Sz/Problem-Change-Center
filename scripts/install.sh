@@ -4,11 +4,14 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 PYTHON_BASE_IMAGE="${P2H_PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+APT_MIRROR="${P2H_APT_MIRROR:-}"
+APT_SECURITY_MIRROR="${P2H_APT_SECURITY_MIRROR:-}"
 OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
 ARCH_NAME="$(uname -m 2>/dev/null || printf 'unknown')"
 
 BUILD_RUNNER=1
 BUILD_WINE=0
+USE_BUILD_PROXY=1
 INSTALL_BACKEND=1
 INSTALL_FRONTEND=1
 BUILD_FRONTEND=1
@@ -48,6 +51,9 @@ Options:
   --no-frontend-build    Skip npm run build after installing frontend deps.
   --python PATH          Python interpreter used to create backend/.venv.
   --base-image IMAGE     Docker base image used for runner builds.
+  --apt-mirror URL       Debian mirror used inside runner Docker builds.
+  --apt-security URL     Debian security mirror used inside runner Docker builds.
+  --no-build-proxy       Do not pass host proxy env vars into Docker builds.
   -h, --help             Show this help.
 
 Examples:
@@ -55,6 +61,8 @@ Examples:
   ./install.sh --wine
   ./install.sh --skip-runner
   ./install.sh --base-image registry.example.com/library/python:3.12-slim-bookworm
+  ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
+  ./install.sh --no-build-proxy
 EOF
 }
 
@@ -85,6 +93,19 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die "--base-image requires an image name"
       PYTHON_BASE_IMAGE="$2"
       shift
+      ;;
+    --apt-mirror)
+      [[ $# -ge 2 ]] || die "--apt-mirror requires a URL"
+      APT_MIRROR="$2"
+      shift
+      ;;
+    --apt-security)
+      [[ $# -ge 2 ]] || die "--apt-security requires a URL"
+      APT_SECURITY_MIRROR="$2"
+      shift
+      ;;
+    --no-build-proxy)
+      USE_BUILD_PROXY=0
       ;;
     -h|--help)
       usage
@@ -212,6 +233,33 @@ check_docker_access() {
   exit 1
 }
 
+current_proxy_env() {
+  local proxy=""
+  proxy="${HTTP_PROXY:-${http_proxy:-}}"
+  if [[ -z "$proxy" ]]; then
+    proxy="${HTTPS_PROXY:-${https_proxy:-}}"
+  fi
+  if [[ -z "$proxy" ]]; then
+    proxy="${ALL_PROXY:-${all_proxy:-}}"
+  fi
+  printf '%s' "$proxy"
+}
+
+compose_build() {
+  local profile="$1"
+  local service="$2"
+
+  if [[ "$USE_BUILD_PROXY" -eq 1 ]]; then
+    "${COMPOSE_CMD[@]}" --profile "$profile" build "$service"
+    return
+  fi
+
+  env \
+    -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY \
+    -u http_proxy -u https_proxy -u all_proxy -u no_proxy \
+    "${COMPOSE_CMD[@]}" --profile "$profile" build "$service"
+}
+
 install_backend() {
   log "Installing backend Python dependencies"
   check_python
@@ -252,24 +300,42 @@ build_runner() {
   check_docker_access
   compose_command
   export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
+  export P2H_APT_MIRROR="$APT_MIRROR"
+  export P2H_APT_SECURITY_MIRROR="$APT_SECURITY_MIRROR"
 
   if [[ "$BUILD_WINE" -eq 1 && "$ARCH_NAME" != "x86_64" && "$ARCH_NAME" != "amd64" ]]; then
     warn "Wine runner is linux/amd64; on $OS_NAME/$ARCH_NAME Docker must provide amd64 emulation, and builds/runs will be slower."
   fi
 
-  if ! "${COMPOSE_CMD[@]}" --profile runner build runner; then
+  local proxy_env
+  proxy_env="$(current_proxy_env)"
+  if [[ "$USE_BUILD_PROXY" -eq 1 && -n "$proxy_env" ]]; then
+    warn "Docker build may inherit proxy settings: $proxy_env"
+    warn "If apt-get times out while connecting to that proxy, retry with --no-build-proxy or set a container-reachable proxy."
+  fi
+  if [[ -n "$APT_MIRROR" ]]; then
+    log "Using Debian apt mirror for runner builds: $APT_MIRROR"
+  fi
+
+  if ! compose_build runner runner; then
     cat >&2 <<'EOF'
 
 Docker runner build failed. Common causes:
-  - Docker Hub token/metadata request timed out.
-  - GitHub download/clone for pinned converter commits failed.
-  - Docker daemon lacks network access.
+  - Docker build inherited a host proxy that containers cannot reach.
+  - Debian apt sources are unreachable from the Docker build network.
+  - Docker Hub or GitHub download requests timed out.
 
 Retry:
   ./install.sh
 
 If you only want to install Python/Node dependencies first:
   ./install.sh --skip-runner
+
+If the log contains "Could not connect to <ip>:<port>", retry without host proxy:
+  ./install.sh --no-build-proxy
+
+If Debian apt sources are slow or blocked, use an accessible apt mirror:
+  ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
 
 If Docker Hub is timing out, use an accessible mirror for the Python base image:
   ./install.sh --base-image <registry>/library/python:3.12-slim-bookworm
@@ -279,7 +345,7 @@ EOF
 
   if [[ "$BUILD_WINE" -eq 1 ]]; then
     log "Building Wine Docker runner image"
-    if ! "${COMPOSE_CMD[@]}" --profile wine build runner-wine; then
+    if ! compose_build wine runner-wine; then
       cat >&2 <<'EOF'
 
 Wine runner build failed. You can still use the normal runner for packages that
@@ -311,6 +377,9 @@ write_env_file() {
     if [[ "$PYTHON_BASE_IMAGE" != "python:3.12-slim-bookworm" ]] && ! grep -q '^P2H_PYTHON_BASE_IMAGE=' "$env_file"; then
       warn "Custom base image was used for this build, but existing .env was not changed. Add P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE if you want future manual builds to reuse it."
     fi
+    if [[ -n "$APT_MIRROR" ]] && ! grep -q '^P2H_APT_MIRROR=' "$env_file"; then
+      warn "Custom apt mirror was used for this build, but existing .env was not changed. Add P2H_APT_MIRROR=$APT_MIRROR if you want future manual builds to reuse it."
+    fi
     return
   fi
 
@@ -319,6 +388,8 @@ write_env_file() {
 P2H_DATA_DIR=~/.p2h-web-ui/backend_data
 P2H_RUNNER_IMAGE=$runner_image
 P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE
+P2H_APT_MIRROR=$APT_MIRROR
+P2H_APT_SECURITY_MIRROR=$APT_SECURITY_MIRROR
 P2H_MAX_UPLOAD_BYTES=536870912
 P2H_JOB_TIMEOUT_SECONDS=600
 P2H_DOCKER_MEMORY=1g

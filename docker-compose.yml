@@ -6,6 +6,16 @@ services:
         PYTHON_BASE_IMAGE: ${P2H_PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}
         P2H_REF: 93aca21
         P2D_REF: 8b0919a2a3e0946faaf677ec5cb2cad65fee7e30
+        P2H_APT_MIRROR: ${P2H_APT_MIRROR:-}
+        P2H_APT_SECURITY_MIRROR: ${P2H_APT_SECURITY_MIRROR:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        ALL_PROXY: ${ALL_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        all_proxy: ${all_proxy:-}
+        no_proxy: ${no_proxy:-}
     image: p2h-runner
     profiles:
       - runner
@@ -18,6 +28,16 @@ services:
         PYTHON_BASE_IMAGE: ${P2H_PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}
         P2H_REF: 93aca21
         P2D_REF: 8b0919a2a3e0946faaf677ec5cb2cad65fee7e30
+        P2H_APT_MIRROR: ${P2H_APT_MIRROR:-}
+        P2H_APT_SECURITY_MIRROR: ${P2H_APT_SECURITY_MIRROR:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        ALL_PROXY: ${ALL_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        all_proxy: ${all_proxy:-}
+        no_proxy: ${no_proxy:-}
     image: p2h-runner-wine
     profiles:
       - runner

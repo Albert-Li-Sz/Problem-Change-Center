@@ -3,8 +3,23 @@ FROM ${PYTHON_BASE_IMAGE}
 
 ARG P2H_REF=93aca21
 ARG P2D_REF=8b0919a2a3e0946faaf677ec5cb2cad65fee7e30
+ARG P2H_APT_MIRROR=
+ARG P2H_APT_SECURITY_MIRROR=
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN set -eux; \
+  if [ -n "$P2H_APT_MIRROR" ]; then \
+    apt_mirror="${P2H_APT_MIRROR%/}"; \
+    apt_security_mirror="${P2H_APT_SECURITY_MIRROR:-${apt_mirror}-security}"; \
+    apt_security_mirror="${apt_security_mirror%/}"; \
+    apt_sources="/etc/apt/sources.list.d/debian.sources"; \
+    if [ ! -f "$apt_sources" ]; then apt_sources="/etc/apt/sources.list"; fi; \
+    if [ ! -f "$apt_sources" ]; then echo "apt sources file not found" >&2; exit 1; fi; \
+    sed -i \
+      -e "s|http://deb.debian.org/debian-security|${apt_security_mirror}|g" \
+      -e "s|http://deb.debian.org/debian|${apt_mirror}|g" \
+      "$apt_sources"; \
+  fi; \
+  apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
     coreutils \

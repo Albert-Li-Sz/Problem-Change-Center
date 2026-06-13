@@ -81,6 +81,26 @@ docker info
 docker compose --profile runner build runner
 ```
 
+如果 `apt-get update` 日志里出现类似 `Could not connect to 192.168.x.x:10808`，说明 Docker build 继承了宿主机代理，但构建容器访问不到这个代理。没有必要走代理时可以重试：
+
+```bash
+./install.sh --no-build-proxy
+```
+
+如果重试后仍然连接同一个代理，检查 `docker info` 里是否配置了 Docker daemon 级别的代理；这种代理需要在 Docker 服务配置里修正或移除。
+
+如果 Debian apt 源访问慢或被阻断，可以给 runner 构建指定 apt 镜像：
+
+```bash
+./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
+```
+
+也可以用环境变量保留给手动构建：
+
+```bash
+P2H_APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian docker compose --profile runner build runner
+```
+
 如果只是 Docker Hub 的 `python:3.12-slim-bookworm` 元数据或 token 请求超时，可以指定一个你当前网络可访问的 Python 基础镜像源：
 
 ```bash
@@ -111,6 +131,9 @@ P2H_PYTHON_BASE_IMAGE=<registry>/library/python:3.12-slim-bookworm docker compos
 --no-frontend-build    跳过 npm run build
 --python PATH          指定创建 backend/.venv 的 Python
 --base-image IMAGE     指定 runner Docker 基础镜像
+--apt-mirror URL       指定 runner Docker 构建使用的 Debian apt 镜像
+--apt-security URL     指定 runner Docker 构建使用的 Debian security 镜像
+--no-build-proxy       构建 runner 时不继承宿主机代理环境变量
 ```
 
 ## 手动准备 runner 镜像
@@ -158,6 +181,8 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 P2H_DATA_DIR=~/.p2h-web-ui/backend_data
 P2H_RUNNER_IMAGE=p2h-runner
 P2H_PYTHON_BASE_IMAGE=python:3.12-slim-bookworm
+P2H_APT_MIRROR=
+P2H_APT_SECURITY_MIRROR=
 P2H_MAX_UPLOAD_BYTES=536870912
 P2H_JOB_TIMEOUT_SECONDS=600
 P2H_DOCKER_MEMORY=1g
