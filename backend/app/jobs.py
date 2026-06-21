@@ -61,12 +61,22 @@ class JobManager:
             metadata.exit_code = None
             metadata.error = None
             self.storage.write_metadata(metadata)
+            queued_response = JobResponse(
+                id=metadata.id,
+                status=metadata.status,
+                created_at=metadata.created_at,
+                started_at=metadata.started_at,
+                finished_at=metadata.finished_at,
+                exit_code=metadata.exit_code,
+                download_ready=False,
+                error=metadata.error,
+            )
 
             thread = threading.Thread(target=self._run_job, args=(request,), daemon=True)
             self._runtime[request.job_id] = RuntimeJob(thread=thread)
             thread.start()
 
-        return self.response(request.job_id)
+        return queued_response
 
     def response(self, job_id: str) -> JobResponse:
         metadata = self.storage.read_metadata(job_id)

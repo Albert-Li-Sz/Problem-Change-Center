@@ -93,6 +93,26 @@ def test_wine_runner_requests_amd64_platform() -> None:
     assert "XDG_CACHE_HOME=/work/.cache" not in cmd
 
 
+def test_wine_runner_digest_image_requests_amd64_platform() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        paths = JobPaths(root / "jobs" / ("a" * 32))
+        paths.input_dir.mkdir(parents=True)
+        paths.output_dir.mkdir(parents=True)
+        request = JobRequest(job_id="a" * 32, pid_start="P1000", owner=1)
+
+        cmd = build_docker_command(
+            _settings_with_image(root, "registry.example.com/p2h-runner-wine@sha256:abcd"),
+            request.job_id,
+            paths,
+            request,
+        )
+
+    assert cmd[:5] == ["docker", "run", "--platform", "linux/amd64", "--rm"]
+    assert cmd[cmd.index("--pids-limit") + 1] == "4096"
+    assert "/home/app:rw,exec,nosuid,nodev,size=4g,uid=10001,gid=10001,mode=700" in cmd
+
+
 def test_docker_command_allows_explicit_doall_and_passes_lists() -> None:
     with TemporaryDirectory() as td:
         root = Path(td)

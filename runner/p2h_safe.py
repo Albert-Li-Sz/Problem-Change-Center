@@ -172,7 +172,69 @@ def _load_p2h_convert() -> Any:
     return p2h_convert
 
 
+def ensure_checker_lang_auto(config_yaml: str) -> str:
+    lines = config_yaml.splitlines()
+    trailing_newline = config_yaml.endswith("\n")
+    index = 0
+
+    while index < len(lines):
+        match = re.match(r"^(\s*)checker:\s*(?:#.*)?$", lines[index])
+        if match is None:
+            index += 1
+            continue
+
+        child_prefix = match.group(1) + "  "
+        block_end = index + 1
+        insert_at = index + 1
+        has_language = False
+
+        while block_end < len(lines):
+            line = lines[block_end]
+            stripped = line.strip()
+            if stripped and not line.startswith(child_prefix):
+                break
+            if line.startswith(child_prefix):
+                child = line[len(child_prefix) :]
+                if re.match(r"(?:lang|language)\s*:", child):
+                    has_language = True
+                if re.match(r"file\s*:", child):
+                    insert_at = block_end + 1
+            block_end += 1
+
+        if not has_language:
+            lines.insert(insert_at, f"{child_prefix}lang: auto")
+            if insert_at <= block_end:
+                block_end += 1
+
+        index = block_end
+
+    result = "\n".join(lines)
+    if trailing_newline:
+        result += "\n"
+    return result
+
+
+def _install_hydro_writer_patches() -> None:
+    import p2h.hydro_writer as hydro_writer
+
+    original = getattr(hydro_writer, "_build_config_yaml", None)
+    if original is None or getattr(original, "_p2h_safe_checker_language_patch", False):
+        return
+
+    def build_config_yaml_with_checker_language_auto(*args: Any, **kwargs: Any) -> str:
+        return ensure_checker_lang_auto(original(*args, **kwargs))
+
+    build_config_yaml_with_checker_language_auto._p2h_safe_checker_language_patch = True  # type: ignore[attr-defined]
+    hydro_writer._build_config_yaml = build_config_yaml_with_checker_language_auto
+
+
 def _install_p2h_patches() -> Any:
+    try:
+        _install_hydro_writer_patches()
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"p2h", "p2h.hydro_writer"}:
+            raise
+
     p2h_convert = _load_p2h_convert()
     p2h_convert._collect_tools_from_script = collect_tools_from_script
 

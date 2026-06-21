@@ -111,7 +111,11 @@ def _split_image_name(image: str) -> tuple[str, str, str]:
 
 
 def _runner_requires_amd64(image: str) -> bool:
-    image_name = image.rsplit("/", 1)[-1].split(":", 1)[0]
+    image_name = image.rsplit("/", 1)[-1]
+    if "@" in image_name:
+        image_name = image_name.split("@", 1)[0]
+    elif ":" in image_name:
+        image_name = image_name.rsplit(":", 1)[0]
     return image_name.endswith("-wine")
 
 

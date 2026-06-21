@@ -38,6 +38,65 @@ def test_normalize_polygon_executable_bits_repairs_scripts_and_exes(tmp_path: Pa
     assert p2h_safe.normalize_polygon_executable_bits(tmp_path) == 0
 
 
+def test_checker_language_auto_is_added_to_hydro_config() -> None:
+    config = """\
+type: default
+checker_type: testlib
+checker:
+  file: check.cpp
+time: 1000ms
+"""
+
+    patched = p2h_safe.ensure_checker_lang_auto(config)
+
+    assert "checker:\n  file: check.cpp\n  lang: auto\n" in patched
+    assert patched.endswith("\n")
+
+
+def test_checker_language_auto_is_not_duplicated() -> None:
+    config = """\
+type: default
+checker_type: testlib
+checker:
+  file: check.cpp
+  lang: auto
+"""
+
+    patched = p2h_safe.ensure_checker_lang_auto(config)
+
+    assert patched.count("lang: auto") == 1
+
+
+def test_checker_language_auto_treats_language_as_existing() -> None:
+    config = """\
+checker:
+  file: check.cpp
+  language: cpp
+"""
+
+    patched = p2h_safe.ensure_checker_lang_auto(config)
+
+    assert "lang: auto" not in patched
+    assert patched.count("language: cpp") == 1
+
+
+def test_hydro_writer_patch_adds_checker_language(monkeypatch) -> None:
+    p2h_module = types.ModuleType("p2h")
+    p2h_module.__path__ = []  # type: ignore[attr-defined]
+    writer_module = types.ModuleType("p2h.hydro_writer")
+
+    def build_config_yaml() -> str:
+        return "checker:\n  file: check.cpp\n"
+
+    writer_module._build_config_yaml = build_config_yaml  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "p2h", p2h_module)
+    monkeypatch.setitem(sys.modules, "p2h.hydro_writer", writer_module)
+
+    p2h_safe._install_hydro_writer_patches()
+
+    assert writer_module._build_config_yaml() == "checker:\n  file: check.cpp\n  lang: auto\n"  # type: ignore[attr-defined]
+
+
 def test_p2h_doall_patch_repairs_permissions_before_running(tmp_path: Path, monkeypatch) -> None:
     script = tmp_path / "problems" / "sum" / "doall.sh"
     script.parent.mkdir(parents=True)

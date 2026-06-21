@@ -3,7 +3,13 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-PYTHON_BASE_IMAGE="${P2H_PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+DEFAULT_PYTHON_BASE_IMAGE="python:3.12-slim-bookworm"
+PYTHON_BASE_IMAGE="${P2H_PYTHON_BASE_IMAGE:-$DEFAULT_PYTHON_BASE_IMAGE}"
+PYTHON_BASE_IMAGE_EXPLICIT=0
+if [[ -n "${P2H_PYTHON_BASE_IMAGE:-}" ]]; then
+  PYTHON_BASE_IMAGE_EXPLICIT=1
+fi
+PYTHON_BASE_IMAGE_FALLBACKS="${P2H_PYTHON_BASE_IMAGE_FALLBACKS:-docker.m.daocloud.io/library/python:3.12-slim-bookworm docker.1panel.live/library/python:3.12-slim-bookworm hub.rat.dev/library/python:3.12-slim-bookworm}"
 APT_MIRROR="${P2H_APT_MIRROR:-}"
 APT_SECURITY_MIRROR="${P2H_APT_SECURITY_MIRROR:-}"
 OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
@@ -63,6 +69,10 @@ Examples:
   ./install.sh --base-image registry.example.com/library/python:3.12-slim-bookworm
   ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
   ./install.sh --no-build-proxy
+
+If the default Docker Hub base image is unreachable, the installer will retry
+with known mirror base images unless --base-image or P2H_PYTHON_BASE_IMAGE was
+set explicitly. Override the retry list with P2H_PYTHON_BASE_IMAGE_FALLBACKS.
 EOF
 }
 
@@ -92,6 +102,7 @@ while [[ $# -gt 0 ]]; do
     --base-image)
       [[ $# -ge 2 ]] || die "--base-image requires an image name"
       PYTHON_BASE_IMAGE="$2"
+      PYTHON_BASE_IMAGE_EXPLICIT=1
       shift
       ;;
     --apt-mirror)
@@ -260,6 +271,34 @@ compose_build() {
     "${COMPOSE_CMD[@]}" --profile "$profile" build "$service"
 }
 
+compose_build_with_base_fallback() {
+  local profile="$1"
+  local service="$2"
+
+  export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
+  if compose_build "$profile" "$service"; then
+    return 0
+  fi
+
+  if [[ "$PYTHON_BASE_IMAGE_EXPLICIT" -eq 1 ]]; then
+    return 1
+  fi
+
+  local fallback
+  for fallback in $PYTHON_BASE_IMAGE_FALLBACKS; do
+    [[ -n "$fallback" ]] || continue
+    [[ "$fallback" != "$PYTHON_BASE_IMAGE" ]] || continue
+    warn "Docker Hub base image is unreachable; retrying $service with base image mirror: $fallback"
+    PYTHON_BASE_IMAGE="$fallback"
+    export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
+    if compose_build "$profile" "$service"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 install_backend() {
   log "Installing backend Python dependencies"
   check_python
@@ -299,7 +338,6 @@ build_runner() {
   log "Building Docker runner image"
   check_docker_access
   compose_command
-  export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
   export P2H_APT_MIRROR="$APT_MIRROR"
   export P2H_APT_SECURITY_MIRROR="$APT_SECURITY_MIRROR"
 
@@ -317,7 +355,7 @@ build_runner() {
     log "Using Debian apt mirror for runner builds: $APT_MIRROR"
   fi
 
-  if ! compose_build runner runner; then
+  if ! compose_build_with_base_fallback runner runner; then
     cat >&2 <<'EOF'
 
 Docker runner build failed. Common causes:
@@ -345,7 +383,7 @@ EOF
 
   if [[ "$BUILD_WINE" -eq 1 ]]; then
     log "Building Wine Docker runner image"
-    if ! compose_build wine runner-wine; then
+    if ! compose_build_with_base_fallback wine runner-wine; then
       cat >&2 <<'EOF'
 
 Wine runner build failed. You can still use the normal runner for packages that
