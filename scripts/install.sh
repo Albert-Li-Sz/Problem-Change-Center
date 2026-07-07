@@ -9,7 +9,7 @@ PYTHON_BASE_IMAGE_EXPLICIT=0
 if [[ -n "${P2H_PYTHON_BASE_IMAGE:-}" ]]; then
   PYTHON_BASE_IMAGE_EXPLICIT=1
 fi
-PYTHON_BASE_IMAGE_FALLBACKS="${P2H_PYTHON_BASE_IMAGE_FALLBACKS:-docker.m.daocloud.io/library/python:3.12-slim-bookworm docker.1panel.live/library/python:3.12-slim-bookworm hub.rat.dev/library/python:3.12-slim-bookworm}"
+PYTHON_BASE_IMAGE_FALLBACKS="${P2H_PYTHON_BASE_IMAGE_FALLBACKS:-docker.m.daocloud.io/library/python:3.12-slim-bookworm hub.rat.dev/library/python:3.12-slim-bookworm}"
 APT_MIRROR="${P2H_APT_MIRROR:-}"
 APT_SECURITY_MIRROR="${P2H_APT_SECURITY_MIRROR:-}"
 OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
@@ -17,7 +17,8 @@ ARCH_NAME="$(uname -m 2>/dev/null || printf 'unknown')"
 
 BUILD_RUNNER=1
 BUILD_WINE=0
-USE_BUILD_PROXY=1
+BUILD_PROXY_MODE=auto
+EFFECTIVE_USE_BUILD_PROXY=1
 INSTALL_BACKEND=1
 INSTALL_FRONTEND=1
 BUILD_FRONTEND=1
@@ -59,6 +60,7 @@ Options:
   --base-image IMAGE     Docker base image used for runner builds.
   --apt-mirror URL       Debian mirror used inside runner Docker builds.
   --apt-security URL     Debian security mirror used inside runner Docker builds.
+  --build-proxy          Force passing host proxy env vars into Docker builds.
   --no-build-proxy       Do not pass host proxy env vars into Docker builds.
   -h, --help             Show this help.
 
@@ -68,6 +70,7 @@ Examples:
   ./install.sh --skip-runner
   ./install.sh --base-image registry.example.com/library/python:3.12-slim-bookworm
   ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
+  ./install.sh --build-proxy
   ./install.sh --no-build-proxy
 
 If the default Docker Hub base image is unreachable, the installer will retry
@@ -115,8 +118,11 @@ while [[ $# -gt 0 ]]; do
       APT_SECURITY_MIRROR="$2"
       shift
       ;;
+    --build-proxy)
+      BUILD_PROXY_MODE=on
+      ;;
     --no-build-proxy)
-      USE_BUILD_PROXY=0
+      BUILD_PROXY_MODE=off
       ;;
     -h|--help)
       usage
@@ -256,11 +262,56 @@ current_proxy_env() {
   printf '%s' "$proxy"
 }
 
+proxy_url_host() {
+  local proxy="$1"
+  local hostport host
+
+  hostport="${proxy#*://}"
+  hostport="${hostport%%/*}"
+  hostport="${hostport##*@}"
+
+  if [[ "$hostport" == \[*\]* ]]; then
+    host="${hostport#\[}"
+    host="${host%%\]*}"
+  else
+    host="${hostport%%:*}"
+  fi
+
+  printf '%s' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+proxy_is_loopback() {
+  local host
+  host="$(proxy_url_host "$1")"
+
+  case "$host" in
+    localhost|127.*|0.0.0.0|::1)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+loopback_proxy_env() {
+  local name value
+
+  for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+    value="${!name:-}"
+    if [[ -n "$value" ]] && proxy_is_loopback "$value"; then
+      printf '%s=%s' "$name" "$value"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 compose_build() {
   local profile="$1"
   local service="$2"
 
-  if [[ "$USE_BUILD_PROXY" -eq 1 ]]; then
+  if [[ "$EFFECTIVE_USE_BUILD_PROXY" -eq 1 ]]; then
     "${COMPOSE_CMD[@]}" --profile "$profile" build "$service"
     return
   fi
@@ -274,25 +325,57 @@ compose_build() {
 compose_build_with_base_fallback() {
   local profile="$1"
   local service="$2"
+  local prefer_base_mirror=0
+  local candidate original_base_image seen_candidates=""
+  original_base_image="$PYTHON_BASE_IMAGE"
 
-  export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
-  if compose_build "$profile" "$service"; then
-    return 0
+  if [[ "$PYTHON_BASE_IMAGE_EXPLICIT" -eq 0 && -n "$APT_MIRROR" && "$original_base_image" == "$DEFAULT_PYTHON_BASE_IMAGE" ]]; then
+    prefer_base_mirror=1
   fi
 
-  if [[ "$PYTHON_BASE_IMAGE_EXPLICIT" -eq 1 ]]; then
+  if [[ "$prefer_base_mirror" -eq 1 ]]; then
+    for candidate in $PYTHON_BASE_IMAGE_FALLBACKS "$original_base_image"; do
+      [[ -n "$candidate" ]] || continue
+      case " $seen_candidates " in
+        *" $candidate "*)
+          continue
+          ;;
+      esac
+      seen_candidates="$seen_candidates $candidate"
+
+      if [[ "$candidate" == "$original_base_image" ]]; then
+        warn "Base image mirrors failed; trying Docker Hub base image for $service: $candidate"
+      else
+        warn "A Debian apt mirror is configured; trying $service with base image mirror first: $candidate"
+      fi
+      PYTHON_BASE_IMAGE="$candidate"
+      export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
+      if compose_build "$profile" "$service"; then
+        return 0
+      fi
+    done
     return 1
   fi
 
-  local fallback
-  for fallback in $PYTHON_BASE_IMAGE_FALLBACKS; do
-    [[ -n "$fallback" ]] || continue
-    [[ "$fallback" != "$PYTHON_BASE_IMAGE" ]] || continue
-    warn "Docker Hub base image is unreachable; retrying $service with base image mirror: $fallback"
-    PYTHON_BASE_IMAGE="$fallback"
+  for candidate in "$original_base_image" $PYTHON_BASE_IMAGE_FALLBACKS; do
+    [[ -n "$candidate" ]] || continue
+    case " $seen_candidates " in
+      *" $candidate "*)
+        continue
+        ;;
+    esac
+    seen_candidates="$seen_candidates $candidate"
+
+    if [[ "$candidate" != "$original_base_image" ]]; then
+      warn "Docker Hub base image is unreachable; retrying $service with base image mirror: $candidate"
+    fi
+    PYTHON_BASE_IMAGE="$candidate"
     export P2H_PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE"
     if compose_build "$profile" "$service"; then
       return 0
+    fi
+    if [[ "$PYTHON_BASE_IMAGE_EXPLICIT" -eq 1 ]]; then
+      return 1
     fi
   done
 
@@ -347,9 +430,32 @@ build_runner() {
 
   local proxy_env
   proxy_env="$(current_proxy_env)"
-  if [[ "$USE_BUILD_PROXY" -eq 1 && -n "$proxy_env" ]]; then
+  local loopback_proxy
+  case "$BUILD_PROXY_MODE" in
+    auto)
+      EFFECTIVE_USE_BUILD_PROXY=1
+      if loopback_proxy="$(loopback_proxy_env)"; then
+        EFFECTIVE_USE_BUILD_PROXY=0
+        warn "Docker build proxy points at host loopback ($loopback_proxy), which build containers cannot reach."
+        warn "Disabling proxy env vars for runner builds. Use --build-proxy only if your proxy is reachable from containers."
+      fi
+      ;;
+    on)
+      EFFECTIVE_USE_BUILD_PROXY=1
+      ;;
+    off)
+      EFFECTIVE_USE_BUILD_PROXY=0
+      ;;
+    *)
+      die "invalid build proxy mode: $BUILD_PROXY_MODE"
+      ;;
+  esac
+
+  if [[ "$EFFECTIVE_USE_BUILD_PROXY" -eq 1 && -n "$proxy_env" ]]; then
     warn "Docker build may inherit proxy settings: $proxy_env"
     warn "If apt-get times out while connecting to that proxy, retry with --no-build-proxy or set a container-reachable proxy."
+  elif [[ "$BUILD_PROXY_MODE" == "off" && -n "$proxy_env" ]]; then
+    warn "Docker build proxy inheritance is disabled by --no-build-proxy."
   fi
   if [[ -n "$APT_MIRROR" ]]; then
     log "Using Debian apt mirror for runner builds: $APT_MIRROR"
@@ -371,6 +477,10 @@ If you only want to install Python/Node dependencies first:
 
 If the log contains "Could not connect to <ip>:<port>", retry without host proxy:
   ./install.sh --no-build-proxy
+
+If you need a proxy during Docker builds, use one that containers can reach and
+retry with:
+  ./install.sh --build-proxy
 
 If Debian apt sources are slow or blocked, use an accessible apt mirror:
   ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian

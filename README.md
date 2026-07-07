@@ -81,7 +81,7 @@ docker info
 docker compose --profile runner build runner
 ```
 
-如果 `apt-get update` 日志里出现类似 `Could not connect to 192.168.x.x:10808`，说明 Docker build 继承了宿主机代理，但构建容器访问不到这个代理。没有必要走代理时可以重试：
+安装器默认会自动跳过 `localhost`、`127.*` 或 `::1` 这类构建容器访问不到的宿主机回环代理。如果 `apt-get update` 日志里仍出现类似 `Could not connect to 192.168.x.x:10808`，说明 Docker build 继承了宿主机代理，但构建容器访问不到这个代理。没有必要走代理时可以重试：
 
 ```bash
 ./install.sh --no-build-proxy
@@ -89,11 +89,19 @@ docker compose --profile runner build runner
 
 如果重试后仍然连接同一个代理，检查 `docker info` 里是否配置了 Docker daemon 级别的代理；这种代理需要在 Docker 服务配置里修正或移除。
 
+如果 Docker build 确实需要代理，请使用构建容器可以访问的代理地址，再显式启用代理继承：
+
+```bash
+./install.sh --build-proxy
+```
+
 如果 Debian apt 源访问慢或被阻断，可以给 runner 构建指定 apt 镜像：
 
 ```bash
 ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
 ```
+
+指定 apt 镜像且没有手动指定 `--base-image` 时，安装器会优先尝试已知的 Python 基础镜像镜像源，避免先等待 Docker Hub 超时。
 
 也可以用环境变量保留给手动构建：
 
@@ -133,6 +141,7 @@ P2H_PYTHON_BASE_IMAGE=<registry>/library/python:3.12-slim-bookworm docker compos
 --base-image IMAGE     指定 runner Docker 基础镜像
 --apt-mirror URL       指定 runner Docker 构建使用的 Debian apt 镜像
 --apt-security URL     指定 runner Docker 构建使用的 Debian security 镜像
+--build-proxy          强制构建 runner 时继承宿主机代理环境变量
 --no-build-proxy       构建 runner 时不继承宿主机代理环境变量
 ```
 
