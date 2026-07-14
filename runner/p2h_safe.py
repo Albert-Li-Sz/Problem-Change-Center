@@ -155,6 +155,69 @@ def normalize_polygon_executable_bits(root: Path) -> int:
     return fixed
 
 
+def normalize_polygon_testdata_line_endings(root: Path, slugs: list[str]) -> int:
+    normalized = 0
+    for slug in slugs:
+        tests_dir = root / "problems" / slug / "tests"
+        if not tests_dir.is_dir():
+            continue
+
+        for path in tests_dir.rglob("*"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            if _normalize_crlf_file(path):
+                normalized += 1
+    return normalized
+
+
+def _normalize_crlf_file(path: Path, *, chunk_size: int = 1024 * 1024) -> bool:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    fd = os.open(path, os.O_RDWR)
+    try:
+        size = os.fstat(fd).st_size
+        read_offset = 0
+        write_offset = 0
+        pending = b""
+        changed = False
+
+        while read_offset < size:
+            chunk = os.pread(fd, min(chunk_size, size - read_offset), read_offset)
+            if not chunk:
+                raise OSError(f"unexpected end of file while normalizing {path}")
+            read_offset += len(chunk)
+
+            data = pending + chunk
+            if read_offset < size and data.endswith(b"\r"):
+                data = data[:-1]
+                pending = b"\r"
+            else:
+                pending = b""
+
+            lf_data = data.replace(b"\r\n", b"\n")
+            if lf_data != data:
+                changed = True
+            if changed:
+                _pwrite_all(fd, lf_data, write_offset)
+            write_offset += len(lf_data)
+
+        if changed:
+            os.ftruncate(fd, write_offset)
+        return changed
+    finally:
+        os.close(fd)
+
+
+def _pwrite_all(fd: int, data: bytes, offset: int) -> None:
+    written = 0
+    while written < len(data):
+        count = os.pwrite(fd, data[written:], offset + written)
+        if count <= 0:
+            raise OSError("failed to write normalized test data")
+        written += count
+
+
 def _should_be_executable(path: Path) -> bool:
     if path.suffix.lower() in EXECUTABLE_SUFFIXES:
         return True
@@ -251,12 +314,17 @@ def _install_p2h_patches() -> Any:
             previous_bash_env = os.environ.get("BASH_ENV")
             os.environ["BASH_ENV"] = str(bash_env)
             try:
-                return original(work_root, slugs, *args, **kwargs)
+                result = original(work_root, slugs, *args, **kwargs)
             finally:
                 if previous_bash_env is None:
                     os.environ.pop("BASH_ENV", None)
                 else:
                     os.environ["BASH_ENV"] = previous_bash_env
+
+            normalized = normalize_polygon_testdata_line_endings(work_root, slugs)
+            if normalized and kwargs.get("verbose"):
+                print(f"normalized CRLF to LF in {normalized} generated testdata file(s)")
+            return result
 
         run_doall_with_executable_fix._p2h_safe_executable_patch = True  # type: ignore[attr-defined]
         p2h_convert._run_doall_for_all = run_doall_with_executable_fix

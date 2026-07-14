@@ -178,6 +178,8 @@ Wine runner 会把 Wine 的 `HOME`、`TMPDIR` 和 `WINEPREFIX` 放到容器内�
 
 Wine runner 的 `/home/app` tmpfs 会显式开启 `exec`，用于执行 Polygon `doall.sh` 内部的 `scripts/*.sh`。如果这里保持 Docker 默认 `noexec`，即使脚本已经 chmod 为可执行，也会报 `scripts/xxx.sh: Permission denied`。
 
+Wine 生成器可能以 Windows 文本模式写出 CRLF 换行。runner 会在 `doall.sh` 成功后、打包前，将所选题目的 `tests/` 中的 CRLF 统一转换为 LF；其他源码和附件不会被改写。
+
 ## 手动启动后端
 
 ```bash

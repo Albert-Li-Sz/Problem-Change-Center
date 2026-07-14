@@ -38,6 +38,38 @@ def test_normalize_polygon_executable_bits_repairs_scripts_and_exes(tmp_path: Pa
     assert p2h_safe.normalize_polygon_executable_bits(tmp_path) == 0
 
 
+def test_normalize_polygon_testdata_line_endings_only_changes_selected_tests(tmp_path: Path) -> None:
+    selected_tests = tmp_path / "problems" / "sum" / "tests"
+    selected_tests.mkdir(parents=True)
+    (selected_tests / "01").write_bytes(b"1 2\r\n3 4\r\n")
+    (selected_tests / "01.a").write_bytes(b"3\r\n7\r")
+    (selected_tests / "already-lf").write_bytes(b"unchanged\n")
+
+    source = tmp_path / "problems" / "sum" / "files" / "generator-source.txt"
+    source.parent.mkdir()
+    source.write_bytes(b"keep\r\nsource\r\n")
+
+    other_tests = tmp_path / "problems" / "other" / "tests"
+    other_tests.mkdir(parents=True)
+    (other_tests / "01").write_bytes(b"keep\r\nother\r\n")
+
+    assert p2h_safe.normalize_polygon_testdata_line_endings(tmp_path, ["sum"]) == 2
+    assert (selected_tests / "01").read_bytes() == b"1 2\n3 4\n"
+    assert (selected_tests / "01.a").read_bytes() == b"3\n7\r"
+    assert (selected_tests / "already-lf").read_bytes() == b"unchanged\n"
+    assert source.read_bytes() == b"keep\r\nsource\r\n"
+    assert (other_tests / "01").read_bytes() == b"keep\r\nother\r\n"
+    assert p2h_safe.normalize_polygon_testdata_line_endings(tmp_path, ["sum"]) == 0
+
+
+def test_normalize_crlf_file_handles_a_pair_split_across_chunks(tmp_path: Path) -> None:
+    testdata = tmp_path / "01"
+    testdata.write_bytes(b"abc\r\ndef\r\n")
+
+    assert p2h_safe._normalize_crlf_file(testdata, chunk_size=4) is True
+    assert testdata.read_bytes() == b"abc\ndef\n"
+
+
 def test_checker_language_auto_is_added_to_hydro_config() -> None:
     config = """\
 type: default
@@ -119,6 +151,29 @@ def test_p2h_doall_patch_repairs_permissions_before_running(tmp_path: Path, monk
     patched_convert = p2h_safe._install_p2h_patches()
     assert patched_convert._run_doall_for_all(tmp_path, ["sum"], verbose=True) == 0
     assert calls == [True]
+
+
+def test_p2h_doall_patch_normalizes_generated_testdata(tmp_path: Path, monkeypatch) -> None:
+    tests_dir = tmp_path / "problems" / "sum" / "tests"
+    tests_dir.mkdir(parents=True)
+
+    p2h_module = types.ModuleType("p2h")
+    p2h_module.__path__ = []  # type: ignore[attr-defined]
+    convert_module = types.ModuleType("p2h.convert")
+
+    def run_doall(work_root: Path, slugs: list[str], *, verbose: bool = False) -> str:
+        (tests_dir / "01").write_bytes(b"input\r\n")
+        (tests_dir / "01.a").write_bytes(b"answer\r\n")
+        return "done"
+
+    convert_module._run_doall_for_all = run_doall  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "p2h", p2h_module)
+    monkeypatch.setitem(sys.modules, "p2h.convert", convert_module)
+
+    patched_convert = p2h_safe._install_p2h_patches()
+    assert patched_convert._run_doall_for_all(tmp_path, ["sum"], verbose=True) == "done"
+    assert (tests_dir / "01").read_bytes() == b"input\n"
+    assert (tests_dir / "01.a").read_bytes() == b"answer\n"
 
 
 def test_p2h_doall_patch_turns_pause_reads_into_failures(tmp_path: Path, monkeypatch) -> None:
