@@ -1,4 +1,4 @@
-import { AlertTriangle, Archive, CheckCircle2, Download, FileArchive, RotateCcw, Shield, Trash2, UploadCloud, Wrench, X, XCircle } from "lucide-react";
+import { AlertTriangle, Archive, CheckCircle2, Download, FileArchive, Github, RotateCcw, Shield, Trash2, UploadCloud, Wrench, X, XCircle } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ConversionReport,
@@ -76,6 +76,7 @@ const progressLabels: Record<NonNullable<JobResponse["progress"]>["phase"], stri
 };
 const pollIntervalMs = 1200;
 const sseRetryDelaysMs = [1000, 2000, 5000, 10000];
+const projectUrl = "https://github.com/LMTINSUZHOU/Problem-Change-Center";
 
 function splitList(value: string): string[] {
   return value
@@ -519,6 +520,15 @@ export default function App() {
             >
               格式能力
             </button>
+            <a
+              className="navigation-tab"
+              href={projectUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <Github size={15} aria-hidden="true" />
+              项目
+            </a>
           </div>
           <div className="navigation-status" title="默认不执行 doall.sh">
             <Shield size={15} aria-hidden="true" />
@@ -1176,6 +1186,15 @@ export default function App() {
           </div>
         </section>
       </main>
+      <footer className="site-footer">
+        <div className="site-footer-inner">
+          <span>Copyright © 2026 Albert_Li · MIT License</span>
+          <a href={projectUrl} target="_blank" rel="noreferrer">
+            <Github size={15} aria-hidden="true" />
+            Problem Change Center
+          </a>
+        </div>
+      </footer>
     </div>
   );
 }

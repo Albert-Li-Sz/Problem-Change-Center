@@ -135,6 +135,21 @@ describe("App archive selection", () => {
     expect(screen.queryByRole("dialog", { name: "格式能力矩阵" })).toBeNull();
   });
 
+  it("links the navigation and footer to the project repository", () => {
+    render(<App />);
+
+    const expectedUrl = "https://github.com/LMTINSUZHOU/Problem-Change-Center";
+    const navigationLink = screen.getByRole("link", { name: "项目" });
+    const footerLink = screen.getByRole("link", { name: "Problem Change Center" });
+
+    for (const link of [navigationLink, footerLink]) {
+      expect(link.getAttribute("href")).toBe(expectedUrl);
+      expect(link.getAttribute("target")).toBe("_blank");
+      expect(link.getAttribute("rel")).toBe("noreferrer");
+    }
+    expect(screen.getByText("Copyright © 2026 Albert_Li · MIT License")).not.toBeNull();
+  });
+
   it("requires an explicit source when automatic detection is ambiguous", async () => {
     const user = userEvent.setup();
     mockedInspectZip.mockResolvedValue(inspectResult({

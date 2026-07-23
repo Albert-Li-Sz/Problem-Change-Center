@@ -69,6 +69,8 @@ select:focus-visible {
 }
 
 .site-shell {
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
 }
 
@@ -137,6 +139,11 @@ select:focus-visible {
   cursor: pointer;
 }
 
+.navigation-tab svg {
+  flex: 0 0 auto;
+  margin-right: 6px;
+}
+
 .navigation-tab:hover {
   border-top-color: #b8d4e9;
   background: #f8fafb;
@@ -160,9 +167,42 @@ select:focus-visible {
 }
 
 .app-shell {
+  flex: 1 0 auto;
   width: min(100%, 1240px);
   margin: 0 auto;
   padding: 32px 22px 52px;
+}
+
+.site-footer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border-strong);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.site-footer-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: min(100%, 1240px);
+  min-height: 58px;
+  margin: 0 auto;
+  padding: 12px 22px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.site-footer a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--blue-deep);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.site-footer a:hover {
+  color: var(--blue-strong);
+  text-decoration: underline;
 }
 
 .topbar {
@@ -1107,8 +1147,12 @@ select:disabled {
   }
 
   .navigation-tab {
-    padding-right: 12px;
-    padding-left: 12px;
+    padding-right: 9px;
+    padding-left: 9px;
+  }
+
+  .navigation-tab svg {
+    display: none;
   }
 
   .navigation-status {
@@ -1122,6 +1166,15 @@ select:disabled {
 
   .app-shell {
     padding: 22px 12px 36px;
+  }
+
+  .site-footer-inner {
+    min-height: 72px;
+    padding: 14px 12px;
+    align-items: flex-start;
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
   }
 
   .topbar {
