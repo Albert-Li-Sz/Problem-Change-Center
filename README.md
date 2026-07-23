@@ -1,295 +1,350 @@
 # OJ 题包转换器 Web UI
 
-本项目是本地运行的多 OJ 题包转换工具。前端负责上传、自动识别、配置源/目标格式、查看日志与字段损失报告；后端为每个任务启动一次性 Docker runner。除 Polygon 的成熟优化链路外，所有转换都经过统一 `ProblemBundle` 中间模型，因此支持任意可读格式到任意可写格式，而不需要维护两两转换器。
+一个本地运行、面向竞赛出题人与 OJ 管理员的多格式题包转换工具。
 
-| 格式 ID | 平台/格式 | 读取 | 输出 | 备注 |
+项目提供 React Web 界面、FastAPI 任务服务和隔离 Docker runner，可自动识别题包格式、转换题面与评测数据、展示实时日志，并对无法无损表达的字段生成结构化报告。除 Polygon 的成熟优化链路外，其他格式统一经过 `ProblemBundle` 中间模型，因此不需要为每一种源/目标组合维护独立转换器。
+
+> [!IMPORTANT]
+> 本项目默认仅监听 `127.0.0.1`，没有用户认证。不要把服务直接暴露到局域网或公网；远程部署时必须在前面配置身份认证、TLS、限速和上传大小限制。
+
+## 主要功能
+
+- 自动识别 Polygon、Hydro、ICPC、HOJ、FPS、QDUOJ、UOJ、DMOJ 和普通目录题包。
+- 支持所有可读格式到所有可写格式的统一转换；相同格式的无意义转换除外。
+- 保留多语言题面、Markdown/HTML/PDF、测试点、样例、分组、依赖、checker、interactor、模板、附件和标程等信息。
+- DOMjudge/ICPC PDF 转 Hydro 时复制原 PDF，并使用 `@[pdf](file://文件名)` 生成 Hydro 题面引用。
+- 用 `warning`、`loss`、`fatal` 三级报告区分默认值、有损映射和影响判题正确性的错误。
+- Polygon 包可显式运行 `doall.sh`；包含 C/C++ 源码时会优先在 Linux 内原生重编译，避免依赖 Wine。
+- 对上传、解压、任务调度、容器运行、输出复制和结果打包实施分层安全限制。
+- 保留旧版七条转换命令和旧 API 字段，便于平滑升级。
+
+## 目录
+
+- [支持的格式](#支持的格式)
+- [快速开始](#快速开始)
+- [使用流程](#使用流程)
+- [转换与损失报告](#转换与损失报告)
+- [格式说明](#格式说明)
+- [缺失文件如何处理](#缺失文件如何处理)
+- [安装与配置](#安装与配置)
+- [CLI](#cli)
+- [API](#api)
+- [安全模型](#安全模型)
+- [测试与验收](#测试与验收)
+- [常见问题](#常见问题)
+- [致谢](#致谢)
+- [许可证](#许可证)
+
+## 支持的格式
+
+| 格式 ID | 覆盖平台/规范 | 读取 | 输出 | 包完整性与备注 |
 |---|---|:---:|:---:|---|
-| `polygon` | Polygon、Codeforces 出题链 | ✓ | — | 默认不运行 `doall.sh` |
-| `hydro` | HydroOJ | ✓ | ✓ | 完整能力中心格式 |
-| `icpc` | DOMjudge、Kattis、PC² | ✓ | ✓ | 兼容 legacy 与 `2025-09`，默认 `legacy-icpc` |
-| `hoj` | HOJ | ✓ | ✓ | 原生 JSON + 同名数据目录 |
-| `fps` | HUSTOJ、OpenJudger | ✓ | ✓ | HUSTOJ 1.6 / QDUOJ 1.2 profile |
-| `qduoj` | QingdaoU OnlineJudge | ✓ | ✓ | 编号目录、`problem.json`、`testcase/` |
-| `uoj` | UOJ Community | ✓ | ✓ | `problem.conf`，题面与元数据使用 sidecar |
-| `dmoj` | DMOJ、LQDOJ | ✓ | ✓ | `init.yml` + data archive，题面使用 sidecar |
+| `polygon` | Polygon、Codeforces 出题链 | ✓ | — | 完整题面与评测包；保留优化转换路径 |
+| `hydro` | HydroOJ | ✓ | ✓ | 能力最完整的中心格式 |
+| `icpc` | DOMjudge、Kattis、PC² | ✓ | ✓ | 支持 legacy 和 `2025-09`；默认输出 `legacy-icpc` 兼容包 |
+| `hoj` | HOJ | ✓ | ✓ | 原生 `problem_*.json` 与同名数据目录 |
+| `fps` | HUSTOJ、OpenJudger 等 | ✓ | ✓ | 支持 HUSTOJ 1.6、QDUOJ 1.2 profile |
+| `qduoj` | QingdaoU OnlineJudge | ✓ | ✓ | 编号目录、`problem.json`、`testcase/` 原生包 |
+| `uoj` | UOJ Community | ✓ | ✓ | `problem.conf` 评测数据包；题面使用 sidecar |
+| `dmoj` | DMOJ、LQDOJ | ✓ | ✓ | `init.yml` 与 data archive；题面使用 sidecar |
 | `generic` | 洛谷测试数据、Lemon、普通目录 | ✓ | — | 推断 PDF/Markdown 与 `.in/.out/.ans` |
 
-转换报告把问题分为 `warning`、`loss`、`fatal`。`loss_policy=warn` 会输出结果并列出无法表达的字段；`loss_policy=error` 会在写出文件前拒绝任何有损转换。UOJ/DMOJ 若没有题面会生成醒目占位题面并登记 `loss`；它们的输出包含可上传评测数据包，以及独立题面和 metadata sidecar。
+`polygon` 和 `generic` 当前是只读源格式。其他格式均可作为源或目标，转换过程为：
 
-## 缺失文件如何处理
-
-转换器不会猜测或伪造会影响判题结果的文件。即使任务失败，Web UI 仍会展示结构化转换报告；API 客户端可读取 `GET /api/jobs/{job_id}/report`。失败容器只会导出报告，不会把 writer 留下的半成品作为可下载题包。
-
-| 情况 | 处理结果 | 建议修复方式 |
-|---|---|---|
-| `.in` 缺少对应 `.out/.ans`，或配置声明的测试点文件不存在 | `fatal`，拒绝输出 | 从原 OJ 重新导出；检查文件名、扩展名和大小写是否与配置完全一致 |
-| 配置引用的 checker、interactor、validator 不存在 | `fatal`，拒绝输出 | 补回原始源码并保持配置路径；不要用普通 diff checker 代替特殊 checker |
-| 交互题缺 interactor | `fatal`，拒绝输出 | 从原题包恢复 interactor；若题目实际不是交互题，再修正源格式的题型配置 |
-| PDF 引用或附件清单指向不存在的文件 | `fatal`，拒绝输出 | 补回文件，或删除错误引用后重新导出；路径按大小写敏感处理 |
-| 整个题面缺失 | `loss`；`warn` 下生成醒目占位题面，`error` 下失败 | UOJ/DMOJ 可在数据包旁添加 `statement.md/html/pdf`；其他格式建议从原平台重新导出完整包 |
-| `problem.json`、`problem.conf`、`init.yml` 等元数据损坏或包结构不完整 | `source-read-error` | 使用报告中的文件名定位问题，优先重新导出，不要手工猜测必需字段 |
-| 自动识别没有达到 0.8 或出现多个强候选 | 不允许自动启动 | 在界面查看候选证据并明确选择输入格式；若仍失败，检查是否把多种题包错误地混在同一 ZIP 中 |
-| 本地缺少配置的 runner 镜像 | 启动脚本在启动后端前报错 | 运行 `./install.sh`；Wine 镜像运行 `./install.sh --wine` |
-
-路径错误最常见于 Windows 导出的包在 Linux runner 中运行：`Check.cpp` 和 `check.cpp` 是两个不同文件。修复后应重新打 ZIP，避免只在解压目录中改名却仍上传旧压缩包。
-
-## 安全模型
-
-- 默认安全模式使用 `--no-run-doall`，不会执行 Polygon 包内脚本。
-- 用户显式启用 `doall.sh` 时，脚本仍只在受限 Docker 容器内运行。
-- runner 无网络且根文件系统只读；受信任入口仅保留建立隔离 namespace 所需的窄权限，实际转换器固定以非 root、空 capability 集合运行，并受进程数/CPU/内存限制。
-- ZIP 在上传和解压阶段都会检查路径穿越、符号链接、重复/大小写冲突文件名、条目数、展开大小、单文件大小和压缩比。
-- FPS 使用 `defusedxml`，允许合法 DOCTYPE 声明但禁止实体和外部实体；XML、JSON、YAML 均限制大小、节点数和嵌套深度，JSON/YAML 拒绝重复键和非有限数字，YAML 还限制 alias 数量。
-- 转换期间不会执行上传包中的 checker、validator、generator、interactor 或其他脚本；只有用户显式启用的 Polygon `doall.sh` 例外。
-- Docker 是风险降低措施，不是绝对沙箱。高安全场景应考虑 gVisor、Kata Containers 或 Firecracker。
-- 后端建议运行在宿主机上。如果把后端也放进 Docker 并挂载 `/var/run/docker.sock`，会削弱隔离边界。
-
-## 目录结构
-
-```text
-backend/   FastAPI API、任务状态、Docker runner 调度
-frontend/  React + Vite + TypeScript 单页工具
-runner/    p2h-runner Docker 镜像与转换入口
+```mermaid
+flowchart LR
+    A["上传 ZIP"] --> B["安全检查与格式识别"]
+    B --> C["源格式适配器"]
+    C --> D["ProblemBundle 中间模型"]
+    D --> E["目标能力校验"]
+    E --> F["目标格式适配器"]
+    F --> G["可导入题包"]
+    E --> H["warning / loss / fatal 报告"]
 ```
 
-## 一键安装
+Polygon → Hydro 和 Polygon → ICPC 继续使用经过验证的专用路径。Polygon → 其他目标会先生成受控 Hydro 中间包，再进入统一模型。
 
-推荐在 macOS、Linux 或 Windows WSL2 中使用。安装脚本使用 Bash，macOS 自带的 `/bin/bash` 和常见 Linux 发行版的 Bash 都可运行。
+## 快速开始
 
-前端依赖要求 Node.js 20.19+、22.12+ 或 24+；安装脚本会在执行 `npm ci` 前检查版本。
+### 环境要求
+
+- macOS、Linux，或 Windows WSL2。
+- Python 3.10 或更新版本。
+- Node.js 20.19+、22.12+ 或 24+。
+- Docker Engine + Docker Compose 插件；macOS 推荐 Docker Desktop。
+- Bash。
+
+先确认当前用户可以直接访问 Docker：
 
 ```bash
+docker info
+```
+
+不要使用 `sudo ./install.sh` 或 `sudo ./scripts/start.sh`。这会在虚拟环境、依赖目录或任务目录中留下 root 所有文件。
+
+### 安装
+
+```bash
+git clone https://github.com/LMTINSUZHOU/Polygon-to-Hydro-or-Domujudge-Web-UI.git
+cd Polygon-to-Hydro-or-Domujudge-Web-UI
 ./install.sh
 ```
 
-安装脚本会执行：
+安装器会：
 
-- 检查 Python、Node/npm、Docker 和 Docker Compose。
-- 创建 `backend/.venv` 并安装 FastAPI 后端依赖。
-- 使用 `npm ci` 安装前端依赖，并执行一次前端生产构建检查。
-- 构建 `p2h-runner` Docker 镜像。
-- 生成本地 `.env`，用于启动脚本读取端口、runner 镜像和资源限制。
+1. 检查 Python、Node/npm、Docker 和 Docker Compose。
+2. 创建 `backend/.venv` 并安装后端依赖。
+3. 使用 `npm ci` 安装前端依赖并执行生产构建。
+4. 构建 `p2h-runner` 镜像。
+5. 创建本地 `.env` 配置。
 
-### macOS Docker Desktop
-
-macOS 上请先安装并启动 Docker Desktop，再确认终端可以访问 Docker：
-
-```bash
-docker info
-```
-
-不要用 `sudo ./install.sh` 或 `sudo ./scripts/start.sh` 启动本项目；Docker Desktop 应该能从普通用户 shell 访问。Apple Silicon 上构建或运行 Wine runner 时会使用 `linux/amd64` 仿真，速度会慢一些。
-
-### Linux Docker 权限
-
-Linux 上后端需要能以当前用户直接执行 `docker run`，因为每个转换任务都会启动一个受限 runner 容器。安装或启动前先确认：
-
-```bash
-docker info
-```
-
-如果提示没有权限访问 Docker daemon，推荐把当前用户加入 `docker` 组，然后重新登录：
-
-```bash
-sudo usermod -aG docker "$USER"
-newgrp docker
-docker info
-```
-
-不要只用 `sudo ./scripts/start.sh` 临时绕过权限；这容易在项目目录、`backend/.venv` 或数据目录里留下 root 拥有的文件，之后普通用户运行会遇到写入失败。生产部署时也可以让后端运行在一个有权访问 `/var/run/docker.sock` 的专用服务用户下。
-
-如果题包需要执行 Windows `.exe`，使用 Wine runner：
-
-```bash
-./install.sh --wine
-```
-
-如果 Docker Hub 或 GitHub 下载临时超时，可以先安装 Python/Node 依赖，稍后再构建 runner：
-
-```bash
-./install.sh --skip-runner
-docker compose --profile runner build runner
-```
-
-安装器默认会自动跳过 `localhost`、`127.*` 或 `::1` 这类构建容器访问不到的宿主机回环代理。如果 `apt-get update` 日志里仍出现类似 `Could not connect to 192.168.x.x:10808`，说明 Docker build 继承了宿主机代理，但构建容器访问不到这个代理。没有必要走代理时可以重试：
-
-```bash
-./install.sh --no-build-proxy
-```
-
-如果重试后仍然连接同一个代理，检查 `docker info` 里是否配置了 Docker daemon 级别的代理；这种代理需要在 Docker 服务配置里修正或移除。
-
-如果 Docker build 确实需要代理，请使用构建容器可以访问的代理地址，再显式启用代理继承：
-
-```bash
-./install.sh --build-proxy
-```
-
-如果 Debian apt 源访问慢或被阻断，可以给 runner 构建指定 apt 镜像：
-
-```bash
-./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
-```
-
-指定 apt 镜像且没有手动指定 `--base-image` 时，安装器会优先尝试已知的 Python 基础镜像镜像源，避免先等待 Docker Hub 超时。
-
-也可以用环境变量保留给手动构建：
-
-```bash
-P2H_APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian docker compose --profile runner build runner
-```
-
-如果只是 Docker Hub 的 `python:3.14-slim-trixie` 元数据或 token 请求超时，可以指定一个你当前网络可访问的 Python 基础镜像源：
-
-```bash
-./install.sh --base-image <registry>/library/python:3.14-slim-trixie
-```
-
-手动构建时也可以这样传：
-
-```bash
-P2H_PYTHON_BASE_IMAGE=<registry>/library/python:3.14-slim-trixie docker compose --profile runner build runner
-```
-
-启动：
+### 启动
 
 ```bash
 ./scripts/start.sh
 ```
 
-访问 [http://127.0.0.1:5173](http://127.0.0.1:5173)。停止时按 `Ctrl+C`。
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。后端 API 文档位于 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)。
 
-启动脚本只允许后端和前端监听 loopback 地址，避免把无认证的转换接口意外暴露到局域网或公网。远程使用时应保持应用监听 `127.0.0.1`，并在前面部署带身份认证、TLS 和请求限速的反向代理。
+停止服务时按 `Ctrl+C`。
 
-常用安装选项：
+## 使用流程
+
+1. 上传 ZIP 题包。
+2. 查看自动识别结果和候选证据；置信度不足时手动选择源格式。
+3. 选择目标格式。
+4. 按需填写题号起点、所有者、ICPC profile、FPS profile 等参数。
+5. Polygon 包只有在缺少完整测试数据时才启用“运行 `doall.sh`”。
+6. 启动任务并查看实时日志。
+7. 检查 warning/loss/fatal 报告。
+8. 下载题包，并在目标 OJ 的测试环境中做最终复核。
+
+自动识别只有在唯一候选置信度达到 `0.8` 时才会直接采用。格式冲突或结构不足时，系统会返回候选证据，不会静默猜测。
+
+## 转换与损失报告
+
+| 级别 | 含义 | 默认行为 |
+|---|---|---|
+| `warning` | 使用了默认时限、内存、语言或标题等非关键值 | 继续转换并记录 |
+| `loss` | 目标格式无法表达题面字段、分组依赖或平台私有元数据 | `loss_policy=warn` 时继续并记录 |
+| `fatal` | 测试数据不成对、必需 checker/interactor 丢失、目标不支持评测语义 | 始终失败 |
+
+`loss_policy` 支持：
+
+- `warn`：默认值。允许有损转换，结果与报告同时生成。
+- `error`：任何 `loss` 都提升为失败，适合迁移验收或自动化流水线。
+
+报告通过 Web UI 展示，也可从 `GET /api/jobs/{id}/report` 读取。报告是独立文件，不会混入目标 OJ 的可导入题包。
+
+转换失败时不会提供 writer 留下的半成品；容器只允许导出结构化失败报告。
+
+## 格式说明
+
+### Polygon
+
+- 读取 contest ZIP 中的 `contest.xml`、`problems/<slug>/problem.xml`、题面、测试点和资源。
+- `doall.sh` 默认不执行。只有用户显式启用后，runner 才会运行生成器、validator、checker 和主标程。
+- Windows 导出的包通常同时包含 `.exe` 和原始 C/C++ 源码。runner 会依据 `problem.xml` 原生重编译，并实时输出：
+
+  ```text
+  [problem-slug] native compile 1/4: check.exe
+  ```
+
+- 原生重编译成功后无需 Wine，在 Apple Silicon 上也能使用 ARM64 runner。
+- `doall.sh` 使用 fail-fast 行为；首个生成、验证或答案错误会立即终止。
+- 生成数据和已有 validator fixture 中的 CRLF 会按需要转换为 LF。
+- 只有缺少对应源码、必须执行 binary-only Windows 程序时才需要 Wine runner。
+
+### Hydro
+
+- 读取和输出 `problem.yaml`、`problem_<语言>.md`、`testdata/config.yaml`、测试数据和 `additional_file/`。
+- 支持 ACM/OI、文件 IO、子任务、依赖、checker、interactor、模板、附件和标程。
+- Hydro 是统一模型中能力最完整的格式，也是 Polygon 转其他格式时的受控中间包。
+
+### ICPC / DOMjudge / Kattis
+
+- 输入兼容 legacy `problem_statement/` 与新规范 `statement/`。
+- 输出 profile：
+  - `legacy-icpc`：默认，面向当前 DOMjudge/Kattis 工具链；`problem.yaml` 声明 `problem_format_version: legacy`。
+  - `2025-09`：按新规范输出，要求至少一个 accepted solution。
+- `2025-09` 的文本题面写为 `statement/problem.<语言>.tex`；PDF 原样写入同目录。
+- `problem.yaml.name` 的语言键与实际题面文件严格一致。
+- ICPC/Domjudge PDF → Hydro 时：
+  - PDF 复制到 Hydro `additional_file/`。
+  - 对每种题面语言生成对应的 `problem_<语言>.md`。
+  - Markdown 内容使用 `@[pdf](file://文件名)` 引用原 PDF。
+- accepted submissions、validators 和 generators 会尽量保留，无法直接映射的内容进入附件并记录报告。
+
+### HOJ
+
+- 输入使用官方导出结构：顶层成对出现 `problem_*.json` 与同名数据目录。
+- 支持 Markdown 题面、样例、标签、时空限制、语言限制、文件 IO、OI 分组、SPJ、交互器和 extra files。
+- Hydro → HOJ 会在 ZIP 顶层生成 HOJ 原生 JSON 与数据目录。
+- HOJ → ICPC 会输出 `A-slug.zip`、`B-slug.zip` 等独立题包。
+- `subtask_average` 无法与所有目标的计分语义完全等价，转换时会保守映射并报告损失。
+
+### FPS
+
+- 安全解析 `problem.xml` 或 `fps.xml`。
+- 支持 HUSTOJ 1.6 和 QDUOJ FPS 1.2 profile。
+- 映射题面、样例、测试数据、图片、SPJ、interactor、模板和标程。
+- 允许合法 DOCTYPE 声明，但禁止实体展开、外部实体和 XML Bomb。
+- 对 XML 节点数、深度、文本长度与 Base64 图片总量设置上限。
+
+### QDUOJ
+
+- 使用编号目录、`problem.json` 和 `testcase/`。
+- 支持 HTML 题面、ACM/OI、逐点分值、SPJ、模板、答案和标签。
+- 文件 IO 等不属于官方导出字段的信息会登记为 `loss`，不会制造近似语义。
+
+### UOJ
+
+- 支持 `problem.conf`、普通测试、额外测试、样例、逐点分值、子任务、内置 checker、`chk.cpp` 和 `val.cpp`。
+- 不支持首批范围外的复杂自定义 judger；影响判题语义时会产生 `fatal`。
+- 优先读取同包 `statement.md`、`statement.html` 或 `statement.pdf`。
+- 没有题面时，为 Hydro 等目标生成醒目占位题面并记录 `loss`。
+- 输出包含可上传评测数据包，以及独立题面和 metadata sidecar。
+
+### DMOJ / LQDOJ
+
+- 支持 `init.yml`、显式测试列表、正则匹配、batched groups、dependencies、archive、bridged checker 和 interactor。
+- 无法映射的动态 generator 会作为附件保留并记录损失，不会执行或推断其输出。
+- 题面处理与 UOJ 类似：优先读取 sidecar，缺失时生成占位题面并报告。
+
+### Generic
+
+- 递归匹配 `.in` 与 `.ans/.out`。
+- 识别 `sample/`、PDF/Markdown 题面和常见 checker 文件。
+- 缺少限制时默认使用 1 秒、256 MiB，并生成 `warning`。
+- Generic 只用于导入结构简单的本地目录，不作为输出格式。
+
+## 缺失文件如何处理
+
+转换器不会猜测或伪造会影响判题结果的文件。
+
+| 情况 | 处理结果 | 建议修复方式 |
+|---|---|---|
+| `.in` 缺少对应 `.out/.ans` | `fatal` | 从原 OJ 重新导出，检查名称、扩展名和大小写 |
+| 配置声明的测试点不存在 | `fatal` | 补回原文件或修正源配置，不要创建空文件 |
+| checker、interactor、validator 缺失 | `fatal` | 恢复原始源码并保持配置路径 |
+| 交互题缺 interactor | `fatal` | 从原题包恢复；若实际不是交互题，应先修正题型 |
+| PDF 或附件清单引用不存在 | `fatal` | 补回文件或删除错误引用后重新导出 |
+| UOJ/DMOJ 整个题面缺失 | `loss` | 添加同包 `statement.md/html/pdf` sidecar |
+| 元数据 JSON/YAML/XML 损坏 | 源读取失败 | 根据报告定位文件，优先重新导出 |
+| 自动识别冲突或低置信度 | 不自动启动 | 手动选择源格式，并检查是否混入多种题包 |
+| 本地缺少 runner 镜像 | 启动前失败 | 运行 `./install.sh` 或重新构建对应镜像 |
+
+Windows 中不区分大小写的路径在 Linux runner 中可能失效，例如 `Check.cpp` 与 `check.cpp` 是不同文件。修复后请重新打包并确认上传的是新 ZIP。
+
+## 安装与配置
+
+### 安装器选项
 
 ```text
---wine                 同时构建 p2h-runner-wine，并在新 .env 中使用它
+--wine                 同时构建 p2h-runner-wine
 --skip-runner          跳过 Docker runner 构建
 --skip-backend         跳过后端依赖安装
 --skip-frontend        跳过前端依赖安装
 --no-frontend-build    跳过 npm run build
 --python PATH          指定创建 backend/.venv 的 Python
---base-image IMAGE     指定 runner Docker 基础镜像
---apt-mirror URL       指定 runner Docker 构建使用的 Debian apt 镜像
---apt-security URL     指定 runner Docker 构建使用的 Debian security 镜像
---build-proxy          强制构建 runner 时继承宿主机代理环境变量
---no-build-proxy       构建 runner 时不继承宿主机代理环境变量
+--base-image IMAGE     指定 runner 的 Python 基础镜像
+--apt-mirror URL       指定 Debian apt 镜像
+--apt-security URL     指定 Debian security 镜像
+--build-proxy          强制继承宿主机代理
+--no-build-proxy       不继承宿主机代理
 ```
 
-## 手动准备 runner 镜像
+示例：
 
 ```bash
-docker compose --profile runner build runner
+./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
+./install.sh --base-image <registry>/library/python:3.14-slim-trixie
+./install.sh --skip-runner
 ```
 
-镜像名为 `p2h-runner`，默认安装：
+安装器会自动忽略容器无法访问的 `localhost`、`127.*` 和 `::1` 回环代理。需要代理时，应使用构建容器可访问的地址。
 
-- `polygon2hydro` 提交 `93aca21`
-- `Polygon2DOMjudge` 提交 `8b0919a2a3e0946faaf677ec5cb2cad65fee7e30`
+### 环境变量
 
-runner 基础镜像使用 `python:3.14-slim-trixie` 和 OpenJDK 21，避免使用安全扫描中出现多项不再回补 CVE 的旧版 Debian 组件。构建完成后会移除运行时不需要的 pip。普通镜像不安装 `wine`。对于同时包含 Windows `.exe` 和对应 C/C++ 源码的 Polygon 包，runner 会先按 `problem.xml` 在容器内重编译为原生 Linux 可执行文件，再运行 `doall.sh`；这种包不需要 Wine runner。
+默认值参见 [.env.example](.env.example)。
 
-安全扫描记录（2026-07-23）：Python 3.14.6 的版本清单仍会命中 `CVE-2026-15308`，因为扫描器只根据解释器版本判断；两个 Runner 镜像已固定应用 CPython 3.14 官方回补提交 `07efb081`，并校验文件 SHA-256，构建时还会验证补丁新增状态。Python 3.14 发布包含该修复的稳定维护版本后，应移除临时回补并直接升级基础镜像。
+| 变量 | 默认值 | 用途 |
+|---|---:|---|
+| `P2H_DATA_DIR` | `~/.p2h-web-ui/backend_data` | 上传、任务元数据和结果目录 |
+| `P2H_RUNNER_IMAGE` | `p2h-runner` | runner 镜像 |
+| `P2H_MAX_UPLOAD_BYTES` | `536870912` | 单次上传上限 |
+| `P2H_JOB_TIMEOUT_SECONDS` | `600` | 单任务超时 |
+| `P2H_JOB_TTL_SECONDS` | `86400` | 完成任务保留时间 |
+| `P2H_MAX_CONCURRENT_JOBS` | `2` | 最大并发任务数 |
+| `P2H_MAX_STORED_JOBS` | `100` | 最大保存任务数 |
+| `P2H_MAX_STORAGE_BYTES` | `10737418240` | 任务存储总上限 |
+| `P2H_MAX_LOG_BYTES` | `10485760` | 单任务日志上限 |
+| `P2H_DOCKER_MEMORY` | `1g` | 容器内存限制 |
+| `P2H_DOCKER_CPUS` | `2` | 容器 CPU 限制 |
+| `P2H_DOCKER_PIDS_LIMIT` | `1024` | 普通 runner PID 限制；`-1` 表示不限制 |
+| `P2H_DOCKER_WINE_PIDS_LIMIT` | `4096` | Wine runner PID 限制 |
+| `P2H_DOCKER_WINE_HOME_SIZE` | `4g` | Wine HOME/WINEPREFIX tmpfs |
+| `P2H_DOCKER_TMP_SIZE` | `512m` | `/tmp` tmpfs |
+| `P2H_DOCKER_WORK_SIZE` | `1g` | `/work` tmpfs 与展开总量基准 |
+| `P2H_DOCKER_OUTPUT_SIZE` | `1g` | `/output` tmpfs |
+| `P2H_BACKEND_HOST` | `127.0.0.1` | 后端监听地址 |
+| `P2H_BACKEND_PORT` | `8000` | 后端端口 |
+| `P2H_FRONTEND_HOST` | `127.0.0.1` | 前端监听地址 |
+| `P2H_FRONTEND_PORT` | `5173` | 前端端口 |
 
-可运行 `scripts/security-scan.sh` 对普通与 Wine Runner 镜像执行 Grype 高危漏洞门禁；脚本会加载 `security/openvex.json`，仅豁免上述已实际回补但仍被版本匹配命中的 CVE。
+任务达到 TTL、数量或存储限制后，会在后续 API 请求时清理已完成任务；运行中的任务不会被 TTL 清理。
 
-只有题包缺少对应源码、必须直接运行 Windows `.exe` 时，才构建 Wine runner：
+### 手动启动
 
-```bash
-docker compose --profile wine build runner-wine
-```
-
-然后启动后端前指定：
-
-```bash
-export P2H_RUNNER_IMAGE=p2h-runner-wine
-```
-
-`p2h-runner-wine` 使用 `linux/amd64` 并安装 32/64 位 Wine，适合同时包含 `PE32` 和 `PE32+` 可执行文件的 Polygon 包。它明显更大，且在 Apple Silicon 上会通过 Docker 的 amd64 仿真运行，速度比普通 runner 慢。
-
-Apple Silicon 上不要把 Wine runner 当作首选。Docker 官方把 QEMU 下运行 amd64 容器定义为 best effort，Wine 的二次兼容层可能表现为 `free(): invalid pointer`、`qemu: uncaught target signal 6` 等崩溃。runner 会在执行题包脚本前探测 Wine；探测失败会立即终止并给出单一根因，不再继续生成几百条连锁错误。必须运行 binary-only Windows 包时，在 Docker Desktop 中选择 Apple Virtualization framework 并启用 Rosetta，然后重启 Docker Desktop；否则请在 Polygon 导出时保留 generator、validator、checker 和主标程源码。
-
-`doall.sh` 以 fail-fast 模式运行。生成器、validator、checker 或标程首次失败后任务就会停止，避免后续空测试点和缺答案错误掩盖真正的失败位置。
-
-如果日志里出现 `qemu: qemu_thread_create: Resource temporarily unavailable`，通常是 Apple Silicon 上 Wine/QEMU 创建线程时触达容器 pid 限制。后端会对 Wine runner 默认使用 `P2H_DOCKER_WINE_PIDS_LIMIT=4096`；如果题包测试很多或 Wine 进程仍然失败，可以继续调高这个值，或临时设为 `-1` 取消 Docker 的 pid 限制。
-
-Wine runner 会把 Wine 的 `HOME`、`TMPDIR` 和 `WINEPREFIX` 放到独立的 `/home/app` tmpfs，而不是通用 `/work` tmpfs。Wine prefix 初始化可能占用 1GB 以上；如果该 tmpfs 过小，可能报 `could not load kernel32.dll` 或 `No space left on device`，可调大 `P2H_DOCKER_WINE_HOME_SIZE`。
-
-Wine runner 的 `/home/app` tmpfs 会显式开启 `exec`，用于执行 Polygon `doall.sh` 内部的 `scripts/*.sh`。如果这里保持 Docker 默认 `noexec`，即使脚本已经 chmod 为可执行，也会报 `scripts/xxx.sh: Permission denied`。
-
-Wine 生成器可能以 Windows 文本模式写出 CRLF 换行。runner 会在 `doall.sh` 成功后、打包前，将所选题目的 `tests/` 中的 CRLF 统一转换为 LF；其他源码和附件不会被改写。
-
-## 手动启动后端
+后端：
 
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-可选环境变量：
-
-```text
-P2H_DATA_DIR=~/.p2h-web-ui/backend_data
-P2H_RUNNER_IMAGE=p2h-runner
-P2H_PYTHON_BASE_IMAGE=python:3.14-slim-trixie
-P2H_APT_MIRROR=
-P2H_APT_SECURITY_MIRROR=
-P2H_MAX_UPLOAD_BYTES=536870912
-P2H_JOB_TIMEOUT_SECONDS=600
-P2H_JOB_TTL_SECONDS=86400
-P2H_MAX_CONCURRENT_JOBS=2
-P2H_MAX_STORED_JOBS=100
-P2H_MAX_STORAGE_BYTES=10737418240
-P2H_MAX_LOG_BYTES=10485760
-P2H_DOCKER_MEMORY=1g
-P2H_DOCKER_CPUS=2
-P2H_DOCKER_PIDS_LIMIT=1024
-P2H_DOCKER_WINE_PIDS_LIMIT=4096
-P2H_DOCKER_WINE_HOME_SIZE=4g
-P2H_DOCKER_TMP_SIZE=512m
-P2H_DOCKER_WORK_SIZE=1g
-P2H_DOCKER_OUTPUT_SIZE=1g
-```
-
-后端会为每个 job 创建独立目录。上传包以只读方式挂载；`/work` 和 `/output` 都是有容量上限的容器 tmpfs。转换成功后，入口脚本会拒绝符号链接，再把 `/output` 复制到宿主机的 job 输出目录供后端打包。转换失败时只复制常规文件形式的 `.p2h-report.json`，不会复制半成品。这样生成脚本不能绕过输出容量限制，也不能通过输出符号链接读取宿主文件。
-
-任务在创建或完成超过 `P2H_JOB_TTL_SECONDS` 后会在下一次 API 请求时清理；运行中的任务不会被清理。系统同时限制并发转换数、保存任务数、总存储量和单任务日志大小。达到限制时应先删除旧任务或调整对应环境变量。
-
-runner 的受信任入口进程负责建立独立的 mount/PID namespace，并在其中卸载宿主 `/result` 挂载点；随后才以非 root 用户 `10001:10001`、空 capability 集合和 `no-new-privileges` 运行转换器。这样即使显式启用了题包内的 `doall.sh`，脚本也无法直接写宿主输出目录，后台子进程也会在转换器退出时一并终止。容器根文件系统仍为只读。Linux bind mount 会保留宿主机文件所有权，所以后端会显式设置：
-
-- job 根目录和 `input/` 为 `0755`，让容器可以遍历并读取上传包。
-- 上传的 `contest.zip` 为 `0644`。
-- 宿主 job 输出目录为 `0777`，仅供受信任入口进程在转换结束后写入；转换程序所在 namespace 看不到 `/result`，实际产物写入独立 `/output` tmpfs。
-
-如果你把 `P2H_DATA_DIR` 改到自定义路径，确保启动后端的用户能创建和修改该目录；不要把它放在 root-only 目录下。
-
-## 手动启动前端
+前端：
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-访问 [http://127.0.0.1:5173](http://127.0.0.1:5173)。Vite 会把 `/api` 代理到 `http://127.0.0.1:8000`。
+Vite 会把 `/api` 代理到 `http://127.0.0.1:8000`。
 
-## API
+### Wine runner
 
-- `POST /api/inspect`：上传并安全检查 ZIP，返回 `job_id`、`detected_format` 和带证据的 `format_candidates`。只有唯一候选置信度达到 0.8 才会自动采用。
-- `POST /api/jobs`：使用 `source_format`、`target_format`、`loss_policy`、`only` 和 `options.<format>` 启动通用转换。旧 `target` 七个枚举仍作为一个小版本周期内的兼容入口；旧字段和新字段不能混用。
-- `GET /api/jobs/{job_id}`：查询任务状态。
-- `GET /api/jobs/{job_id}/logs`：读取纯文本日志。
-- `GET /api/jobs/{job_id}/report`：读取独立的结构化转换报告。报告不会混入可导入的目标题包。
-- `GET /api/jobs/{job_id}/download`：下载转换结果。
-- `DELETE /api/jobs/{job_id}`：取消运行中任务或清理已完成任务。
-
-统一 runner 命令：
+只有 binary-only Windows 题包需要 Wine：
 
 ```bash
+./install.sh --wine
+```
+
+或手动构建：
+
+```bash
+docker compose --profile wine build runner-wine
+```
+
+然后在 `.env` 中设置：
+
+```text
+P2H_RUNNER_IMAGE=p2h-runner-wine
+```
+
+`p2h-runner-wine` 固定使用 `linux/amd64`，包含 32/64 位 Wine。Apple Silicon 上优先使用带源码的普通 ARM64 runner；amd64/QEMU + Wine 的双层兼容可能出现 `free(): invalid pointer` 或 `qemu: uncaught target signal 6`。runner 会在执行前探测 Wine，失败时立即报告根因。
+
+必须运行 binary-only Windows 包时，可在 Docker Desktop 中选择 Apple Virtualization framework 并启用 Rosetta。Wine prefix 空间不足时，增大 `P2H_DOCKER_WINE_HOME_SIZE`。
+
+## CLI
+
+runner 内的统一命令：
+
+```text
 package-convert INPUT.zip \
   --source-format auto \
   --target-format hydro \
@@ -297,57 +352,122 @@ package-convert INPUT.zip \
   -o OUTPUT
 ```
 
-`convert`、`domjudge-convert`、`hydro-to-domjudge`、`domjudge-to-hydro`、`hoj-to-hydro`、`hydro-to-hoj` 和 `hoj-to-domjudge` 继续作为兼容包装命令。
+常用参数：
 
-ICPC 输出会生成确定性 UUID；缺少输入 validator 时会基于题包测试输入的 SHA-256 集合生成严格 validator，而不会执行上传包中的生成器。`2025-09` profile 要求至少一个 accepted solution。许可证默认为规范允许的 `unknown`；选择 CC、educational 或 permission 时必须填写 rights owner。
+```text
+--source-format auto|polygon|hydro|icpc|hoj|fps|qduoj|uoj|dmoj|generic
+--target-format hydro|icpc|hoj|fps|qduoj|uoj|dmoj
+--loss-policy warn|error
+--only SLUG
+--pid-start P1000
+--owner 1
+--code-start A
+--icpc-profile legacy-icpc|2025-09
+--fps-profile hustoj-1.6|qduoj-1.2
+--run-doall
+```
 
-默认的 `legacy-icpc` profile 只写出 ICPC 子集内容，但在 `problem.yaml` 中声明兼容的 `problem_format_version: legacy`，以兼容当前 reference `problemtools`（其尚不识别规范允许的 `legacy-icpc` 字符串）。
+查看完整帮助：
 
-`2025-09` profile 的文本题面写为 `statement/problem.<语言>.tex`（正文使用 verbatim），PDF 则原样写入同目录；这样既符合 2025-09 规范，也兼容当前 BAPCtools 的题面语言一致性检查。`problem.yaml.name` 会严格使用实际写出的题面语言集合。
+```bash
+docker run --rm p2h-runner package-convert --help
+```
 
-旧兼容命令 Polygon -> DOMjudge 转换说明：
+兼容命令仍然可用：
 
-- 上传入口仍是 Polygon contest zip。
-- runner 会安全解压 contest zip，按 `problems/<slug>` 找到题目。
-- 不指定 `only slugs` 时会按 slug 排序逐题转换。
-- 输出目录里会生成 `A-slug.zip`、`B-slug.zip` 这类 DOMjudge/Kattis problem package，后端再统一打包成一个下载文件。
-- `doall.sh` 默认不执行。若启用，仍在同一个受限 Docker runner 内执行。
-- P2D 的 contest 辅助入口目前不能直接批量转换 contest zip，本项目在 runner 里补了一层批量包装逻辑。
+```text
+convert
+domjudge-convert
+hydro-to-domjudge
+domjudge-to-hydro
+hoj-to-hydro
+hydro-to-hoj
+hoj-to-domjudge
+```
 
-旧兼容命令 HydroOJ -> DOMjudge 转换说明：
+## API
 
-- 上传入口是 HydroOJ package zip，可以是单题包，也可以是包含多个 HydroOJ 题包目录的 zip。
-- 转换只做文件格式重排，不执行 `doall.sh`，也不调用 Polygon 专用转换链路。
-- `problem.yaml`、`problem_*.md` 和 `testdata/` 会转换成 DOMjudge 的 `problem.yaml`、`domjudge-problem.ini`、`problem_statement/`、`data/sample`、`data/secret`。
-- `testdata/std.cpp` 等标准程序会进入 `submissions/accepted`；`check.cpp`、`val.cpp`、`gen.cpp` 会分别进入 `output_validators/`、`input_validators/`、`generators/`。
-- checker/validator、交互题、特殊 judging 脚本等复杂语义只能尽量搬运文件，转换后仍建议在目标 OJ 上复核。
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/health` | 健康检查 |
+| `POST` | `/api/inspect` | 上传并检查 ZIP，返回任务 ID 与格式候选 |
+| `POST` | `/api/jobs` | 启动转换 |
+| `GET` | `/api/jobs/{id}` | 查询状态 |
+| `GET` | `/api/jobs/{id}/logs` | 获取纯文本日志 |
+| `GET` | `/api/jobs/{id}/report` | 获取结构化转换报告 |
+| `GET` | `/api/jobs/{id}/download` | 下载成功结果 |
+| `DELETE` | `/api/jobs/{id}` | 取消或删除任务 |
 
-旧兼容命令 DOMjudge -> HydroOJ 转换说明：
+上传：
 
-- 上传入口可以是单个 DOMjudge/Kattis problem package，也可以是包含多个题包目录或多个内嵌题包 zip 的外层 zip。
-- `problem_statement/*.pdf` 会复制到 Hydro 的 `additional_file/`；每种识别到的语言会生成对应的 `problem_<语言>.md`，内容使用 `@[pdf](file://文件名)` 嵌入 PDF。
-- `data/secret` 会转换为 Hydro `testdata/`；`data/sample` 会保存在 `additional_file/samples/`。统一 `package-convert` 路由要求至少一对 secret 测试，只有旧 `domjudge-to-hydro` 兼容命令保留 sample 兜底行为。
-- `domjudge-problem.ini` 和 `problem.yaml` 中的标题、时限和内存限制会写入 Hydro 元数据与 `testdata/config.yaml`。
-- 能识别为 testlib 的 `output_validators` 源文件会作为 Hydro checker 搬运；accepted submissions、input/output validators 和 generators 也会保存在 `additional_file/sources/` 供人工复核。
-- 每题必须包含至少一个 PDF 题面和一对输入/答案文件，否则转换会失败并在任务日志中给出原因。
-- checker/validator、交互题、特殊 judging 脚本等复杂语义只能尽量搬运文件，转换后仍建议在目标 OJ 上复核。
+```bash
+curl -F 'file=@contest.zip;type=application/zip' \
+  http://127.0.0.1:8000/api/inspect
+```
 
-旧兼容命令 HOJ 相关转换说明：
+启动转换：
 
-- HOJ 输入使用官方导出结构：zip 顶层包含成对的 `problem_x.json` 与 `problem_x/` 测试数据目录；支持单题和批量导出包。
-- HOJ -> HydroOJ 会转换 Markdown 题面、题面样例、标签、时空限制、语言限制、文件 IO、OI 分组、SPJ/交互器以及 user/judge extra files。
-- HydroOJ -> HOJ 会在结果 zip 顶层生成 HOJ 要求的 JSON 与同名目录，可直接在 HOJ 后台导入；Hydro 的 `subtasks` 会映射为 HOJ 的 `subtask_lowest` 分组。
-- HOJ -> DOMjudge 会输出 `A-slug.zip`、`B-slug.zip` 这类独立 problem package；HOJ 题面样例进入 `data/sample`，正式测试点进入 `data/secret`。
-- HOJ 的 `subtask_average` 与 Hydro/DOMjudge 的计分语义不能完全等价，目前按最低分子任务进行保守映射。
-- HOJ 原生题包没有与 Hydro `additional_file` 完全等价的题面附件清单；Hydro -> HOJ 时 Markdown 内的附件引用会保留，但图片/PDF 等附件仍需在 HOJ 中人工复核。
+```bash
+curl -X POST http://127.0.0.1:8000/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "job_id": "<inspect 返回的 job_id>",
+    "source_format": "auto",
+    "target_format": "hydro",
+    "loss_policy": "warn",
+    "only": [],
+    "options": {
+      "polygon": {
+        "run_doall": false,
+        "missing_env": "warn"
+      },
+      "hydro": {
+        "pid_start": "P1000",
+        "owner": 1,
+        "tags": []
+      }
+    }
+  }'
+```
 
-## 测试
+旧版 `target` 七个枚举仍在一个小版本周期内接受。旧字段和新字段同时出现时返回 `422`，避免参数含义冲突。
+
+## 安全模型
+
+### 上传与解析
+
+- 拒绝 ZIP 路径穿越、绝对路径、符号链接和重复/大小写冲突名称。
+- 限制条目数、总展开大小、单文件大小与上传压缩比。
+- 嵌套压缩包共享同一展开预算。
+- JSON/YAML 拒绝重复键、非有限数字、超深嵌套和超大集合。
+- YAML 使用受限 SafeLoader，并限制 alias、节点数和深度。
+- XML 使用 `defusedxml`，禁止实体展开和外部实体。
+
+### 任务与容器
+
+- 每个任务使用一次性 Docker 容器。
+- 容器无网络、根文件系统只读，并限制 CPU、内存、PID 与 tmpfs 容量。
+- 上传包只读挂载。
+- 受信任入口进程建立独立 mount/PID namespace，随后以 UID/GID `10001:10001`、空 capability 集合和 `no-new-privileges` 运行转换器。
+- 转换 namespace 看不到宿主 `/result` 挂载点；产物先写入受限 `/output` tmpfs。
+- 转换结束后终止后台子进程，再由受信任入口复制常规文件。
+- 输出符号链接会被拒绝。
+- 转换失败时只复制结构化报告，不复制半成品。
+
+除用户显式启用的 Polygon `doall.sh` 外，转换器不会执行导入包中的 checker、generator、validator、interactor 或脚本。
+
+Docker 是风险降低措施，不是绝对沙箱。处理不可信第三方题包的高安全环境应进一步采用 gVisor、Kata Containers、Firecracker 或隔离主机。
+
+## 测试与验收
 
 后端：
 
 ```bash
 cd backend
-pytest -q
+.venv/bin/pytest -q
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+.venv/bin/bandit -q -r app ../runner
 ```
 
 前端：
@@ -356,20 +476,129 @@ pytest -q
 cd frontend
 npm test
 npm run build
+npm audit --audit-level=high
 ```
 
-runner：
+Shell 与 runner：
 
 ```bash
+shellcheck scripts/*.sh runner/entrypoint.sh
 docker compose --profile runner build runner
-docker run --rm p2h-runner --help
-docker run --rm p2h-runner package-convert --help
-docker run --rm p2h-runner domjudge-convert --help
-docker run --rm p2h-runner hydro-to-domjudge --help
-docker run --rm p2h-runner domjudge-to-hydro --help
-docker run --rm p2h-runner hoj-to-hydro --help
-docker run --rm p2h-runner hydro-to-hoj --help
-docker run --rm p2h-runner hoj-to-domjudge --help
+docker compose --profile wine build runner-wine
+./scripts/test-runner-isolation.sh p2h-runner
+./scripts/test-runner-isolation.sh p2h-runner-wine
 ```
 
-ICPC 题包可再用上游工具交叉验证：`legacy-icpc` profile 使用 reference `problemtools` 的 `verifyproblem`；`2025-09` 使用当前 BAPCtools 的 `bt validate`。后者目前只识别 TeX/PDF 题面，因此本项目的 2025 文本题面默认写为 TeX。
+依赖与镜像：
+
+```bash
+cd backend
+.venv/bin/pip check
+cd ..
+./scripts/security-scan.sh
+```
+
+ICPC 输出建议再做上游交叉校验：
+
+- legacy profile：Kattis `problemtools` 的 `verifyproblem`。
+- `2025-09` profile：BAPCtools 的 `bt validate`。
+
+项目测试包含各适配器的格式 → IR、IR → 格式、源/目标矩阵冒烟、旧 API、loss policy、缺题面、XXE/XML Bomb、YAML alias bomb、Zip Bomb、目录穿越、重复文件名、超大 Base64、容器隔离和任务竞态回归。
+
+本轮发布验收结果：
+
+- 后端 178 项测试通过。
+- 前端测试、TypeScript 检查和生产构建通过。
+- Ruff、Bandit、ShellCheck、pip check、npm audit 和 Git diff 检查通过。
+- 普通/Wine runner 隔离探针通过。
+- 真实 13 题 Polygon contest → Hydro：13/13 成功，0 warning，0 loss。
+- ICPC legacy 输出通过 `problemtools`，ICPC `2025-09` 输出通过 BAPCtools。
+
+## 常见问题
+
+### `start:` 后长时间没有日志
+
+包含 Windows `.exe` 和源码的 Polygon 包会先原生编译全部 generator、validator、checker 和主标程。新版 runner 会逐个输出 `native compile x/y`；大型 contest 的首次编译可能持续数分钟。
+
+### `free(): invalid pointer` 或 `qemu: uncaught target signal 6`
+
+这是 Apple Silicon 上 amd64/QEMU + Wine 的兼容问题。使用普通 `p2h-runner` 并保留 Polygon 源码；只有 binary-only 包才使用 Wine。
+
+### `archive member exceeds compression ratio limit`
+
+上传包触发了压缩炸弹保护。重新打包并检查是否包含异常稀疏/重复大文件。由受限 runner 生成的测试数据采用展开大小、单文件大小和流式读取校验，不会仅因合法高压缩率被误判。
+
+### `No space left on device`
+
+根据失败位置增大：
+
+- 解压或编译：`P2H_DOCKER_WORK_SIZE`
+- 结果生成：`P2H_DOCKER_OUTPUT_SIZE`
+- Wine prefix：`P2H_DOCKER_WINE_HOME_SIZE`
+
+同时确保 Docker Desktop 分配了足够磁盘与内存。
+
+### Docker build 下载失败
+
+可按顺序尝试：
+
+```bash
+./install.sh --no-build-proxy
+./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
+./install.sh --base-image <可访问镜像>/library/python:3.14-slim-trixie
+```
+
+### 任务被清理或找不到
+
+完成任务超过 `P2H_JOB_TTL_SECONDS`，或任务数/总存储量达到上限时，会在后续请求中被清理。重要结果应及时下载。
+
+## 项目结构
+
+```text
+backend/                     FastAPI API、存储、任务状态和 Docker 调度
+frontend/                    React 19 + Vite + TypeScript Web UI
+runner/                      中间模型、格式适配器、兼容桥与安全入口
+scripts/                     安装、启动、安全扫描和隔离测试
+security/                    隔离探针与 VEX 说明
+docker-compose.yml           普通/Wine runner 构建配置
+install.sh                   一键安装入口
+```
+
+## 参与贡献
+
+欢迎提交 issue、格式 fixture、官方样例、兼容性报告和 Pull Request。
+
+新增格式时应：
+
+1. 通过统一适配器接口实现检测、读取、目标校验和写出。
+2. 不执行导入包中的脚本或二进制。
+3. 对无法表达的语义生成明确 loss/fatal，不做可能改变判题结果的近似。
+4. 增加最小 fixture、格式 → IR、IR → 格式和矩阵冒烟测试。
+5. 补充 README 的支持矩阵、格式说明和限制。
+
+## 致谢
+
+本项目能够完成，离不开以下开源项目、规范和社区：
+
+- [polygon2hydro](https://github.com/KisuraOP/polygon2hydro)：Polygon → Hydro 核心转换能力。
+- [Polygon2DOMjudge](https://github.com/cn-xcpc-tools/Polygon2DOMjudge)：Polygon → DOMjudge/Kattis 转换基础。
+- [Hydro](https://github.com/hydro-dev/Hydro)：HydroOJ 题包格式与生态。
+- [DOMjudge](https://www.domjudge.org/) 与 [ICPC Problem Package Format](https://icpc.io/problem-package-format/)：标准竞赛题包规范。
+- [Kattis problemtools](https://github.com/Kattis/problemtools) 与 [BAPCtools](https://github.com/RagnarGrootKoerkamp/BAPCtools)：ICPC 题包校验工具。
+- [HOJ](https://github.com/HimitZH/HOJ)：HOJ 原生导入导出格式。
+- [HUSTOJ](https://github.com/zhblue/hustoj) 与 [FPS 文档](https://github.com/zhblue/hustoj/blob/master/docs/FPS.md)：Free Problem Set 交换格式。
+- [QDUOJ](https://github.com/QingdaoU/OnlineJudge)：QDUOJ 原生题包格式与实现参考。
+- [UniversalOJ](https://github.com/UniversalOJ/UOJ-System)：UOJ 评测数据格式与 checker 生态。
+- [DMOJ](https://github.com/DMOJ/judge-server) 与 [DMOJ 文档](https://github.com/DMOJ/docs)：DMOJ/LQDOJ 题目格式。
+- [FastAPI](https://fastapi.tiangolo.com/)、[React](https://react.dev/)、[Vite](https://vite.dev/) 和 [Docker](https://www.docker.com/)：Web、API 与隔离运行基础。
+- [defusedxml](https://github.com/tiran/defusedxml)、[PyYAML](https://pyyaml.org/) 和 [Wine](https://www.winehq.org/)：安全解析与兼容运行能力。
+
+也感谢所有提交题包样例、复现日志、格式资料和测试反馈的用户与 OJ 社区维护者。
+
+上述项目与工具分别遵循各自许可证；本仓库的 MIT 许可证不替代其许可证要求。
+
+## 许可证
+
+本项目使用 [MIT License](LICENSE)。
+
+Copyright © 2026 Albert_Li.
