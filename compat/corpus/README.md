@@ -26,7 +26,8 @@ python3 compat/corpus/build.py /tmp/oj-compat-corpus
   `hydro-answer-conflict.zip`：分别验证大小写修复、缺失文件上传和冲突答案
   不可静默接受。
 - `manifest.json`：列出每个 fixture 的输入格式、目标矩阵、期望问题数、
-  能力标签或预期 fatal code，供 CI 数据驱动遍历。
+  测试点/样例/判题程序等语义计数、能力标签或预期 fatal code，供 CI
+  数据驱动遍历。
 
 生成器固定 ZIP 时间戳和文件顺序；测试比较语义快照，不依赖压缩后的字节完全
 一致。

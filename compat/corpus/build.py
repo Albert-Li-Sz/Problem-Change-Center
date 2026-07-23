@@ -370,7 +370,7 @@ def build(destination: Path) -> None:
         },
     )
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "license": "CC0-1.0",
         "fixtures": [
             {
@@ -378,6 +378,16 @@ def build(destination: Path) -> None:
                 "source_format": "hydro",
                 "targets": ["icpc", "hoj"],
                 "problem_count": 5,
+                "semantic": {
+                    "case_count": 7,
+                    "sample_count": 1,
+                    "checker_count": 1,
+                    "validator_count": 1,
+                    "interactor_count": 1,
+                    "attachment_count": 1,
+                    "template_count": 1,
+                    "solution_count": 2,
+                },
                 "capabilities": [
                     "attachments",
                     "checker",
@@ -395,6 +405,7 @@ def build(destination: Path) -> None:
                 "source_format": "icpc",
                 "targets": ["hydro"],
                 "problem_count": 1,
+                "semantic": {"case_count": 2, "sample_count": 1},
                 "capabilities": ["multilingual-statements", "samples"],
             },
             {
@@ -402,6 +413,11 @@ def build(destination: Path) -> None:
                 "source_format": "fps",
                 "targets": ["hydro"],
                 "problem_count": 1,
+                "semantic": {
+                    "case_count": 2,
+                    "sample_count": 1,
+                    "template_count": 1,
+                },
                 "capabilities": ["samples", "templates"],
             },
             {
@@ -409,6 +425,7 @@ def build(destination: Path) -> None:
                 "source_format": "generic",
                 "targets": ["hydro"],
                 "problem_count": 2,
+                "semantic": {"case_count": 2, "sample_count": 0},
                 "capabilities": ["multiple-problems", "unicode-paths"],
             },
             {
@@ -416,6 +433,14 @@ def build(destination: Path) -> None:
                 "source_format": "probhub",
                 "targets": ["hydro", "icpc"],
                 "problem_count": 2,
+                "semantic": {
+                    "case_count": 4,
+                    "sample_count": 2,
+                    "checker_count": 1,
+                    "validator_count": 2,
+                    "attachment_count": 3,
+                    "solution_count": 2,
+                },
                 "capabilities": [
                     "assets",
                     "authoring-metadata",
@@ -431,6 +456,11 @@ def build(destination: Path) -> None:
                 "source_format": "probhub",
                 "targets": ["hydro"],
                 "problem_count": 1,
+                "semantic": {
+                    "case_count": 2,
+                    "sample_count": 1,
+                    "checker_count": 1,
+                },
                 "capabilities": [
                     "domjudge-export",
                     "pdf-statements",
@@ -442,6 +472,14 @@ def build(destination: Path) -> None:
                 "source_format": "probhub",
                 "targets": ["hydro", "icpc"],
                 "problem_count": 1,
+                "semantic": {
+                    "case_count": 2,
+                    "sample_count": 1,
+                    "checker_count": 1,
+                    "validator_count": 1,
+                    "attachment_count": 3,
+                    "solution_count": 1,
+                },
                 "capabilities": [
                     "authoring-metadata",
                     "checker",

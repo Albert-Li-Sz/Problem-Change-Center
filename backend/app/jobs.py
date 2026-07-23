@@ -26,6 +26,7 @@ from .docker_runner import (
 )
 from .schemas import DeleteResponse, JobRequest, JobResponse
 from .storage import Storage, prepare_runner_mount_permissions, utc_now_iso
+from .observability import Metrics, structured_logger
 
 
 _PID_RE = re.compile(r"^[A-Za-z]+[0-9]+$")
@@ -78,9 +79,13 @@ class JobDeadlineExceeded(Exception):
 
 
 class JobManager:
-    def __init__(self, settings: Settings, storage: Storage) -> None:
+    def __init__(
+        self, settings: Settings, storage: Storage, metrics: Metrics | None = None
+    ) -> None:
         self.settings = settings
         self.storage = storage
+        self.metrics = metrics
+        self.logger = structured_logger("p2h.jobs")
         self._lock = threading.RLock()
         self._runtime: dict[str, RuntimeJob] = {}
 
@@ -183,6 +188,8 @@ class JobManager:
             )
             runtime.thread = thread
             self._runtime[request.job_id] = runtime
+            if self.metrics is not None:
+                self.metrics.job_started()
             thread.start()
 
         return queued_response
@@ -314,9 +321,58 @@ class JobManager:
         return cancelled
 
     def _run_job_with_cleanup(self, request: JobRequest) -> None:
+        started = time.monotonic()
         try:
             self._run_job(request)
         finally:
+            try:
+                metadata = self.storage.read_metadata(request.job_id)
+                report = (
+                    self.storage.read_report(request.job_id)
+                    if self.storage.paths_for(request.job_id).report_path.is_file()
+                    else {}
+                )
+                counts = report.get("counts") if isinstance(report, dict) else None
+                losses = (
+                    int(counts.get("loss", 0))
+                    if isinstance(counts, dict)
+                    and isinstance(counts.get("loss", 0), int)
+                    else 0
+                )
+                duration = time.monotonic() - started
+                if self.metrics is not None:
+                    self.metrics.job_finished(
+                        status=metadata.status,
+                        source_format=metadata.source_format,
+                        target_format=metadata.target_format,
+                        duration_seconds=duration,
+                        losses=losses,
+                    )
+                self.logger.info(
+                    "job_finished",
+                    extra={
+                        "fields": {
+                            "job_id": request.job_id,
+                            "status": metadata.status,
+                            "source_format": metadata.source_format,
+                            "target_format": metadata.target_format,
+                            "duration_seconds": round(duration, 6),
+                            "losses": losses,
+                        }
+                    },
+                )
+            except Exception:
+                if self.metrics is not None:
+                    self.metrics.job_finished(
+                        status="unknown",
+                        source_format=request.source_format,
+                        target_format=request.effective_target_format,
+                        duration_seconds=time.monotonic() - started,
+                    )
+                self.logger.exception(
+                    "job_observability_failed",
+                    extra={"fields": {"job_id": request.job_id}},
+                )
             with self._lock:
                 runtime = self._runtime.get(request.job_id)
                 delete_when_finished = bool(

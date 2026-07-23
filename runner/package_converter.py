@@ -11,13 +11,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import format_bridge as bridge
-from package_adapters import (
-    ADAPTERS,
-    READABLE_FORMATS,
-    WRITABLE_FORMATS,
-    choose_detected_format,
-    detect_extracted,
-)
+from adapters import ADAPTERS, READABLE_FORMATS, WRITABLE_FORMATS
+from package_adapters import choose_detected_format, detect_extracted
 from package_ir import ProblemBundle, write_report
 from package_repair import populate_repair_suggestions, repair_source_archive
 from progress import ProgressReporter

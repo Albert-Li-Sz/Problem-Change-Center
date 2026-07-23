@@ -153,7 +153,12 @@ check_docker_access() {
 
 check_runner_image() {
   local runner_image="${P2H_RUNNER_IMAGE:-p2h-runner}"
+  local runner_image_id=""
   if docker image inspect "$runner_image" >/dev/null 2>&1; then
+    return
+  fi
+  runner_image_id="$(docker image ls "$runner_image" --format '{{.ID}}' 2>/dev/null | head -n 1)"
+  if [[ -n "$runner_image_id" ]]; then
     return
   fi
 

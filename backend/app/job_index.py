@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,7 +30,7 @@ class JobIndex:
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute(
@@ -63,7 +64,7 @@ class JobIndex:
         payload = json.dumps(
             asdict(metadata), ensure_ascii=False, separators=(",", ":")
         )
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 INSERT INTO jobs (
@@ -102,7 +103,7 @@ class JobIndex:
             )
 
     def get(self, job_id: str) -> dict[str, object] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT metadata_json FROM jobs WHERE id = ?", (job_id,)
             ).fetchone()
@@ -114,16 +115,16 @@ class JobIndex:
         return value
 
     def delete(self, job_id: str) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
     def ids(self) -> list[str]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute("SELECT id FROM jobs ORDER BY id").fetchall()
         return [str(row["id"]) for row in rows]
 
     def prune_missing(self, existing_ids: set[str]) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             indexed_ids = {
                 str(row["id"])
                 for row in connection.execute("SELECT id FROM jobs").fetchall()

@@ -21,8 +21,10 @@ checker、interactor、附件和标程，并对无法无损映射的内容生成
 - 同时识别单题包、多题比赛包、ProbHub Workspace、嵌套单题 ZIP 和 XML 集合。
 - 支持选择多题包中的全部题目或指定题目转换。
 - 支持 HydroOJ、ICPC、HOJ、FPS、QDUOJ、UOJ 和 DMOJ 作为输出格式。
-- 通过 Server-Sent Events 实时显示阶段进度、当前题目、心跳和日志。
+- 通过可恢复的增量 Server-Sent Events 实时显示阶段进度、当前题目、心跳和日志；
+  断线后按字节游标续传，不重复下载完整日志。
 - 使用 SQLite 持久化任务索引；上传、日志、报告和产物保存在独立任务目录。
+- 提供 Prometheus 指标和 JSON 结构化请求/任务日志，便于接入现有监控系统。
 - 使用 `warning`、`loss`、`fatal` 区分默认值、有损映射和判题语义错误。
 - 提供缺失答案、checker、validator 等文件的受控修复建议；修复会创建派生任务，
   不修改原始 ZIP。
@@ -102,6 +104,10 @@ cd Polygon-to-Hydro-or-Domujudge-Web-UI
 4. 构建本机架构的 `p2h-runner` 镜像。
 5. 首次运行时创建本地 `.env`。
 
+后端使用带 SHA256 哈希的 `backend/requirements.lock` 安装。该锁文件覆盖项目支持
+的 Python 3.10+ 与 Linux、macOS、Windows 平台标记，安装时会拒绝内容与哈希
+不一致的依赖包。
+
 ### 启动
 
 ```bash
@@ -168,6 +174,9 @@ npm_config_registry=https://registry.npmmirror.com \
   - `linux/arm64`
 - `ghcr.io/lmtinsuzhou/p2h-runner-wine:main`
   - `linux/amd64`
+
+`Pre` 分支每次推送还会发布同平台范围的滚动测试标签 `:pre`；正式部署使用
+版本标签或镜像 digest，不固定到会持续移动的 `:pre`。
 
 跳过本机构建并直接安装：
 
@@ -432,6 +441,7 @@ docker run --rm p2h-runner package-convert --help
 | `GET` | `/api/health` | 兼容健康检查 |
 | `GET` | `/api/health/live` | 进程存活 |
 | `GET` | `/api/health/ready` | 数据目录、Docker 和镜像就绪 |
+| `GET` | `/metrics` | Prometheus 文本指标 |
 | `POST` | `/api/inspect` | 上传并识别 ZIP |
 | `POST` | `/api/jobs` | 启动任务 |
 | `GET` | `/api/jobs/{id}` | 查询状态 |
@@ -452,6 +462,25 @@ curl -F 'file=@contest.zip;type=application/zip' \
 ```
 
 完整请求模型和交互式调试使用 `/docs`。
+
+任务事件的 SSE `id` 格式为 `revision:log_byte_offset`。浏览器会自动使用事件 ID
+恢复连接；其他客户端可发送 `Last-Event-ID`，也可使用
+`?cursor=<revision>:<offset>`。`logs` 事件只返回新增日志片段，原
+`/api/jobs/{id}/logs` 完整日志接口保持兼容。
+
+## 可观测性
+
+`/metrics` 使用 Prometheus 文本格式，包含 HTTP 请求数与耗时、活跃/完成任务、
+转换耗时、语义损失数和任务存储占用。指标标签只使用有界的路由、状态和格式，
+不写入任务 ID 或文件名，避免高基数和题目信息泄露。
+
+```bash
+curl http://127.0.0.1:8000/metrics
+```
+
+后端请求和任务完成日志以单行 JSON 输出到 stderr。请求日志包含 `request_id`、
+方法、路由、状态码和耗时；任务日志包含状态、源/目标格式、耗时和 loss 数量。
+生产环境可直接通过 journald 收集，并按 `request_id` 关联请求与响应头。
 
 ## 安全边界
 
@@ -515,13 +544,18 @@ Internet
 
 不要直接使用 `./scripts/start.sh` 提供公网服务。
 
+推送 `v*` 标签会创建确定性的源码 `tar.gz`、SHA256 校验文件和 GitHub build
+provenance，并自动生成 GitHub Release Notes。部署时同时固定源码版本和 runner
+镜像 digest；校验文件和 provenance 用于确认发布产物来自对应提交。
+
 ## 测试
 
 后端：
 
 ```bash
 cd backend
-.venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -q \
+  --cov=app --cov-report=term-missing --cov-fail-under=75
 ```
 
 前端：
@@ -540,6 +574,7 @@ backend/.venv/bin/ruff check backend runner compat
 backend/.venv/bin/ruff format --check backend runner compat
 backend/.venv/bin/bandit -q -r backend/app runner
 backend/.venv/bin/pip check
+backend/.venv/bin/pip-audit -r backend/requirements.lock
 shellcheck install.sh scripts/*.sh runner/entrypoint.sh
 python3 compat/check_lock.py
 ```
@@ -608,7 +643,8 @@ Linux 区分大小写。`Check.cpp`、`check.cpp` 是两个不同文件。请修
 ```text
 backend/                     FastAPI、SQLite 索引、任务状态、Docker 调度
 frontend/                    React 19、Vite、TypeScript、Vitest、Playwright
-runner/                      中间模型、格式适配器、安全转换入口
+runner/                      中间模型、安全转换入口和格式兼容逻辑
+runner/adapters/             各格式读写适配器、协议、工厂与唯一注册表
 compat/                      平台版本锁和原创兼容语料
 deploy/                      Caddy、systemd、生产配置和运维手册
 scripts/                     安装、启动、扫描、预检和隔离测试

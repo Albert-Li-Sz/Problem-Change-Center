@@ -117,6 +117,7 @@ describe("API error handling", () => {
       onJob: vi.fn(),
       onLogs: vi.fn(),
       onReport: vi.fn(),
+      onCursor: vi.fn(),
       onError: vi.fn()
     };
 
@@ -129,7 +130,13 @@ describe("API error handling", () => {
     );
     listeners.get("logs")?.(
       new MessageEvent("logs", {
-        data: JSON.stringify({ text: "runner started\n" })
+        data: JSON.stringify({
+          text: "runner started\n",
+          offset: 0,
+          next_offset: 15,
+          reset: false
+        }),
+        lastEventId: "4:15"
       })
     );
     listeners.get("report")?.(
@@ -146,7 +153,13 @@ describe("API error handling", () => {
     expect(handlers.onJob).toHaveBeenCalledWith(
       expect.objectContaining({ status: "running" })
     );
-    expect(handlers.onLogs).toHaveBeenCalledWith("runner started\n");
+    expect(handlers.onLogs).toHaveBeenCalledWith({
+      text: "runner started\n",
+      offset: 0,
+      next_offset: 15,
+      reset: false
+    });
+    expect(handlers.onCursor).toHaveBeenCalledWith("4:15");
     expect(handlers.onReport).toHaveBeenCalledWith(
       expect.objectContaining({ problem_count: 1 })
     );

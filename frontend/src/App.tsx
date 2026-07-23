@@ -1,107 +1,41 @@
-import { AlertTriangle, Archive, CheckCircle2, Download, FileArchive, Github, RotateCcw, Shield, Trash2, UploadCloud, Wrench, X, XCircle } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Archive, CheckCircle2, FileArchive, Github, RotateCcw, Shield, UploadCloud } from "lucide-react";
+import { FormEvent, useMemo, useRef, useState } from "react";
 import {
   ConversionReport,
   applyRepairs,
   cancelJob,
   deleteJob,
-  downloadUrl,
-  FormatId,
   getJob,
   getLogs,
-  getReport,
   inspectZip,
   InspectResult,
   JobResponse,
   SourceFormat,
   startJob,
-  subscribeToJobEvents,
   TargetFormat
 } from "./api";
-import { LogViewer } from "./components/LogViewer";
-import { StatusBadge } from "./components/StatusBadge";
+import { CapabilityMatrixDialog } from "./components/CapabilityMatrixDialog";
+import { RepairChoices } from "./components/ConversionReportPanel";
+import { JobPanel } from "./components/JobPanel";
+import {
+  formatBytes,
+  formatLabels,
+  packageLayoutLabels,
+  packageScopeLabels,
+  projectUrl,
+  readableFormats,
+  writableFormats
+} from "./formatConfig";
+import { useJobLifecycle } from "./hooks/useJobLifecycle";
 
 type MissingEnv = "warn" | "error";
 type IcpcLicense = "unknown" | "public domain" | "cc0" | "cc by" | "cc by-sa" | "educational" | "permission";
-
-const formatLabels: Record<FormatId, string> = {
-  polygon: "Polygon / Codeforces",
-  probhub: "ProbHub Workspace / Legacy / DOMjudge",
-  hydro: "HydroOJ",
-  icpc: "ICPC / DOMjudge / Kattis",
-  hoj: "HOJ",
-  fps: "FPS / HUSTOJ",
-  qduoj: "QDUOJ",
-  uoj: "UOJ",
-  dmoj: "DMOJ / LQDOJ",
-  generic: "通用测试数据目录"
-};
-const readableFormats = Object.keys(formatLabels) as FormatId[];
-const writableFormats: TargetFormat[] = ["hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj"];
-const packageKinds: Record<FormatId, string> = {
-  polygon: "单题源包或比赛包",
-  probhub: "单题目录或多题工作区",
-  hydro: "单题或多题完整包",
-  icpc: "单题目录或嵌套多题包",
-  hoj: "单题或多题完整包",
-  fps: "单题或多题 XML",
-  qduoj: "单题或多题完整包",
-  uoj: "单题或多题评测数据 + sidecar",
-  dmoj: "单题或多题评测数据 + sidecar",
-  generic: "单题或多题推断目录"
-};
-const packageScopeLabels: Record<InspectResult["package_scope"], string> = {
-  single: "单题包",
-  multi: "多题包",
-  unknown: "题目数量未知"
-};
-const packageLayoutLabels: Record<InspectResult["package_layout"], string> = {
-  directory: "目录结构",
-  contest: "比赛结构",
-  workspace: "工作区结构",
-  nested: "嵌套单题 ZIP",
-  xml: "XML 集合",
-  mixed: "混合结构",
-  unknown: "未知结构"
-};
-const progressLabels: Record<NonNullable<JobResponse["progress"]>["phase"], string> = {
-  validate_archive: "校验压缩包",
-  extract: "安全解压",
-  detect: "识别格式",
-  read: "读取源题包",
-  validate_ir: "校验题目语义",
-  write: "写出目标题包",
-  validate_output: "校验输出",
-  package: "打包结果"
-};
-const pollIntervalMs = 1200;
-const sseRetryDelaysMs = [1000, 2000, 5000, 10000];
-const projectUrl = "https://github.com/LMTINSUZHOU/Problem-Change-Center";
 
 function splitList(value: string): string[] {
   return value
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function formatElapsed(startedAt: string, lastActivityAt: string): string {
-  const elapsed = Math.max(
-    0,
-    Math.floor(
-      (new Date(lastActivityAt).getTime() - new Date(startedAt).getTime()) / 1000
-    )
-  );
-  if (elapsed < 60) return `${elapsed} 秒`;
-  const minutes = Math.floor(elapsed / 60);
-  const seconds = elapsed % 60;
-  return `${minutes} 分 ${seconds} 秒`;
 }
 
 export default function App() {
@@ -131,7 +65,7 @@ export default function App() {
   const [icpcRightsOwner, setIcpcRightsOwner] = useState("");
   const [fpsProfile, setFpsProfile] = useState<"hustoj-1.6" | "qduoj-1.2">("hustoj-1.6");
   const [report, setReport] = useState<ConversionReport | null>(null);
-  const [repairChoices, setRepairChoices] = useState<Record<string, { candidatePath?: string; file?: File }>>({});
+  const [repairChoices, setRepairChoices] = useState<RepairChoices>({});
   const [repairing, setRepairing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -150,10 +84,6 @@ export default function App() {
   const usesDomjudgeOutputOptions = targetFormat === "icpc";
   const usesPolygonSource = effectiveSource === "polygon";
   const domjudgeColorPickerValue = /^#[0-9A-Fa-f]{6}$/.test(domjudgeColor) ? domjudgeColor : "#000000";
-  const progressPercent = job?.progress?.total
-    ? Math.min(100, Math.round(((job.progress.current ?? 0) / job.progress.total) * 100))
-    : null;
-
   const openCapabilityMatrix = () => {
     const dialog = capabilityDialogRef.current;
     if (!dialog) return;
@@ -202,112 +132,14 @@ export default function App() {
     return null;
   }, [domjudgeAutoValidator, domjudgeCodeStart, domjudgeColor, domjudgeDefaultValidator, effectiveSource, icpcLicense, icpcRightsOwner, inspect, only, owner, pidStart, selectionMode, sourceFormat, targetFormat, usesPolygonSource]);
 
-  useEffect(() => {
-    if (!job || (job.status !== "queued" && job.status !== "running")) return;
-    const jobId = job.id;
-    const epoch = requestEpoch.current;
-    let stopped = false;
-    let terminal = false;
-    let pollTimer: number | undefined;
-    let reconnectTimer: number | undefined;
-    let closeStream: (() => void) | null = null;
-    let pollInFlight = false;
-    let reconnectAttempts = 0;
-    let reportPending = false;
-    let reportReceived = false;
-
-    const isCurrent = () => !stopped && requestEpoch.current === epoch;
-    const stopPolling = () => {
-      if (pollTimer !== undefined) window.clearTimeout(pollTimer);
-      pollTimer = undefined;
-    };
-    const schedulePoll = (delay = pollIntervalMs) => {
-      stopPolling();
-      pollTimer = window.setTimeout(poll, delay);
-    };
-    const poll = async () => {
-      if (!isCurrent() || (terminal && !reportPending) || pollInFlight) return;
-      pollInFlight = true;
-      try {
-        const [nextJob, nextLogs] = await Promise.all([getJob(jobId), getLogs(jobId)]);
-        if (!isCurrent()) return;
-        reportPending = nextJob.report_ready && !reportReceived;
-        let nextReport: ConversionReport | null = null;
-        if (reportPending) {
-          try {
-            nextReport = await getReport(jobId);
-            reportReceived = true;
-            reportPending = false;
-          } catch (err) {
-            if (isCurrent()) {
-              setError(err instanceof Error ? err.message : "无法读取转换报告");
-            }
-          }
-        }
-        if (!isCurrent()) return;
-        terminal = !["queued", "running"].includes(nextJob.status);
-        setJob(nextJob);
-        setLogs(nextLogs);
-        if (nextReport) setReport(nextReport);
-        if (!terminal || reportPending) schedulePoll();
-      } catch (err) {
-        if (!isCurrent()) return;
-        setError(err instanceof Error ? err.message : "无法读取任务状态");
-        schedulePoll();
-      } finally {
-        pollInFlight = false;
-      }
-    };
-
-    const connect = () => {
-      if (!isCurrent() || terminal) return;
-      closeStream?.();
-      closeStream = subscribeToJobEvents(jobId, {
-        onOpen: stopPolling,
-        onJob: (nextJob) => {
-          if (!isCurrent()) return;
-          terminal = !["queued", "running"].includes(nextJob.status);
-          reportPending = nextJob.report_ready && !reportReceived;
-          setJob(nextJob);
-        },
-        onLogs: (nextLogs) => {
-          if (isCurrent()) setLogs(nextLogs);
-        },
-        onReport: (nextReport) => {
-          if (!isCurrent()) return;
-          reportReceived = true;
-          reportPending = false;
-          setReport(nextReport);
-        },
-        onError: () => {
-          if (!isCurrent()) return;
-          closeStream?.();
-          closeStream = null;
-          if (terminal) {
-            if (reportPending) schedulePoll(0);
-            return;
-          }
-          schedulePoll(0);
-          if (reconnectAttempts < sseRetryDelaysMs.length) {
-            const delay = sseRetryDelaysMs[reconnectAttempts];
-            reconnectAttempts += 1;
-            reconnectTimer = window.setTimeout(connect, delay);
-          }
-        }
-      });
-      if (closeStream === null) schedulePoll(0);
-    };
-
-    connect();
-
-    return () => {
-      stopped = true;
-      stopPolling();
-      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
-      closeStream?.();
-    };
-  }, [job?.id]);
-
+  useJobLifecycle({
+    job,
+    requestEpoch,
+    setJob,
+    setLogs,
+    setReport,
+    setError
+  });
   async function handleInspect() {
     if (!file) return;
     const selectedFile = file;
@@ -627,49 +459,10 @@ export default function App() {
                 )}
               </div>
             )}
-            <dialog
+            <CapabilityMatrixDialog
               ref={capabilityDialogRef}
-              className="capability-dialog"
-              aria-labelledby="capability-dialog-title"
-              onClick={(event) => {
-                if (event.target === event.currentTarget) closeCapabilityMatrix();
-              }}
-            >
-              <div className="capability-dialog-surface">
-                <div className="capability-dialog-heading">
-                  <div>
-                    <h2 id="capability-dialog-title">格式能力矩阵</h2>
-                    <p>查看各类题包的读取、输出和包结构支持情况。</p>
-                  </div>
-                  <button
-                    className="icon-button"
-                    type="button"
-                    aria-label="关闭格式能力矩阵"
-                    title="关闭"
-                    onClick={closeCapabilityMatrix}
-                  >
-                    <X size={20} aria-hidden="true" />
-                  </button>
-                </div>
-                <div className="capability-matrix-scroll">
-                  <table>
-                    <thead>
-                      <tr><th>格式</th><th>读取</th><th>输出</th><th>包类型</th></tr>
-                    </thead>
-                    <tbody>
-                      {readableFormats.map((format) => (
-                        <tr key={format}>
-                          <td>{formatLabels[format]}</td>
-                          <td>支持</td>
-                          <td>{writableFormats.includes(format as TargetFormat) ? "支持" : "—"}</td>
-                          <td>{packageKinds[format]}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </dialog>
+              onClose={closeCapabilityMatrix}
+            />
             </section>
 
             <form className="panel config-panel" onSubmit={handleStart}>
@@ -1008,182 +801,22 @@ export default function App() {
             </form>
           </div>
 
-          <div className="right-column">
-            <section className="panel status-panel">
-            <div className="panel-heading">
-              <div>
-                <h2>任务状态</h2>
-                <p>转换完成后会把输出目录重新打包为一个下载文件。</p>
-              </div>
-              {job && <StatusBadge status={job.status} />}
-            </div>
-
-            <div className="status-grid">
-              <div>
-                <span>Job</span>
-                <strong>{job?.id.slice(0, 8) || inspect?.job_id.slice(0, 8) || "-"}</strong>
-              </div>
-              <div>
-                <span>退出码</span>
-                <strong>{job?.exit_code ?? "-"}</strong>
-              </div>
-              <div>
-                <span>开始</span>
-                <strong>{job?.started_at ? new Date(job.started_at).toLocaleTimeString() : "-"}</strong>
-              </div>
-              <div>
-                <span>结束</span>
-                <strong>{job?.finished_at ? new Date(job.finished_at).toLocaleTimeString() : "-"}</strong>
-              </div>
-              <div>
-                <span>格式</span>
-                <strong>{job?.source_format && job?.target_format ? `${job.source_format} → ${job.target_format}` : "-"}</strong>
-              </div>
-              <div>
-                <span>字段损失</span>
-                <strong>{job?.report_counts.loss ?? 0}</strong>
-              </div>
-            </div>
-
-            {job?.progress && (
-              <div className="job-progress" aria-live="polite">
-                <div className="progress-summary">
-                  <strong>{progressLabels[job.progress.phase]}</strong>
-                  <span>
-                    {job.progress.problem ? `${job.progress.problem} · ` : ""}
-                    {progressPercent !== null ? `${progressPercent}%` : "处理中"}
-                  </span>
-                </div>
-                <div className={`progress-track ${progressPercent === null ? "indeterminate" : ""}`}>
-                  <span style={progressPercent === null ? undefined : { width: `${progressPercent}%` }} />
-                </div>
-                <small>{job.progress.detail || "任务仍在运行"}</small>
-                <small>
-                  阶段耗时 {formatElapsed(job.progress.started_at, job.progress.last_activity_at)}
-                  {" · "}
-                  最后活动 {new Date(job.progress.last_activity_at).toLocaleTimeString()}
-                </small>
-              </div>
-            )}
-
-            <div aria-live="polite">
-              {job?.error && <div className="inline-error" role="alert">{job.error}</div>}
-              {job?.timeout && (
-                <div className="inline-error" role="alert">
-                  超时类型：{job.timeout.kind} · 限制 {job.timeout.limit_seconds} 秒
-                  {job.timeout.problem ? ` · 题目 ${job.timeout.problem}` : ""}
-                </div>
-              )}
-              {error && <div className="inline-error" role="alert">{error}</div>}
-            </div>
-
-            <div className="button-row">
-              <a className={`download-button ${job?.download_ready ? "" : "disabled"}`} href={job?.download_ready ? downloadUrl(job.id) : undefined} aria-disabled={!job?.download_ready} tabIndex={job?.download_ready ? 0 : -1}>
-                <Download size={17} aria-hidden="true" />
-                下载结果
-              </a>
-              {isRunning && (
-                <button className="danger-button" type="button" onClick={handleCancel} disabled={busy}>
-                  <XCircle size={17} aria-hidden="true" />
-                  取消并保留诊断
-                </button>
-              )}
-              <button className="ghost-button" type="button" onClick={handleReset} disabled={!inspect || resetting}>
-                <Trash2 size={17} aria-hidden="true" />
-                清理任务
-              </button>
-            </div>
-
-            {report && (
-              <div className="conversion-report">
-                <div className="report-heading">
-                  <strong>转换报告</strong>
-                  <span>{report.problem_count} 题 · {report.counts.warning} 警告 · {report.counts.loss} 项损失</span>
-                </div>
-                {report.issues.length === 0 ? (
-                  <p>未发现字段损失或兼容性警告。</p>
-                ) : (
-                  <ul>
-                    {report.issues.map((issue, index) => (
-                      <li key={`${issue.code}-${index}`} data-severity={issue.severity}>
-                        <strong>{issue.severity.toUpperCase()} · {issue.problem ? `${issue.problem} · ` : ""}{issue.code}</strong>
-                        <span>{issue.message}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {report.repair_ready && report.repair_suggestions && report.repair_suggestions.length > 0 && (
-                  <div className="repair-assistant">
-                    <div className="repair-heading">
-                      <Wrench size={16} aria-hidden="true" />
-                      <strong>缺失文件修复助手</strong>
-                    </div>
-                    <p>系统只提供候选；选择或上传文件并点击确认后，原 ZIP 不会被修改，将创建一个派生任务。</p>
-                    {report.repair_suggestions.map((suggestion) => {
-                      const choice = repairChoices[suggestion.id] || {};
-                      const issueContext = report.issues.find(
-                        (issue) =>
-                          issue.code === suggestion.issue_code &&
-                          issue.problem === suggestion.problem &&
-                          issue.context?.expected_path === suggestion.expected_path
-                      )?.context;
-                      return (
-                        <div className="repair-item" key={suggestion.id}>
-                          <strong>{suggestion.problem ? `${suggestion.problem} · ` : ""}{suggestion.expected_path}</strong>
-                          <small>{suggestion.role} · {suggestion.issue_code}</small>
-                          {(issueContext?.source_location || issueContext?.source) && (
-                            <small>
-                              来源配置：{issueContext.source_location || issueContext.source}
-                            </small>
-                          )}
-                          {suggestion.candidates.length > 0 && (
-                            <select
-                              aria-label={`选择 ${suggestion.expected_path} 的包内候选`}
-                              value={choice.candidatePath || ""}
-                              onChange={(event) => setRepairChoices((current) => ({
-                                ...current,
-                                [suggestion.id]: event.target.value ? { candidatePath: event.target.value } : {}
-                              }))}
-                              disabled={repairing}
-                            >
-                              <option value="">选择包内候选…</option>
-                              {suggestion.candidates.map((candidate) => (
-                                <option key={candidate.path} value={candidate.path}>
-                                  {candidate.path} · {Math.round(candidate.confidence * 100)}%
-                                </option>
-                              ))}
-                            </select>
-                          )}
-                          <label className="repair-upload">
-                            <span>或上传补充文件</span>
-                            <input
-                              type="file"
-                              disabled={repairing}
-                              onChange={(event) => {
-                                const nextFile = event.target.files?.[0];
-                                setRepairChoices((current) => ({
-                                  ...current,
-                                  [suggestion.id]: nextFile ? { file: nextFile } : {}
-                                }));
-                              }}
-                            />
-                          </label>
-                          {choice.file && <small>已选择：{choice.file.name}</small>}
-                        </div>
-                      );
-                    })}
-                    <button className="primary-button" type="button" onClick={handleApplyRepairs} disabled={repairing}>
-                      <Wrench size={17} aria-hidden="true" />
-                      {repairing ? "正在创建派生任务…" : "确认修复并重新转换"}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-            </section>
-
-            <LogViewer logs={logs} />
-          </div>
+          <JobPanel
+            inspect={inspect}
+            job={job}
+            logs={logs}
+            report={report}
+            repairChoices={repairChoices}
+            setRepairChoices={setRepairChoices}
+            repairing={repairing}
+            busy={busy}
+            resetting={resetting}
+            error={error}
+            isRunning={isRunning}
+            onCancel={handleCancel}
+            onReset={handleReset}
+            onApplyRepairs={handleApplyRepairs}
+          />
         </section>
       </main>
       <footer className="site-footer">

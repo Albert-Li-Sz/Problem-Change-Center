@@ -56,7 +56,7 @@ docker info
 ```bash
 cd /opt/oj-package-converter
 python3 -m venv backend/.venv
-backend/.venv/bin/pip install --requirement backend/requirements.txt
+backend/.venv/bin/pip install --require-hashes --requirement backend/requirements.lock
 npm --prefix frontend ci
 npm --prefix frontend run build
 sudo -u ojconverter env DOCKER_HOST=unix:///run/user/1001/docker.sock \
@@ -176,9 +176,13 @@ sudo -u ojconverter env DOCKER_HOST=unix:///run/user/1001/docker.sock \
 ## 监控与告警
 
 - 每 30 秒检查 `/api/health/live`，每 60 秒通过认证检查 `/api/health/ready`。
+- 通过 Caddy 认证抓取 `/metrics`；不要将指标端点或后端 8000 端口直接暴露公网。
+- 重点监控 HTTP 5xx 与延迟、活跃/完成任务、转换耗时、语义损失数和任务存储
+  占用。指标不包含任务 ID、文件名或其他高基数标签。
 - 告警条件：连续 3 次 not_ready、HTTP 5xx、磁盘可用空间低于上传上限的两倍、
   任务超时率突增、runner 容器超过配置并发数、服务频繁重启。
-- 后端日志使用 journald：`journalctl -u oj-package-converter -f`。
+- 后端向 journald 输出单行 JSON 请求/任务日志，可用响应头中的 `X-Request-ID`
+  关联请求：`journalctl -u oj-package-converter -f -o cat`。
 - Caddy JSON 访问日志默认写入 `/var/log/oj-package-converter/access.json`，
   100 MiB 轮转，保留 10 个或 30 天。
 - 不记录上传内容、代理密钥或登录密码。向外部日志平台发送前，按组织政策处理

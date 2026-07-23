@@ -187,6 +187,7 @@ async def enforce_request_security(
 ) -> Response:
     settings = _request_settings(request)
     request_id = _request_id(request)
+    request.state.request_id = request_id
 
     host = _request_hostname(request)
     if host is None or not _host_allowed(host, settings.allowed_hosts):

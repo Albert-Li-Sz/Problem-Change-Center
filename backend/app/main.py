@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -17,6 +18,7 @@ from pydantic import ValidationError
 
 from .config import settings
 from .jobs import JobManager
+from .observability import Metrics, structured_logger
 from .schemas import (
     DeleteResponse,
     InspectResponse,
@@ -48,25 +50,41 @@ def _sse_event(event: str, data: object, *, event_id: str | None = None) -> str:
 async def _stream_job_events(request: Request, job_id: str) -> AsyncIterator[str]:
     storage = request.app.state.storage
     manager = request.app.state.job_manager
-    revision = storage.change_revision(job_id)
-    last_logs: str | None = None
+    revision, log_offset = _sse_cursor(request, storage.change_revision(job_id))
     report_sent = False
     yield "retry: 2000\n\n"
 
     while True:
         try:
             job = manager.response(job_id)
-            logs = storage.read_logs(job_id)
         except HTTPException as exc:
             if exc.status_code == status.HTTP_404_NOT_FOUND:
                 return
             raise
 
-        event_id = str(revision)
+        event_id = f"{revision}:{log_offset}"
         yield _sse_event("job", job.model_dump(mode="json"), event_id=event_id)
-        if logs != last_logs:
-            yield _sse_event("logs", {"text": logs}, event_id=event_id)
-            last_logs = logs
+        while True:
+            logs, next_log_offset, reset_logs = storage.read_log_chunk(
+                job_id, log_offset
+            )
+            if not logs and not reset_logs:
+                break
+            chunk_offset = 0 if reset_logs else log_offset
+            log_offset = next_log_offset
+            event_id = f"{revision}:{log_offset}"
+            yield _sse_event(
+                "logs",
+                {
+                    "text": logs,
+                    "offset": chunk_offset,
+                    "next_offset": log_offset,
+                    "reset": reset_logs,
+                },
+                event_id=event_id,
+            )
+            if not logs or next_log_offset <= chunk_offset:
+                break
         if job.report_ready and not report_sent:
             yield _sse_event("report", storage.read_report(job_id), event_id=event_id)
             report_sent = True
@@ -82,6 +100,17 @@ async def _stream_job_events(request: Request, job_id: str) -> AsyncIterator[str
             yield _sse_event("heartbeat", {"timestamp": utc_now_iso()})
         else:
             revision = next_revision
+
+
+def _sse_cursor(request: Request, current_revision: int) -> tuple[int, int]:
+    raw = request.query_params.get("cursor") or request.headers.get("last-event-id", "")
+    try:
+        revision_text, offset_text = raw.split(":", 1)
+        revision = max(0, int(revision_text))
+        offset = max(0, int(offset_text))
+    except (AttributeError, TypeError, ValueError):
+        return current_revision, 0
+    return min(revision, current_revision), offset
 
 
 @asynccontextmanager
@@ -113,11 +142,43 @@ app.add_middleware(
 app.add_middleware(RequestBodyLimitMiddleware)
 
 storage = Storage(settings)
-job_manager = JobManager(settings, storage)
+metrics = Metrics()
+job_manager = JobManager(settings, storage, metrics)
 app.state.settings = settings
 app.state.storage = storage
 app.state.job_manager = job_manager
 app.state.rate_limiter = InMemoryRateLimiter()
+app.state.metrics = metrics
+logger = structured_logger("p2h.api")
+
+
+@app.middleware("http")
+async def observe_requests(request, call_next):  # type: ignore[no-untyped-def]
+    started = time.monotonic()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", "__unmatched__")
+        duration = time.monotonic() - started
+        request.app.state.metrics.observe_http(
+            request.method, route_path, status_code, duration
+        )
+        logger.info(
+            "http_request",
+            extra={
+                "fields": {
+                    "request_id": getattr(request.state, "request_id", None),
+                    "method": request.method,
+                    "route": route_path,
+                    "status": status_code,
+                    "duration_seconds": round(duration, 6),
+                }
+            },
+        )
 
 
 @app.middleware("http")
@@ -148,6 +209,14 @@ def health_ready() -> JSONResponse:
     return JSONResponse(
         status_code=200 if ready else 503,
         content={"status": "ready" if ready else "not_ready", "checks": checks},
+    )
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def prometheus_metrics() -> PlainTextResponse:
+    return PlainTextResponse(
+        app.state.metrics.render(storage_bytes=app.state.storage.total_storage_bytes()),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
 

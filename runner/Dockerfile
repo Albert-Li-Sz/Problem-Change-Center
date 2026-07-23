@@ -63,11 +63,13 @@ COPY hoj_bridge.py /opt/hoj_bridge.py
 COPY package_ir.py /opt/package_ir.py
 COPY package_security.py /opt/package_security.py
 COPY package_adapters.py /opt/package_adapters.py
+COPY adapters /opt/adapters
 COPY package_converter.py /opt/package_converter.py
 COPY package_repair.py /opt/package_repair.py
 COPY progress.py /opt/progress.py
 COPY p2h_safe.py /opt/p2h_safe.py
-RUN chmod +x /usr/local/bin/p2h-entrypoint
+RUN chmod +x /usr/local/bin/p2h-entrypoint \
+  && PYTHONPATH=/opt python -c 'import package_converter'
 
 WORKDIR /work
 ENV PYTHONUNBUFFERED=1

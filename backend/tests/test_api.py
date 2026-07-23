@@ -795,6 +795,79 @@ def test_job_event_stream_rejects_unknown_job(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
+def test_job_event_stream_resumes_logs_from_cursor(tmp_path: Path) -> None:
+    client = _client(_settings(tmp_path))
+    job_id = "7" * 32
+    app.state.storage.write_metadata(
+        JobMetadata(
+            job_id,
+            "fps.zip",
+            1,
+            "success",
+            datetime.now(timezone.utc).isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            source_format="fps",
+            target_format="hydro",
+        )
+    )
+    paths = app.state.storage.paths_for(job_id)
+    paths.logs_path.write_text("first\nsecond\n", encoding="utf-8")
+
+    response = client.get(
+        f"/api/jobs/{job_id}/events?cursor=0:6",
+        headers={"Last-Event-ID": "0:0"},
+    )
+
+    assert response.status_code == 200
+    assert '"text":"second\\n"' in response.text
+    assert '"offset":6' in response.text
+    assert '"next_offset":13' in response.text
+    assert '"text":"first\\nsecond\\n"' not in response.text
+
+
+def test_metrics_endpoint_exposes_bounded_runtime_metrics(tmp_path: Path) -> None:
+    client = _client(_settings(tmp_path))
+    client.get("/api/health")
+    client.get("/not-a-real-route-one")
+    client.get("/not-a-real-route-two")
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain; version=0.0.4")
+    assert "p2h_http_requests_total" in response.text
+    assert 'route="/api/health"' in response.text
+    assert 'route="__unmatched__"' in response.text
+    assert "not-a-real-route" not in response.text
+    assert "p2h_jobs_active 0" in response.text
+    assert "p2h_storage_bytes" in response.text
+
+
+def test_terminal_event_stream_drains_large_logs_in_chunks(tmp_path: Path) -> None:
+    client = _client(_settings(tmp_path))
+    job_id = "8" * 32
+    app.state.storage.write_metadata(
+        JobMetadata(
+            job_id,
+            "large.zip",
+            1,
+            "success",
+            datetime.now(timezone.utc).isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            source_format="hydro",
+            target_format="icpc",
+        )
+    )
+    paths = app.state.storage.paths_for(job_id)
+    paths.logs_path.write_text("a" * (300 * 1024), encoding="utf-8")
+
+    response = client.get(f"/api/jobs/{job_id}/events")
+
+    assert response.status_code == 200
+    assert response.text.count("event: logs") == 2
+    assert f'"next_offset":{300 * 1024}' in response.text
+
+
 def test_inspect_enforces_stored_job_and_total_storage_limits(tmp_path: Path) -> None:
     one_job_settings = replace(_settings(tmp_path), max_stored_jobs=1)
     client = _client(one_job_settings)

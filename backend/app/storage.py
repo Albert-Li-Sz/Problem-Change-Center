@@ -675,6 +675,33 @@ class Storage:
             )
         return paths.logs_path.read_text(encoding="utf-8", errors="replace")
 
+    def read_log_chunk(
+        self, job_id: str, offset: int, *, limit: int = 256 * 1024
+    ) -> tuple[str, int, bool]:
+        paths = self.paths_for(job_id)
+        if not paths.logs_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job"
+            )
+        size = paths.logs_path.stat().st_size
+        reset = offset < 0 or offset > size
+        start = 0 if reset else offset
+        with paths.logs_path.open("rb") as source:
+            source.seek(start)
+            data = source.read(limit)
+            while start + len(data) < size:
+                try:
+                    text = data.decode("utf-8")
+                    break
+                except UnicodeDecodeError as exc:
+                    if exc.end != len(data) or len(data) >= limit + 3:
+                        text = data.decode("utf-8", errors="replace")
+                        break
+                    data += source.read(1)
+            else:
+                text = data.decode("utf-8", errors="replace")
+        return text, start + len(data), reset
+
     def delete_job(self, job_id: str) -> None:
         paths = self.paths_for(job_id)
         indexed = self.job_index.get(job_id) is not None

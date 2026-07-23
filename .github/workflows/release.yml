@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  attestations: write
+  id-token: write
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build reproducible source archive
+        shell: bash
+        run: |
+          mkdir -p dist
+          git archive \
+            --format=tar \
+            --prefix="Problem-Change-Center-${GITHUB_REF_NAME}/" \
+            "${GITHUB_SHA}" > "dist/Problem-Change-Center-${GITHUB_REF_NAME}.tar"
+          gzip --no-name "dist/Problem-Change-Center-${GITHUB_REF_NAME}.tar"
+          sha256sum "dist/Problem-Change-Center-${GITHUB_REF_NAME}.tar.gz" \
+            > "dist/Problem-Change-Center-${GITHUB_REF_NAME}.sha256"
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/*"
+      - name: Publish release notes and artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/* \
+            --generate-notes \
+            --verify-tag

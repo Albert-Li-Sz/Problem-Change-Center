@@ -13,9 +13,8 @@ import zipfile
 # The standard library implementation is used only to create XML, never to parse it.
 import xml.etree.ElementTree as ElementTree  # nosec B405
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 from urllib.parse import unquote
 
 from defusedxml import ElementTree as DefusedElementTree
@@ -31,20 +30,9 @@ from package_security import (
     read_limited_text,
 )
 from progress import ProgressReporter
+from adapters.protocol import Detection
 
 
-READABLE_FORMATS = (
-    "probhub",
-    "hydro",
-    "icpc",
-    "hoj",
-    "fps",
-    "qduoj",
-    "uoj",
-    "dmoj",
-    "generic",
-)
-WRITABLE_FORMATS = ("hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj")
 MAX_XML_NODES = 100_000
 MAX_XML_DEPTH = 48
 MAX_EMBEDDED_IMAGE_BYTES = 64 * 1024 * 1024
@@ -68,31 +56,6 @@ LANG_SUFFIXES = {
     ".rs": "Rust",
     ".pas": "Pascal",
 }
-
-
-@dataclass(frozen=True)
-class Detection:
-    format: str
-    confidence: float
-    evidence: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class Adapter:
-    format: str
-    detect: Callable[[Path], Detection | None]
-    read: Callable[
-        [
-            Path,
-            Path,
-            Iterable[str],
-            bridge.ArchiveExtractionBudget | None,
-            ProgressReporter | None,
-        ],
-        ProblemBundle,
-    ]
-    validate_target: Callable[[ProblemBundle, dict[str, Any]], None] | None
-    write: Callable[[ProblemBundle, Path, dict[str, Any]], list[str]] | None
 
 
 def _detection_xml_root_name(path: Path) -> str | None:
@@ -1221,6 +1184,20 @@ def _read_probhub_legacy(
         secret_dir = problem_dir / "data" / "secret"
         sample_cases = bridge._scan_case_pairs(sample_dir, sample=True)
         secret_cases = bridge._scan_case_pairs(secret_dir, sample=False)
+        if statements:
+            statement_with_samples, skipped_samples = _probhub_statement_with_samples(
+                statements[0], sample_cases
+            )
+            statements = [statement_with_samples, *statements[1:]]
+            if skipped_samples:
+                bundle.add_issue(
+                    "warning",
+                    "probhub-sample-not-embedded",
+                    "Some ProbHub samples were too large or not UTF-8, so they remain as separate sample files instead of being embedded in Markdown",
+                    problem=slug,
+                    field="statements",
+                    context={"skipped": str(skipped_samples)},
+                )
         cases = [
             TestCase(
                 case.name,
@@ -4230,16 +4207,6 @@ def write_dmoj(
     return artifacts
 
 
-def _registered_detection(format_id: str) -> Callable[[Path], Detection | None]:
-    def detect(root: Path) -> Detection | None:
-        return next(
-            (item for item in detect_extracted(root) if item.format == format_id),
-            None,
-        )
-
-    return detect
-
-
 def _loss(
     bundle: ProblemBundle,
     problem: Problem,
@@ -4566,54 +4533,3 @@ def _validate_dmoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> Non
                 "DMOJ output writes only one statement sidecar",
                 "statements",
             )
-
-
-ADAPTERS: dict[str, Adapter] = {
-    "probhub": Adapter(
-        "probhub",
-        _registered_detection("probhub"),
-        read_probhub,
-        None,
-        None,
-    ),
-    "hydro": Adapter(
-        "hydro",
-        _registered_detection("hydro"),
-        read_hydro,
-        _validate_hydro_target,
-        write_hydro,
-    ),
-    "icpc": Adapter(
-        "icpc",
-        _registered_detection("icpc"),
-        read_icpc,
-        _validate_icpc_target,
-        write_icpc,
-    ),
-    "hoj": Adapter(
-        "hoj", _registered_detection("hoj"), read_hoj, _validate_hoj_target, write_hoj
-    ),
-    "fps": Adapter(
-        "fps", _registered_detection("fps"), read_fps, _validate_fps_target, write_fps
-    ),
-    "qduoj": Adapter(
-        "qduoj",
-        _registered_detection("qduoj"),
-        read_qduoj,
-        _validate_qduoj_target,
-        write_qduoj,
-    ),
-    "uoj": Adapter(
-        "uoj", _registered_detection("uoj"), read_uoj, _validate_uoj_target, write_uoj
-    ),
-    "dmoj": Adapter(
-        "dmoj",
-        _registered_detection("dmoj"),
-        read_dmoj,
-        _validate_dmoj_target,
-        write_dmoj,
-    ),
-    "generic": Adapter(
-        "generic", _registered_detection("generic"), read_generic, None, None
-    ),
-}

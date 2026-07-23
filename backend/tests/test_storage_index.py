@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
 
@@ -53,7 +54,7 @@ def test_storage_backfills_legacy_metadata_into_sqlite(tmp_path: Path) -> None:
 
     assert storage.job_ids() == [job_id]
     assert storage.read_metadata(job_id) == metadata
-    with sqlite3.connect(settings.data_dir / "jobs.sqlite3") as connection:
+    with closing(sqlite3.connect(settings.data_dir / "jobs.sqlite3")) as connection:
         row = connection.execute(
             "SELECT status, source_format, target_format FROM jobs WHERE id = ?",
             (job_id,),
@@ -63,6 +64,41 @@ def test_storage_backfills_legacy_metadata_into_sqlite(tmp_path: Path) -> None:
     assert row == ("queued", "hydro", "icpc")
     assert journal_mode == ("wal",)
     assert schema_version == (1,)
+
+
+def test_job_index_closes_connections_after_each_operation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from app import job_index as job_index_module
+    from app.job_index import JobIndex
+
+    opened: list[sqlite3.Connection] = []
+    original_connect = sqlite3.connect
+
+    class TrackingConnection(sqlite3.Connection):
+        was_closed = False
+
+        def close(self) -> None:
+            self.was_closed = True
+            super().close()
+
+    def tracking_connect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        connection = original_connect(*args, factory=TrackingConnection, **kwargs)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(job_index_module.sqlite3, "connect", tracking_connect)
+    index = JobIndex(tmp_path / "jobs.sqlite3")
+    metadata = _metadata("f" * 32)
+
+    index.upsert(metadata, updated_at=utc_now_iso())
+    assert index.get(metadata.id) is not None
+    assert index.ids() == [metadata.id]
+    index.prune_missing({metadata.id})
+    index.delete(metadata.id)
+
+    assert len(opened) == 6
+    assert all(connection.was_closed for connection in opened)  # type: ignore[attr-defined]
 
 
 def test_sqlite_metadata_survives_missing_compatibility_sidecar(
@@ -115,3 +151,30 @@ def test_metadata_and_log_writes_wake_change_waiters(tmp_path: Path) -> None:
     waiter.join(timeout=1)
 
     assert result == [initial_revision + 1]
+
+
+def test_log_chunks_use_byte_offsets_and_reset_invalid_cursors(
+    tmp_path: Path,
+) -> None:
+    storage = Storage(_settings(tmp_path))
+    job_id = "e" * 32
+    storage.write_metadata(_metadata(job_id))
+    paths = storage.paths_for(job_id)
+    paths.logs_path.write_text("开始\nfinished\n", encoding="utf-8")
+    first_size = len("开始\n".encode("utf-8"))
+
+    text, next_offset, reset = storage.read_log_chunk(job_id, first_size)
+
+    assert text == "finished\n"
+    assert next_offset == paths.logs_path.stat().st_size
+    assert reset is False
+
+    text, next_offset, reset = storage.read_log_chunk(job_id, 999_999)
+    assert text == "开始\nfinished\n"
+    assert next_offset == paths.logs_path.stat().st_size
+    assert reset is True
+
+    text, next_offset, reset = storage.read_log_chunk(job_id, 0, limit=4)
+    assert text == "开始"
+    assert next_offset == len("开始".encode("utf-8"))
+    assert reset is False

@@ -427,7 +427,9 @@ install_backend() {
   fi
 
   "$ROOT_DIR/backend/.venv/bin/python" -m pip install --upgrade pip
-  "$ROOT_DIR/backend/.venv/bin/python" -m pip install -r "$ROOT_DIR/backend/requirements.txt"
+  "$ROOT_DIR/backend/.venv/bin/python" -m pip install \
+    --require-hashes \
+    -r "$ROOT_DIR/backend/requirements.lock"
 }
 
 install_frontend() {

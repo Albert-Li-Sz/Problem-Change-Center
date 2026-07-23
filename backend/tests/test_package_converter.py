@@ -21,7 +21,8 @@ sys.path.insert(0, str(RUNNER_DIR))
 import package_converter  # noqa: E402
 import format_bridge as bridge  # noqa: E402
 from compat.corpus.build import build as build_compat_corpus  # noqa: E402
-from package_adapters import ADAPTERS, _filter_problems  # noqa: E402
+from adapters import ADAPTERS  # noqa: E402
+from package_adapters import _filter_problems  # noqa: E402
 from package_converter import REPORT_FILENAME, convert_package  # noqa: E402
 from package_ir import (  # noqa: E402
     ConversionIssue,
@@ -130,7 +131,7 @@ def test_compatibility_manifest_drives_conversion_and_failure_matrix(
     build_compat_corpus(corpus)
     manifest = json.loads((corpus / "manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["license"] == "CC0-1.0"
     assert len(manifest["fixtures"]) == 11
     for fixture in manifest["fixtures"]:
@@ -146,6 +147,39 @@ def test_compatibility_manifest_drives_conversion_and_failure_matrix(
             )
             assert report["problem_count"] == fixture["problem_count"]
             assert report["counts"]["fatal"] == 0
+
+        semantic = fixture.get("semantic")
+        if semantic:
+            bundle = _read_bundle(
+                source,
+                fixture["source_format"],
+                tmp_path / f"{source.stem}-semantic",
+            )
+            actual = {
+                "case_count": sum(len(problem.cases) for problem in bundle.problems),
+                "sample_count": sum(
+                    case.sample for problem in bundle.problems for case in problem.cases
+                ),
+                "checker_count": sum(
+                    problem.checker is not None for problem in bundle.problems
+                ),
+                "validator_count": sum(
+                    problem.validator is not None for problem in bundle.problems
+                ),
+                "interactor_count": sum(
+                    problem.interactor is not None for problem in bundle.problems
+                ),
+                "attachment_count": sum(
+                    len(problem.attachments) for problem in bundle.problems
+                ),
+                "template_count": sum(
+                    len(problem.templates) for problem in bundle.problems
+                ),
+                "solution_count": sum(
+                    len(problem.solutions) for problem in bundle.problems
+                ),
+            }
+            assert {key: actual[key] for key in semantic} == semantic
 
         invalid_target = fixture.get("invalid_target")
         if invalid_target is None:
@@ -232,6 +266,10 @@ def test_probhub_workspace_single_export_and_legacy_preserve_judge_semantics(
     assert legacy.problems[0].time_ms == 2000
     assert legacy.problems[0].memory_mb == 512
     assert legacy.problems[0].statements[0].language == "zh"
+    legacy_statement = legacy.problems[0].statements[0].content or ""
+    assert "## 样例" in legacy_statement
+    assert "```input1\n1 2\n```" in legacy_statement
+    assert "```output1\n3\n```" in legacy_statement
     assert legacy.problems[0].checker is not None
     assert legacy.problems[0].validator is not None
     assert len(legacy.problems[0].solutions) == 1

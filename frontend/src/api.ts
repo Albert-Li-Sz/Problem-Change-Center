@@ -130,9 +130,17 @@ export type JobRequest = {
 export type JobEventHandlers = {
   onOpen: () => void;
   onJob: (job: JobResponse) => void;
-  onLogs: (logs: string) => void;
+  onLogs: (chunk: LogChunk) => void;
   onReport: (report: ConversionReport) => void;
+  onCursor?: (cursor: string) => void;
   onError: () => void;
+};
+
+export type LogChunk = {
+  text: string;
+  offset: number;
+  next_offset: number;
+  reset: boolean;
 };
 
 async function parseResponse<T>(response: Response): Promise<T> {
@@ -225,13 +233,17 @@ export async function getReport(jobId: string): Promise<ConversionReport> {
 
 export function subscribeToJobEvents(
   jobId: string,
-  handlers: JobEventHandlers
+  handlers: JobEventHandlers,
+  cursor = ""
 ): (() => void) | null {
   if (typeof EventSource === "undefined") return null;
-  const source = new EventSource(`/api/jobs/${jobId}/events`);
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+  const source = new EventSource(`/api/jobs/${jobId}/events${query}`);
   const parse = <T>(event: Event, handler: (value: T) => void) => {
     try {
-      handler(JSON.parse((event as MessageEvent<string>).data) as T);
+      const message = event as MessageEvent<string>;
+      if (message.lastEventId) handlers.onCursor?.(message.lastEventId);
+      handler(JSON.parse(message.data) as T);
     } catch {
       handlers.onError();
     }
@@ -241,7 +253,7 @@ export function subscribeToJobEvents(
     parse<JobResponse>(event, handlers.onJob)
   );
   source.addEventListener("logs", (event) =>
-    parse<{ text: string }>(event, ({ text }) => handlers.onLogs(text))
+    parse<LogChunk>(event, handlers.onLogs)
   );
   source.addEventListener("report", (event) =>
     parse<ConversionReport>(event, handlers.onReport)
