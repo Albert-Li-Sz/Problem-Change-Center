@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import re
@@ -565,33 +566,63 @@ class JobManager:
         current_phase: str | None = None
         current_problem: str | None = None
         selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
+        stdout_fd = process.stdout.fileno()
+        os.set_blocking(stdout_fd, False)
+        selector.register(stdout_fd, selectors.EVENT_READ)
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        line_buffer = ""
+
+        def handle_line(line: str) -> None:
+            nonlocal current_phase
+            nonlocal current_problem
+            nonlocal last_activity
+            nonlocal phase_started
+            nonlocal problem_started
+            event = self._handle_progress_line(job_id, line)
+            if event is None or event.get("event") != "heartbeat":
+                last_activity = time.monotonic()
+            if event is None:
+                self.storage.append_log(job_id, line)
+                return
+            phase = event.get("phase")
+            problem = event.get("problem")
+            if phase != current_phase:
+                current_phase = str(phase) if phase else None
+                phase_started = time.monotonic()
+            if problem != current_problem:
+                current_problem = str(problem) if problem else None
+                problem_started = time.monotonic() if current_problem else None
+
+        def consume(data: bytes, *, final: bool = False) -> None:
+            nonlocal line_buffer
+            line_buffer += decoder.decode(data, final=final)
+            while "\n" in line_buffer:
+                line, line_buffer = line_buffer.split("\n", 1)
+                handle_line(line + "\n")
+            if final and line_buffer:
+                handle_line(line_buffer)
+                line_buffer = ""
+
         try:
             while True:
-                for key, _ in selector.select(timeout=0.2):
-                    line = key.fileobj.readline()
-                    if line:
-                        event = self._handle_progress_line(job_id, line)
-                        if event is None or event.get("event") != "heartbeat":
-                            last_activity = time.monotonic()
-                        if event is None:
-                            self.storage.append_log(job_id, line)
-                        else:
-                            phase = event.get("phase")
-                            problem = event.get("problem")
-                            if phase != current_phase:
-                                current_phase = str(phase) if phase else None
-                                phase_started = time.monotonic()
-                            if problem != current_problem:
-                                current_problem = str(problem) if problem else None
-                                problem_started = (
-                                    time.monotonic() if current_problem else None
-                                )
+                for _key, _ in selector.select(timeout=0.2):
+                    try:
+                        chunk = os.read(stdout_fd, 64 * 1024)
+                    except BlockingIOError:
+                        continue
+                    if chunk:
+                        consume(chunk)
 
                 if process.poll() is not None:
-                    remainder = process.stdout.read()
-                    if remainder:
-                        self.storage.append_log(job_id, remainder)
+                    while True:
+                        try:
+                            remainder = os.read(stdout_fd, 64 * 1024)
+                        except BlockingIOError:
+                            break
+                        if not remainder:
+                            break
+                        consume(remainder)
+                    consume(b"", final=True)
                     return process.returncode if process.returncode is not None else 0
 
                 now = time.monotonic()

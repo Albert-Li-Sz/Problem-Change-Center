@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 from pydantic import ValidationError
 
 from .config import settings
@@ -22,7 +30,58 @@ from .security import (
     enforce_request_security,
     readiness_status,
 )
-from .storage import Storage
+from .storage import Storage, utc_now_iso
+
+
+TERMINAL_JOB_STATUSES = {"success", "failed", "cancelled"}
+
+
+def _sse_event(event: str, data: object, *, event_id: str | None = None) -> str:
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    lines = []
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    lines.extend((f"event: {event}", f"data: {payload}", ""))
+    return "\n".join(lines) + "\n"
+
+
+async def _stream_job_events(request: Request, job_id: str) -> AsyncIterator[str]:
+    storage = request.app.state.storage
+    manager = request.app.state.job_manager
+    revision = storage.change_revision(job_id)
+    last_logs: str | None = None
+    report_sent = False
+    yield "retry: 2000\n\n"
+
+    while True:
+        try:
+            job = manager.response(job_id)
+            logs = storage.read_logs(job_id)
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_404_NOT_FOUND:
+                return
+            raise
+
+        event_id = str(revision)
+        yield _sse_event("job", job.model_dump(mode="json"), event_id=event_id)
+        if logs != last_logs:
+            yield _sse_event("logs", {"text": logs}, event_id=event_id)
+            last_logs = logs
+        if job.report_ready and not report_sent:
+            yield _sse_event("report", storage.read_report(job_id), event_id=event_id)
+            report_sent = True
+        if job.status in TERMINAL_JOB_STATUSES:
+            return
+        if await request.is_disconnected():
+            return
+
+        next_revision = await asyncio.to_thread(
+            storage.wait_for_change, job_id, revision, 15.0
+        )
+        if next_revision is None:
+            yield _sse_event("heartbeat", {"timestamp": utc_now_iso()})
+        else:
+            revision = next_revision
 
 
 @asynccontextmanager
@@ -105,6 +164,20 @@ def start_job(request: JobRequest) -> JobResponse:
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
 def get_job(job_id: str) -> JobResponse:
     return app.state.job_manager.response(job_id)
+
+
+@app.get("/api/jobs/{job_id}/events")
+async def get_job_events(request: Request, job_id: str) -> StreamingResponse:
+    app.state.job_manager.response(job_id)
+    return StreamingResponse(
+        _stream_job_events(request, job_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/jobs/{job_id}/logs", response_class=PlainTextResponse)

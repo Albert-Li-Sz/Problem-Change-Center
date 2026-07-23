@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import threading
+import time
 import uuid
 import zipfile
 from dataclasses import asdict, dataclass, field
@@ -17,6 +18,7 @@ from fastapi import HTTPException, UploadFile, status
 
 from .config import Settings
 from .format_detection import detect_zip_format, detected_format
+from .job_index import JobIndex
 from .schemas import InspectResponse, JobStatus, RepairRequest
 
 
@@ -66,9 +68,32 @@ class Storage:
         self.settings = settings
         self.jobs_dir = settings.data_dir / "jobs"
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.job_index = JobIndex(settings.data_dir / "jobs.sqlite3")
         self._upload_lock = asyncio.Lock()
         self._log_lock = threading.Lock()
         self._metadata_lock = threading.RLock()
+        self._change_condition = threading.Condition()
+        self._change_revisions: dict[str, int] = {}
+        self._backfill_job_index()
+
+    def _backfill_job_index(self) -> None:
+        existing_ids: set[str] = set()
+        for root in self.jobs_dir.iterdir():
+            if not root.is_dir() or not _is_safe_job_id(root.name):
+                continue
+            existing_ids.add(root.name)
+            metadata_path = root / "metadata.json"
+            if not metadata_path.is_file() or metadata_path.is_symlink():
+                continue
+            try:
+                value = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata = JobMetadata(**value)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if metadata.id != root.name:
+                continue
+            self.job_index.upsert(metadata, updated_at=utc_now_iso())
+        self.job_index.prune_missing(existing_ids)
 
     def paths_for(self, job_id: str) -> JobPaths:
         if not _is_safe_job_id(job_id):
@@ -535,12 +560,23 @@ class Storage:
     def read_metadata(self, job_id: str) -> JobMetadata:
         paths = self.paths_for(job_id)
         with self._metadata_lock:
-            if not paths.metadata_path.exists():
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job"
-                )
-            data = json.loads(paths.metadata_path.read_text(encoding="utf-8"))
-            return JobMetadata(**data)
+            data = self.job_index.get(job_id)
+            if data is not None:
+                return JobMetadata(**data)
+            if paths.metadata_path.is_file() and not paths.metadata_path.is_symlink():
+                try:
+                    data = json.loads(paths.metadata_path.read_text(encoding="utf-8"))
+                    metadata = JobMetadata(**data)
+                except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Invalid stored job metadata",
+                    ) from exc
+                self.job_index.upsert(metadata, updated_at=utc_now_iso())
+                return metadata
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job"
+            )
 
     def write_metadata(self, metadata: JobMetadata) -> None:
         paths = self.paths_for(metadata.id)
@@ -550,6 +586,8 @@ class Storage:
             tmp_path = paths.metadata_path.with_name(f"{paths.metadata_path.name}.tmp")
             tmp_path.write_text(content, encoding="utf-8")
             tmp_path.replace(paths.metadata_path)
+            self.job_index.upsert(metadata, updated_at=utc_now_iso())
+        self.notify_change(metadata.id)
 
     def write_request(self, job_id: str, request: dict[str, object]) -> None:
         path = self.paths_for(job_id).request_path
@@ -597,6 +635,7 @@ class Storage:
                 data = data[:keep] + marker[: remaining - keep]
             with paths.logs_path.open("ab") as out:
                 out.write(data)
+        self.notify_change(job_id)
 
     def read_logs(self, job_id: str) -> str:
         paths = self.paths_for(job_id)
@@ -608,18 +647,41 @@ class Storage:
 
     def delete_job(self, job_id: str) -> None:
         paths = self.paths_for(job_id)
-        if not paths.root.exists():
+        indexed = self.job_index.get(job_id) is not None
+        if not paths.root.exists() and not indexed:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job"
             )
-        shutil.rmtree(paths.root)
+        if paths.root.exists():
+            shutil.rmtree(paths.root)
+        self.job_index.delete(job_id)
+        self.notify_change(job_id)
 
     def job_ids(self) -> list[str]:
-        return sorted(
-            path.name
-            for path in self.jobs_dir.iterdir()
-            if path.is_dir() and _is_safe_job_id(path.name)
-        )
+        return self.job_index.ids()
+
+    def notify_change(self, job_id: str) -> int:
+        with self._change_condition:
+            revision = self._change_revisions.get(job_id, 0) + 1
+            self._change_revisions[job_id] = revision
+            self._change_condition.notify_all()
+            return revision
+
+    def change_revision(self, job_id: str) -> int:
+        with self._change_condition:
+            return self._change_revisions.get(job_id, 0)
+
+    def wait_for_change(
+        self, job_id: str, after_revision: int, timeout: float
+    ) -> int | None:
+        deadline = time.monotonic() + timeout
+        with self._change_condition:
+            while self._change_revisions.get(job_id, 0) <= after_revision:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._change_condition.wait(timeout=remaining)
+            return self._change_revisions[job_id]
 
     def total_storage_bytes(self) -> int:
         total = 0

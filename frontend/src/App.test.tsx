@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,7 +11,8 @@ import {
   getLogs,
   getReport,
   inspectZip,
-  startJob
+  startJob,
+  subscribeToJobEvents
 } from "./api";
 
 vi.mock("./api", () => ({
@@ -23,7 +24,8 @@ vi.mock("./api", () => ({
   getLogs: vi.fn(),
   getReport: vi.fn(),
   inspectZip: vi.fn(),
-  startJob: vi.fn()
+  startJob: vi.fn(),
+  subscribeToJobEvents: vi.fn(() => null)
 }));
 
 const mockedInspectZip = vi.mocked(inspectZip);
@@ -34,6 +36,7 @@ const mockedApplyRepairs = vi.mocked(applyRepairs);
 const mockedGetJob = vi.mocked(getJob);
 const mockedGetLogs = vi.mocked(getLogs);
 const mockedGetReport = vi.mocked(getReport);
+const mockedSubscribeToJobEvents = vi.mocked(subscribeToJobEvents);
 
 afterEach(cleanup);
 
@@ -43,6 +46,7 @@ describe("App archive selection", () => {
     mockedDeleteJob.mockResolvedValue(undefined);
     mockedCancelJob.mockResolvedValue(undefined);
     mockedGetLogs.mockResolvedValue("");
+    mockedSubscribeToJobEvents.mockReturnValue(null);
   });
 
   it("invalidates the inspected job when a different archive is selected", async () => {
@@ -179,6 +183,7 @@ describe("App archive selection", () => {
   it("shows structured progress and cancels while retaining diagnostics", async () => {
     const user = userEvent.setup();
     const jobId = "e".repeat(32);
+    mockedSubscribeToJobEvents.mockReturnValue(() => {});
     mockedInspectZip.mockResolvedValue({
       job_id: jobId,
       filename: "large.zip",
@@ -251,6 +256,80 @@ describe("App archive selection", () => {
     expect(mockedGetJob).toHaveBeenCalledWith(jobId);
     expect(mockedGetLogs).toHaveBeenCalledWith(jobId);
     expect(await screen.findByText("Cancelled by user")).not.toBeNull();
+  });
+
+  it("polls a pending report when SSE closes after the terminal job event", async () => {
+    const user = userEvent.setup();
+    const jobId = "9".repeat(32);
+    let eventHandlers:
+      | Parameters<typeof subscribeToJobEvents>[1]
+      | undefined;
+    mockedSubscribeToJobEvents.mockImplementation((_id, handlers) => {
+      eventHandlers = handlers;
+      return () => {};
+    });
+    mockedInspectZip.mockResolvedValue({
+      job_id: jobId,
+      filename: "report.zip",
+      size: 3,
+      warnings: [],
+      detected_format: "hydro",
+      format_candidates: []
+    });
+    const terminalJob = {
+      id: jobId,
+      status: "success" as const,
+      created_at: "2026-07-23T00:00:00Z",
+      started_at: "2026-07-23T00:00:00Z",
+      finished_at: "2026-07-23T00:00:01Z",
+      exit_code: 0,
+      download_ready: true,
+      error: null,
+      source_format: "hydro" as const,
+      target_format: "icpc" as const,
+      report_ready: true,
+      report_counts: { warning: 0, loss: 0, fatal: 0 }
+    };
+    mockedStartJob.mockResolvedValue({
+      ...terminalJob,
+      status: "running",
+      finished_at: null,
+      exit_code: null,
+      download_ready: false,
+      report_ready: false
+    });
+    mockedGetJob.mockResolvedValue(terminalJob);
+    mockedGetReport.mockResolvedValue({
+      schema_version: 2,
+      source_format: "hydro",
+      target_format: "icpc",
+      problem_count: 1,
+      counts: { warning: 0, loss: 0, fatal: 0 },
+      issues: [],
+      artifacts: ["sum.zip"]
+    });
+    render(<App />);
+
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]');
+    await user.upload(
+      fileInput!,
+      new File(["zip"], "report.zip", { type: "application/zip" })
+    );
+    await user.click(screen.getByRole("button", { name: "上传并检查" }));
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "输出格式" }),
+      "icpc"
+    );
+    await user.click(screen.getByRole("button", { name: "启动容器转换" }));
+    await waitFor(() => expect(eventHandlers).toBeDefined());
+
+    act(() => {
+      eventHandlers?.onJob(terminalJob);
+      eventHandlers?.onError();
+    });
+
+    await waitFor(() => expect(mockedGetReport).toHaveBeenCalledWith(jobId));
+    expect(await screen.findByText("1 题 · 0 警告 · 0 项损失")).not.toBeNull();
   });
 
   it("does not resurrect a cancelled job when reset wins pending diagnostics", async () => {

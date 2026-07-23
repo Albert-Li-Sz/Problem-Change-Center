@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { applyRepairs, inspectZip } from "./api";
+import {
+  applyRepairs,
+  inspectZip,
+  JobEventHandlers,
+  subscribeToJobEvents
+} from "./api";
 
 describe("API error handling", () => {
   afterEach(() => {
@@ -86,5 +91,65 @@ describe("API error handling", () => {
       ]
     });
     expect((body.get("files") as File).name).toBe("1.ans");
+  });
+
+  it("subscribes to typed job events and closes the EventSource", () => {
+    const listeners = new Map<string, (event: Event) => void>();
+    const close = vi.fn();
+    const source = {
+      onopen: null as ((event: Event) => void) | null,
+      onerror: null as ((event: Event) => void) | null,
+      addEventListener: vi.fn(
+        (name: string, listener: (event: Event) => void) => {
+          listeners.set(name, listener);
+        }
+      ),
+      close
+    };
+    const eventSourceConstructor = vi.fn();
+    function EventSourceMock(_url: string) {
+      eventSourceConstructor(_url);
+      return source;
+    }
+    vi.stubGlobal("EventSource", EventSourceMock);
+    const handlers: JobEventHandlers = {
+      onOpen: vi.fn(),
+      onJob: vi.fn(),
+      onLogs: vi.fn(),
+      onReport: vi.fn(),
+      onError: vi.fn()
+    };
+
+    const unsubscribe = subscribeToJobEvents("a".repeat(32), handlers);
+    source.onopen?.(new Event("open"));
+    listeners.get("job")?.(
+      new MessageEvent("job", {
+        data: JSON.stringify({ id: "a".repeat(32), status: "running" })
+      })
+    );
+    listeners.get("logs")?.(
+      new MessageEvent("logs", {
+        data: JSON.stringify({ text: "runner started\n" })
+      })
+    );
+    listeners.get("report")?.(
+      new MessageEvent("report", {
+        data: JSON.stringify({ schema_version: 2, problem_count: 1 })
+      })
+    );
+    unsubscribe?.();
+
+    expect(eventSourceConstructor).toHaveBeenCalledWith(
+      `/api/jobs/${"a".repeat(32)}/events`
+    );
+    expect(handlers.onOpen).toHaveBeenCalledOnce();
+    expect(handlers.onJob).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "running" })
+    );
+    expect(handlers.onLogs).toHaveBeenCalledWith("runner started\n");
+    expect(handlers.onReport).toHaveBeenCalledWith(
+      expect.objectContaining({ problem_count: 1 })
+    );
+    expect(close).toHaveBeenCalledOnce();
   });
 });

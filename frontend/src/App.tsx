@@ -15,6 +15,7 @@ import {
   JobResponse,
   SourceFormat,
   startJob,
+  subscribeToJobEvents,
   TargetFormat
 } from "./api";
 import { LogViewer } from "./components/LogViewer";
@@ -57,6 +58,8 @@ const progressLabels: Record<NonNullable<JobResponse["progress"]>["phase"], stri
   validate_output: "校验输出",
   package: "打包结果"
 };
+const pollIntervalMs = 1200;
+const sseRetryDelaysMs = [1000, 2000, 5000, 10000];
 
 function splitList(value: string): string[] {
   return value
@@ -158,44 +161,104 @@ export default function App() {
     const jobId = job.id;
     const epoch = requestEpoch.current;
     let stopped = false;
-    let timer: number | undefined;
+    let terminal = false;
+    let pollTimer: number | undefined;
+    let reconnectTimer: number | undefined;
+    let closeStream: (() => void) | null = null;
+    let pollInFlight = false;
+    let reconnectAttempts = 0;
+    let reportPending = false;
+    let reportReceived = false;
 
-    const schedule = () => {
-      timer = window.setTimeout(poll, 1200);
+    const isCurrent = () => !stopped && requestEpoch.current === epoch;
+    const stopPolling = () => {
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+      pollTimer = undefined;
+    };
+    const schedulePoll = (delay = pollIntervalMs) => {
+      stopPolling();
+      pollTimer = window.setTimeout(poll, delay);
     };
     const poll = async () => {
+      if (!isCurrent() || (terminal && !reportPending) || pollInFlight) return;
+      pollInFlight = true;
       try {
         const [nextJob, nextLogs] = await Promise.all([getJob(jobId), getLogs(jobId)]);
-        if (stopped || requestEpoch.current !== epoch) return;
-        let retryReport = false;
+        if (!isCurrent()) return;
+        reportPending = nextJob.report_ready && !reportReceived;
         let nextReport: ConversionReport | null = null;
-        if (nextJob.report_ready) {
+        if (reportPending) {
           try {
             nextReport = await getReport(jobId);
+            reportReceived = true;
+            reportPending = false;
           } catch (err) {
-            retryReport = true;
-            if (!stopped && requestEpoch.current === epoch) {
+            if (isCurrent()) {
               setError(err instanceof Error ? err.message : "无法读取转换报告");
             }
           }
         }
-        if (stopped || requestEpoch.current !== epoch) return;
+        if (!isCurrent()) return;
+        terminal = !["queued", "running"].includes(nextJob.status);
         setJob(nextJob);
         setLogs(nextLogs);
         if (nextReport) setReport(nextReport);
-        if (nextJob.status === "queued" || nextJob.status === "running" || retryReport) schedule();
+        if (!terminal || reportPending) schedulePoll();
       } catch (err) {
-        if (stopped || requestEpoch.current !== epoch) return;
+        if (!isCurrent()) return;
         setError(err instanceof Error ? err.message : "无法读取任务状态");
-        schedule();
+        schedulePoll();
+      } finally {
+        pollInFlight = false;
       }
     };
 
-    schedule();
+    const connect = () => {
+      if (!isCurrent() || terminal) return;
+      closeStream?.();
+      closeStream = subscribeToJobEvents(jobId, {
+        onOpen: stopPolling,
+        onJob: (nextJob) => {
+          if (!isCurrent()) return;
+          terminal = !["queued", "running"].includes(nextJob.status);
+          reportPending = nextJob.report_ready && !reportReceived;
+          setJob(nextJob);
+        },
+        onLogs: (nextLogs) => {
+          if (isCurrent()) setLogs(nextLogs);
+        },
+        onReport: (nextReport) => {
+          if (!isCurrent()) return;
+          reportReceived = true;
+          reportPending = false;
+          setReport(nextReport);
+        },
+        onError: () => {
+          if (!isCurrent()) return;
+          closeStream?.();
+          closeStream = null;
+          if (terminal) {
+            if (reportPending) schedulePoll(0);
+            return;
+          }
+          schedulePoll(0);
+          if (reconnectAttempts < sseRetryDelaysMs.length) {
+            const delay = sseRetryDelaysMs[reconnectAttempts];
+            reconnectAttempts += 1;
+            reconnectTimer = window.setTimeout(connect, delay);
+          }
+        }
+      });
+      if (closeStream === null) schedulePoll(0);
+    };
+
+    connect();
 
     return () => {
       stopped = true;
-      if (timer !== undefined) window.clearTimeout(timer);
+      stopPolling();
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      closeStream?.();
     };
   }, [job?.id]);
 

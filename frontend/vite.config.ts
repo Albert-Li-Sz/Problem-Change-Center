@@ -11,7 +11,8 @@ const backendPort = process.env.P2H_BACKEND_PORT || "8000";
 export default defineConfig({
   plugins: [react()],
   test: {
-    environment: "jsdom"
+    environment: "jsdom",
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"]
   },
   server: {
     proxy: {

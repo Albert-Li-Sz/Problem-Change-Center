@@ -117,6 +117,14 @@ export type JobRequest = {
   };
 };
 
+export type JobEventHandlers = {
+  onOpen: () => void;
+  onJob: (job: JobResponse) => void;
+  onLogs: (logs: string) => void;
+  onReport: (report: ConversionReport) => void;
+  onError: () => void;
+};
+
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response));
@@ -203,6 +211,33 @@ export async function getLogs(jobId: string): Promise<string> {
 export async function getReport(jobId: string): Promise<ConversionReport> {
   const response = await fetch(`/api/jobs/${jobId}/report`);
   return parseResponse<ConversionReport>(response);
+}
+
+export function subscribeToJobEvents(
+  jobId: string,
+  handlers: JobEventHandlers
+): (() => void) | null {
+  if (typeof EventSource === "undefined") return null;
+  const source = new EventSource(`/api/jobs/${jobId}/events`);
+  const parse = <T>(event: Event, handler: (value: T) => void) => {
+    try {
+      handler(JSON.parse((event as MessageEvent<string>).data) as T);
+    } catch {
+      handlers.onError();
+    }
+  };
+  source.onopen = handlers.onOpen;
+  source.addEventListener("job", (event) =>
+    parse<JobResponse>(event, handlers.onJob)
+  );
+  source.addEventListener("logs", (event) =>
+    parse<{ text: string }>(event, ({ text }) => handlers.onLogs(text))
+  );
+  source.addEventListener("report", (event) =>
+    parse<ConversionReport>(event, handlers.onReport)
+  );
+  source.onerror = handlers.onError;
+  return () => source.close();
 }
 
 export async function deleteJob(jobId: string): Promise<void> {

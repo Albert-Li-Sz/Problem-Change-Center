@@ -54,6 +54,14 @@ jobs:
           npm test -- --run
           npm run build
           npm audit --audit-level=high
+      - name: Install Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Browser end-to-end tests
+        working-directory: frontend
+        env:
+          P2H_E2E_PYTHON: python
+        run: npm run test:e2e
       - name: Shell checks
         run: |
           sudo apt-get update

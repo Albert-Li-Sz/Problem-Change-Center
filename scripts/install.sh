@@ -17,6 +17,7 @@ ARCH_NAME="$(uname -m 2>/dev/null || printf 'unknown')"
 
 BUILD_RUNNER=1
 BUILD_WINE=0
+RUNNER_IMAGE_OVERRIDE="${P2H_PREBUILT_RUNNER_IMAGE:-}"
 BUILD_PROXY_MODE=auto
 EFFECTIVE_USE_BUILD_PROXY=1
 INSTALL_BACKEND=1
@@ -52,6 +53,7 @@ Install backend dependencies, frontend dependencies, and Docker runner images.
 
 Options:
   --wine                 Also build p2h-runner-wine and configure .env to use it.
+  --runner-image IMAGE   Pull a prebuilt runner tag/digest instead of building.
   --skip-runner          Skip Docker runner image build.
   --skip-backend         Skip backend virtualenv and pip install.
   --skip-frontend        Skip frontend npm install.
@@ -67,6 +69,7 @@ Options:
 Examples:
   ./install.sh
   ./install.sh --wine
+  ./install.sh --runner-image ghcr.io/lmtinsuzhou/p2h-runner:pre
   ./install.sh --skip-runner
   ./install.sh --base-image registry.example.com/library/python:3.14-slim-trixie
   ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
@@ -84,8 +87,15 @@ while [[ $# -gt 0 ]]; do
     --wine)
       BUILD_WINE=1
       ;;
+    --runner-image)
+      [[ $# -ge 2 ]] || die "--runner-image requires an image name"
+      RUNNER_IMAGE_OVERRIDE="$2"
+      BUILD_RUNNER=0
+      shift
+      ;;
     --skip-runner)
       BUILD_RUNNER=0
+      RUNNER_IMAGE_OVERRIDE=""
       ;;
     --skip-backend)
       INSTALL_BACKEND=0
@@ -134,6 +144,10 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ -n "$RUNNER_IMAGE_OVERRIDE" && "$BUILD_WINE" -eq 1 ]]; then
+  die "--runner-image and --wine cannot be combined; pass the exact Wine image instead"
+fi
 
 require_cmd() {
   if command -v "$1" >/dev/null 2>&1; then
@@ -524,15 +538,26 @@ EOF
   fi
 }
 
+pull_runner() {
+  log "Pulling prebuilt Docker runner image: $RUNNER_IMAGE_OVERRIDE"
+  check_docker_access
+  docker pull "$RUNNER_IMAGE_OVERRIDE"
+}
+
 write_env_file() {
   local env_file="$ROOT_DIR/.env"
   local runner_image="p2h-runner"
-  if [[ "$BUILD_WINE" -eq 1 ]]; then
+  if [[ -n "$RUNNER_IMAGE_OVERRIDE" ]]; then
+    runner_image="$RUNNER_IMAGE_OVERRIDE"
+  elif [[ "$BUILD_WINE" -eq 1 ]]; then
     runner_image="p2h-runner-wine"
   fi
 
   if [[ -f "$env_file" ]]; then
     log "Keeping existing .env"
+    if [[ -n "$RUNNER_IMAGE_OVERRIDE" ]] && ! grep -Fxq "P2H_RUNNER_IMAGE=$RUNNER_IMAGE_OVERRIDE" "$env_file"; then
+      warn "Prebuilt runner was pulled, but existing .env was not changed. Set P2H_RUNNER_IMAGE=$RUNNER_IMAGE_OVERRIDE manually."
+    fi
     if [[ "$BUILD_WINE" -eq 1 ]] && ! grep -q '^P2H_RUNNER_IMAGE=p2h-runner-wine$' "$env_file"; then
       warn "Wine runner was built, but existing .env was not changed. Set P2H_RUNNER_IMAGE=p2h-runner-wine manually if needed."
     fi
@@ -601,7 +626,9 @@ main() {
     install_frontend
   fi
 
-  if [[ "$BUILD_RUNNER" -eq 1 ]]; then
+  if [[ -n "$RUNNER_IMAGE_OVERRIDE" ]]; then
+    pull_runner
+  elif [[ "$BUILD_RUNNER" -eq 1 ]]; then
     build_runner
   fi
 

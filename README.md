@@ -268,6 +268,7 @@ checker、interactor、validator、标程、样例和正式测试数据不会互
 
 ```text
 --wine                 同时构建 p2h-runner-wine
+--runner-image IMAGE   拉取预构建 runner tag/digest，不在本机构建
 --skip-runner          跳过 Docker runner 构建
 --skip-backend         跳过后端依赖安装
 --skip-frontend        跳过前端依赖安装
@@ -285,10 +286,34 @@ checker、interactor、validator、标程、样例和正式测试数据不会互
 ```bash
 ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
 ./install.sh --base-image <registry>/library/python:3.14-slim-trixie
+./install.sh --runner-image ghcr.io/lmtinsuzhou/p2h-runner:pre
 ./install.sh --skip-runner
 ```
 
 安装器会自动忽略容器无法访问的 `localhost`、`127.*` 和 `::1` 回环代理。需要代理时，应使用构建容器可访问的地址。
+
+### 预构建 runner 镜像
+
+`pre` 分支会发布普通多架构镜像和仅 amd64 的 Wine 镜像：
+
+```bash
+docker pull ghcr.io/lmtinsuzhou/p2h-runner:pre
+./install.sh --runner-image ghcr.io/lmtinsuzhou/p2h-runner:pre
+
+# 只有必须执行 Windows .exe 的题包使用此镜像
+./install.sh --runner-image ghcr.io/lmtinsuzhou/p2h-runner-wine:pre
+```
+
+生产环境建议固定不可变 digest。先从 `docker image inspect` 或 GHCR 包页面取得
+发布 digest，再配置：
+
+```text
+P2H_RUNNER_IMAGE=ghcr.io/lmtinsuzhou/p2h-runner@sha256:<digest>
+```
+
+发布工作流同时生成 commit SHA、分支和 semver 标签，并附带 provenance 与
+SBOM。普通镜像支持 `linux/amd64`、`linux/arm64`；Wine 镜像只支持
+`linux/amd64`。
 
 ### 环境变量
 

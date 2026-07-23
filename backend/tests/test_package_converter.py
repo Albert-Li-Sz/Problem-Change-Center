@@ -123,6 +123,63 @@ def test_redistributable_core_corpus_converts_to_icpc_and_hoj(
     }
 
 
+def test_compatibility_manifest_drives_conversion_and_failure_matrix(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    build_compat_corpus(corpus)
+    manifest = json.loads((corpus / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["schema_version"] == 1
+    assert manifest["license"] == "CC0-1.0"
+    assert len(manifest["fixtures"]) == 8
+    for fixture in manifest["fixtures"]:
+        source = corpus / fixture["path"]
+        assert source.is_file()
+        for target in fixture.get("targets", []):
+            output = tmp_path / f"{source.stem}-to-{target}"
+            report = convert_package(
+                source,
+                output,
+                source_format=fixture["source_format"],
+                target_format=target,
+            )
+            assert report["problem_count"] == fixture["problem_count"]
+            assert report["counts"]["fatal"] == 0
+
+        invalid_target = fixture.get("invalid_target")
+        if invalid_target is None:
+            continue
+        if fixture.get("requires_case_sensitive_fs"):
+            probe = tmp_path / "CaseSensitiveProbe"
+            probe.write_text("probe", encoding="utf-8")
+            if probe.with_name("casesensitiveprobe").exists():
+                continue
+        output = tmp_path / f"{source.stem}-invalid"
+        with pytest.raises(ValueError):
+            convert_package(
+                source,
+                output,
+                source_format=fixture["source_format"],
+                target_format=invalid_target,
+            )
+        report = json.loads((output / REPORT_FILENAME).read_text(encoding="utf-8"))
+        issue_codes = {issue["code"] for issue in report["issues"]}
+        assert set(fixture["fatal_codes"]) <= issue_codes
+        strategy = fixture.get("repair_strategy")
+        if strategy == "upload":
+            assert any(
+                suggestion["requires_upload"]
+                for suggestion in report["repair_suggestions"]
+            )
+        elif strategy:
+            assert any(
+                candidate["strategy"] == strategy
+                for suggestion in report["repair_suggestions"]
+                for candidate in suggestion["candidates"]
+            )
+
+
 def test_direct_cli_progress_reporter_enforces_stage_timeout() -> None:
     with pytest.raises(ProgressDeadlineExceeded) as timeout:
         with ProgressReporter(

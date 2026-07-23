@@ -367,6 +367,60 @@ def test_report_endpoint_returns_stored_conversion_report(tmp_path: Path) -> Non
     }
 
 
+def test_terminal_job_event_stream_sends_job_logs_and_report(
+    tmp_path: Path,
+) -> None:
+    client = _client(_settings(tmp_path))
+    job_id = "e" * 32
+    app.state.storage.write_metadata(
+        JobMetadata(
+            job_id,
+            "fps.zip",
+            1,
+            "success",
+            datetime.now(timezone.utc).isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            source_format="fps",
+            target_format="hydro",
+        )
+    )
+    paths = app.state.storage.paths_for(job_id)
+    paths.logs_path.write_text("conversion complete\n", encoding="utf-8")
+    paths.result_path.write_bytes(b"zip")
+    report = {
+        "schema_version": 1,
+        "source_format": "fps",
+        "target_format": "hydro",
+        "problem_count": 1,
+        "counts": {"warning": 0, "loss": 0, "fatal": 0},
+        "issues": [],
+        "artifacts": ["P1000.zip"],
+    }
+    paths.report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    response = client.get(f"/api/jobs/{job_id}/events")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert "retry: 2000" in response.text
+    assert "event: job" in response.text
+    assert '"status":"success"' in response.text
+    assert "event: logs" in response.text
+    assert "conversion complete" in response.text
+    assert "event: report" in response.text
+    assert '"problem_count":1' in response.text
+
+
+def test_job_event_stream_rejects_unknown_job(tmp_path: Path) -> None:
+    client = _client(_settings(tmp_path))
+
+    response = client.get(f"/api/jobs/{'f' * 32}/events")
+
+    assert response.status_code == 404
+
+
 def test_inspect_enforces_stored_job_and_total_storage_limits(tmp_path: Path) -> None:
     one_job_settings = replace(_settings(tmp_path), max_stored_jobs=1)
     client = _client(one_job_settings)
