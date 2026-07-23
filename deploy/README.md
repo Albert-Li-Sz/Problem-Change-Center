@@ -68,11 +68,11 @@ sudo chmod -R o-w /opt/oj-package-converter
 发布前记录源码提交 SHA、runner 镜像 ID 和依赖审计结果。生产升级必须重新运行
 后端测试、前端构建、隔离探针和镜像扫描。
 
-也可以跳过本机构建，拉取 `pre` 或正式版本镜像。生产配置应固定发布 digest：
+也可以跳过本机构建，拉取 `main` 或正式版本镜像。生产配置应固定发布 digest：
 
 ```bash
 sudo -u ojconverter env DOCKER_HOST=unix:///run/user/1001/docker.sock \
-  docker pull ghcr.io/lmtinsuzhou/p2h-runner:pre
+  docker pull ghcr.io/lmtinsuzhou/p2h-runner:main
 ```
 
 然后在 `production.env` 中设置

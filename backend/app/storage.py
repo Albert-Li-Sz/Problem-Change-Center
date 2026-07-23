@@ -17,7 +17,7 @@ from pathlib import PurePosixPath
 from fastapi import HTTPException, UploadFile, status
 
 from .config import Settings
-from .format_detection import detect_zip_format, detected_format
+from .format_detection import inspect_zip_package
 from .job_index import JobIndex
 from .schemas import InspectResponse, JobStatus, RepairRequest
 
@@ -39,6 +39,12 @@ class JobMetadata:
     error: str | None = None
     detected_format: str | None = None
     format_candidates: list[dict[str, object]] = field(default_factory=list)
+    package_scope: str = "unknown"
+    package_layout: str = "unknown"
+    problem_count: int | None = None
+    problems: list[dict[str, str]] = field(default_factory=list)
+    problems_truncated: bool = False
+    supported_targets: list[str] = field(default_factory=list)
     source_format: str | None = None
     target_format: str | None = None
     progress: dict[str, object] | None = None
@@ -314,6 +320,12 @@ class Storage:
                 created_at=utc_now_iso(),
                 detected_format=parent.detected_format,
                 format_candidates=parent.format_candidates,
+                package_scope=parent.package_scope,
+                package_layout=parent.package_layout,
+                problem_count=parent.problem_count,
+                problems=parent.problems,
+                problems_truncated=parent.problems_truncated,
+                supported_targets=parent.supported_targets,
                 parent_job_id=parent_job_id,
                 repair_revision=parent.repair_revision + 1,
             )
@@ -390,7 +402,10 @@ class Storage:
         prepare_runner_mount_permissions(paths)
 
         try:
-            candidates = detect_zip_format(paths.upload_path)
+            inspection = inspect_zip_package(
+                paths.upload_path,
+                fallback_id=Path(filename).stem,
+            )
         except (OSError, ValueError, zipfile.BadZipFile) as exc:
             shutil.rmtree(paths.root, ignore_errors=True)
             raise HTTPException(
@@ -403,9 +418,12 @@ class Storage:
                 "confidence": item.confidence,
                 "evidence": list(item.evidence),
             }
-            for item in candidates
+            for item in inspection.candidates
         ]
-        detected = detected_format(candidates)
+        detected = inspection.detected_format
+        problem_data = [
+            {"id": problem.id, "path": problem.path} for problem in inspection.problems
+        ]
         metadata = JobMetadata(
             id=job_id,
             filename=filename,
@@ -414,6 +432,12 @@ class Storage:
             created_at=utc_now_iso(),
             detected_format=detected,
             format_candidates=candidate_data,
+            package_scope=inspection.package_scope,
+            package_layout=inspection.package_layout,
+            problem_count=inspection.problem_count,
+            problems=problem_data,
+            problems_truncated=inspection.problems_truncated,
+            supported_targets=list(inspection.supported_targets),
         )
         self.write_metadata(metadata)
         return InspectResponse(
@@ -426,6 +450,12 @@ class Storage:
             ],
             detected_format=detected,
             format_candidates=candidate_data,
+            package_scope=inspection.package_scope,  # type: ignore[arg-type]
+            package_layout=inspection.package_layout,  # type: ignore[arg-type]
+            problem_count=inspection.problem_count,
+            problems=problem_data,
+            problems_truncated=inspection.problems_truncated,
+            supported_targets=list(inspection.supported_targets),  # type: ignore[arg-type]
         )
 
     def capture_conversion_report(self, job_id: str) -> dict[str, object] | None:

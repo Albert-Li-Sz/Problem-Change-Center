@@ -46,6 +46,87 @@ def _make_polygon_zip() -> bytes:
     return out.getvalue()
 
 
+def _make_probhub_workspace_zip() -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            ".probhub/workspace.yaml",
+            "schema_version: 1\nproblems:\n  - id: L01\n    directory: L01\n",
+        )
+        archive.writestr(
+            "L01/probhub.yaml",
+            "schema_version: 1\nid: L01\nname: Sum\n",
+        )
+        archive.writestr("L01/data/sample/1.in", "1 2\n")
+        archive.writestr("L01/data/sample/1.ans", "3\n")
+    return out.getvalue()
+
+
+def _make_probhub_export_zip() -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("problem.yaml", "name: Sum\nlimits:\n  memory: 256\n")
+        archive.writestr("domjudge-problem.ini", "timelimit='1'\n")
+        archive.writestr("problem.pdf", b"%PDF-1.4\n%%EOF\n")
+        archive.writestr("data/sample/1.in", "1 2\n")
+        archive.writestr("data/sample/1.ans", "3\n")
+        archive.writestr("data/secret/1.in", "4 5\n")
+        archive.writestr("data/secret/1.ans", "9\n")
+    return out.getvalue()
+
+
+def _make_probhub_legacy_zip() -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "legacy/meta.json",
+            json.dumps(
+                {
+                    "problem": {
+                        "display_name": "Legacy Sum",
+                        "format": "markdown",
+                    },
+                    "statement": {
+                        "description": "Add two integers.",
+                        "input": "Two integers.",
+                        "output": "Their sum.",
+                    },
+                }
+            ),
+        )
+        archive.writestr("legacy/problem.zh.md", "## 题目描述\n\n计算和。\n")
+        archive.writestr("legacy/data/sample/1.in", "1 2\n")
+        archive.writestr("legacy/data/sample/1.ans", "3\n")
+        archive.writestr("legacy/data/secret/2.in", "4 5\n")
+        archive.writestr("legacy/data/secret/2.ans", "9\n")
+        archive.writestr("legacy/std.cpp", "int main(){return 0;}\n")
+        archive.writestr("legacy/validator.cpp", "int main(){return 0;}\n")
+    return out.getvalue()
+
+
+def _make_archive(files: dict[str, str | bytes]) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    return out.getvalue()
+
+
+def _make_nested_icpc_zip() -> bytes:
+    def problem(code: str) -> bytes:
+        return _make_archive(
+            {
+                "problem.yaml": f"name: {code}\n",
+                "domjudge-problem.ini": f"short-name = {code}\n",
+                "problem_statement/problem.en.pdf": b"%PDF-1.4\n%%EOF\n",
+                "data/secret/1.in": "1\n",
+                "data/secret/1.ans": "1\n",
+            }
+        )
+
+    return _make_archive({"A.zip": problem("A"), "B.zip": problem("B")})
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
@@ -151,6 +232,284 @@ def test_polygon_problem_xml_is_not_misdetected_as_fps(tmp_path: Path) -> None:
     assert [item["format"] for item in response.json()["format_candidates"]] == [
         "polygon"
     ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "archive", "evidence"),
+    [
+        (
+            "workspace.zip",
+            _make_probhub_workspace_zip(),
+            [".probhub/workspace.yaml", "probhub.yaml"],
+        ),
+        (
+            "single.zip",
+            _make_probhub_export_zip(),
+            [
+                "problem.yaml",
+                "domjudge-problem.ini",
+                "problem.pdf",
+                "data/sample and data/secret",
+            ],
+        ),
+        (
+            "legacy.zip",
+            _make_probhub_legacy_zip(),
+            [
+                "meta.json",
+                "data/sample and data/secret",
+                "legacy statement and sources",
+            ],
+        ),
+    ],
+)
+def test_inspect_detects_probhub_workspace_and_export(
+    tmp_path: Path, filename: str, archive: bytes, evidence: list[str]
+) -> None:
+    client = _client(_settings(tmp_path))
+
+    response = client.post(
+        "/api/inspect",
+        files={"file": (filename, archive, "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["detected_format"] == "probhub"
+    assert payload["format_candidates"][0] == {
+        "format": "probhub",
+        "confidence": {
+            "workspace.zip": 0.995,
+            "single.zip": 0.98,
+            "legacy.zip": 0.97,
+        }[filename],
+        "evidence": evidence,
+    }
+
+
+@pytest.mark.parametrize(
+    (
+        "filename",
+        "archive",
+        "expected_format",
+        "expected_scope",
+        "expected_layout",
+        "expected_count",
+        "expected_ids",
+    ),
+    [
+        (
+            "single-polygon.zip",
+            _make_archive(
+                {
+                    "problem.xml": "<problem/>",
+                    "tests/1": "1\n",
+                    "tests/1.a": "1\n",
+                }
+            ),
+            "polygon",
+            "single",
+            "directory",
+            1,
+            ["single-polygon"],
+        ),
+        (
+            "contest.zip",
+            _make_archive(
+                {
+                    "contest.xml": "<contest/>",
+                    "problems/a/problem.xml": "<problem/>",
+                    "problems/b/problem.xml": "<problem/>",
+                }
+            ),
+            "polygon",
+            "multi",
+            "contest",
+            2,
+            ["a", "b"],
+        ),
+        (
+            "probhub-workspace.zip",
+            _make_archive(
+                {
+                    ".probhub/workspace.yaml": (
+                        "schema_version: 1\nproblems:\n"
+                        "  - id: A\n    directory: tasks/one\n"
+                        "  - id: B\n    directory: tasks/two\n"
+                    ),
+                    "tasks/one/probhub.yaml": "schema_version: 1\nid: A\n",
+                    "tasks/two/probhub.yaml": "schema_version: 1\nid: B\n",
+                    "tasks/one/data/sample/1.in": "1\n",
+                    "tasks/one/data/sample/1.ans": "1\n",
+                    "tasks/two/data/sample/1.in": "2\n",
+                    "tasks/two/data/sample/1.ans": "2\n",
+                }
+            ),
+            "probhub",
+            "multi",
+            "workspace",
+            2,
+            ["A", "B"],
+        ),
+        (
+            "hydro.zip",
+            _make_archive(
+                {
+                    "directories/one/problem.yaml": "title: A\npid: P1000\n",
+                    "directories/one/testdata/config.yaml": "cases: []\n",
+                    "directories/two/problem.yaml": "title: B\npid: P1001\n",
+                    "directories/two/testdata/config.yaml": "cases: []\n",
+                }
+            ),
+            "hydro",
+            "multi",
+            "directory",
+            2,
+            ["P1000", "P1001"],
+        ),
+        (
+            "icpc-nested.zip",
+            _make_nested_icpc_zip(),
+            "icpc",
+            "multi",
+            "nested",
+            2,
+            ["A", "B"],
+        ),
+        (
+            "hoj.zip",
+            _make_archive(
+                {
+                    "problem_1.json": '{"problemId": 1001}',
+                    "problem_1/1.in": "1\n",
+                    "problem_1/1.out": "1\n",
+                    "problem_2.json": '{"problemId": 1002}',
+                    "problem_2/1.in": "2\n",
+                    "problem_2/1.out": "2\n",
+                }
+            ),
+            "hoj",
+            "multi",
+            "directory",
+            2,
+            ["1001", "1002"],
+        ),
+        (
+            "fps.zip",
+            _make_archive(
+                {
+                    "problem.xml": (
+                        "<fps version='1.6'>"
+                        "<item><remote_id>A</remote_id><title>One</title></item>"
+                        "<item><remote_id>B</remote_id><title>Two</title></item>"
+                        "</fps>"
+                    )
+                }
+            ),
+            "fps",
+            "multi",
+            "xml",
+            2,
+            ["A", "B"],
+        ),
+        (
+            "qduoj.zip",
+            _make_archive(
+                {
+                    "1/problem.json": '{"display_id": "Q-A"}',
+                    "1/testcase/1.in": "1\n",
+                    "1/testcase/1.out": "1\n",
+                    "2/problem.json": '{"display_id": "Q-B"}',
+                    "2/testcase/1.in": "2\n",
+                    "2/testcase/1.out": "2\n",
+                }
+            ),
+            "qduoj",
+            "multi",
+            "directory",
+            2,
+            ["Q-A", "Q-B"],
+        ),
+        (
+            "uoj.zip",
+            _make_archive(
+                {
+                    "a/problem.conf": "n_tests 1\n",
+                    "b/problem.conf": "n_tests 1\n",
+                }
+            ),
+            "uoj",
+            "multi",
+            "directory",
+            2,
+            ["a", "b"],
+        ),
+        (
+            "dmoj.zip",
+            _make_archive(
+                {
+                    "a/init.yml": "test_cases: []\n",
+                    "b/init.yml": "test_cases: []\n",
+                }
+            ),
+            "dmoj",
+            "multi",
+            "directory",
+            2,
+            ["a", "b"],
+        ),
+        (
+            "generic.zip",
+            _make_archive(
+                {
+                    "a/1.in": "1\n",
+                    "a/1.out": "1\n",
+                    "b/1.in": "2\n",
+                    "b/1.ans": "2\n",
+                }
+            ),
+            None,
+            "multi",
+            "directory",
+            2,
+            ["a", "b"],
+        ),
+    ],
+)
+def test_inspect_classifies_platform_package_scope_and_layout(
+    tmp_path: Path,
+    filename: str,
+    archive: bytes,
+    expected_format: str | None,
+    expected_scope: str,
+    expected_layout: str,
+    expected_count: int,
+    expected_ids: list[str],
+) -> None:
+    client = _client(_settings(tmp_path))
+
+    response = client.post(
+        "/api/inspect",
+        files={"file": (filename, archive, "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["detected_format"] == expected_format
+    assert payload["package_scope"] == expected_scope
+    assert payload["package_layout"] == expected_layout
+    assert payload["problem_count"] == expected_count
+    assert [problem["id"] for problem in payload["problems"]] == expected_ids
+    assert payload["problems_truncated"] is False
+    if filename == "icpc-nested.zip":
+        assert [problem["path"] for problem in payload["problems"]] == [
+            "A.zip",
+            "B.zip",
+        ]
+    expected_targets = {"hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj"}
+    if expected_format in expected_targets:
+        expected_targets.remove(expected_format)
+    assert set(payload["supported_targets"]) == expected_targets
 
 
 def test_production_requires_trusted_proxy_and_valid_host(tmp_path: Path) -> None:
@@ -274,11 +633,26 @@ def test_inspect_rejects_unsafe_member_names(
     assert list((_settings(tmp_path).data_dir / "jobs").iterdir()) == []
 
 
-def test_inspect_rejects_high_compression_ratio(tmp_path: Path) -> None:
+def test_inspect_allows_small_high_compression_ratio_testdata(tmp_path: Path) -> None:
+    client = _client(_settings(tmp_path))
+    payload = io.BytesIO()
+    content = (b"1000000000\n" * 1_000_002)[:11_000_017]
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("problem_1292/18.in", content)
+
+    response = client.post(
+        "/api/inspect",
+        files={"file": ("testdata.zip", payload.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+
+
+def test_inspect_rejects_large_high_compression_ratio(tmp_path: Path) -> None:
     client = _client(_settings(tmp_path))
     payload = io.BytesIO()
     with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("huge.txt", b"\0" * (4 * 1024 * 1024))
+        archive.writestr("huge.txt", b"\0" * (32 * 1024 * 1024))
 
     response = client.post(
         "/api/inspect",

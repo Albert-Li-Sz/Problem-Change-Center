@@ -69,7 +69,7 @@ Options:
 Examples:
   ./install.sh
   ./install.sh --wine
-  ./install.sh --runner-image ghcr.io/lmtinsuzhou/p2h-runner:pre
+  ./install.sh --runner-image ghcr.io/lmtinsuzhou/p2h-runner:main
   ./install.sh --skip-runner
   ./install.sh --base-image registry.example.com/library/python:3.14-slim-trixie
   ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian

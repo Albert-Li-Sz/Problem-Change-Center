@@ -35,6 +35,7 @@ DEFAULT_MAX_ARCHIVE_ENTRIES = 50_000
 DEFAULT_MAX_ARCHIVE_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_MEMBER_BYTES = 256 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_COMPRESSION_RATIO = 200.0
+DEFAULT_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ class ArchiveExtractionBudget:
     max_uncompressed_bytes: int
     max_member_bytes: int
     max_compression_ratio: float
+    min_compression_ratio_bytes: int
     used_entries: int = 0
     used_uncompressed_bytes: int = 0
 
@@ -72,6 +74,10 @@ class ArchiveExtractionBudget:
                 "P2H_MAX_ARCHIVE_COMPRESSION_RATIO",
                 DEFAULT_MAX_ARCHIVE_COMPRESSION_RATIO,
             ),
+            min_compression_ratio_bytes=_positive_int_env(
+                "P2H_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES",
+                DEFAULT_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES,
+            ),
         )
 
     def reserve(self, info: zipfile.ZipInfo) -> None:
@@ -80,7 +86,10 @@ class ArchiveExtractionBudget:
                 f"zip member exceeds uncompressed size limit ({self.max_member_bytes} bytes): {info.filename}"
             )
         ratio = info.file_size / max(info.compress_size, 1)
-        if ratio > self.max_compression_ratio:
+        if (
+            info.file_size > self.min_compression_ratio_bytes
+            and ratio > self.max_compression_ratio
+        ):
             raise ValueError(
                 f"zip member exceeds compression ratio limit ({self.max_compression_ratio:g}): {info.filename}"
             )

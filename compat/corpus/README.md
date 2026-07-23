@@ -12,6 +12,12 @@ python3 compat/corpus/build.py /tmp/oj-compat-corpus
 - `hydro-core-rich.zip`：普通 ACM、样例、OI 子任务与依赖、文件 IO、
   testlib 风格 checker/validator、交互题、PDF/多语言题面、附件、模板和
   accepted solution。
+- `probhub-workspace.zip`：ProbHub Workspace Schema v1 双题工作区，覆盖稳定
+  ID、题序、Markdown 题面、资源、Validator、Checker、标程和出题元数据。
+- `probhub-single.zip`：ProbHub Core 生成的单题 DOMjudge ZIP 结构，覆盖根目录
+  `problem.pdf` 和 `output_validators/validate/`。
+- `probhub-legacy.zip`：ProbHub Legacy 单题工作目录，覆盖 `meta.json`、
+  `problem.zh.md`、根级源码、构建产物与临时目录过滤。
 - `icpc-minimal.zip`、`fps-minimal.zip`、`generic-multi.zip`：跨源格式的
   最小有效包，覆盖多语言题面、模板、样例、多题与 Unicode 路径。
 - `hydro-missing-answer.zip`：配置引用 `1.ans`，包内只有 `1.out`，用于

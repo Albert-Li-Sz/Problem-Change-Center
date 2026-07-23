@@ -93,6 +93,7 @@ select {
   display: grid;
   gap: 18px;
   align-content: start;
+  min-width: 0;
 }
 
 .panel {
@@ -101,6 +102,7 @@ select {
   border-radius: 8px;
   box-shadow: 0 10px 28px rgba(25, 40, 55, 0.06);
   padding: 18px;
+  min-width: 0;
 }
 
 .panel-heading {
@@ -265,38 +267,116 @@ button:disabled {
   padding-left: 18px;
 }
 
-.capability-matrix {
+.capability-trigger {
+  display: block;
   margin-top: 12px;
-  color: #536271;
-  font-size: 12px;
-}
-
-.capability-matrix summary {
-  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: #245bb2;
+  font-size: 12px;
   font-weight: 700;
   cursor: pointer;
 }
 
-.capability-matrix > div {
-  margin-top: 9px;
-  overflow-x: auto;
+.capability-trigger:hover {
+  color: #17498f;
+  text-decoration: underline;
 }
 
-.capability-matrix table {
+.capability-trigger:focus-visible {
+  border-radius: 3px;
+  outline: 3px solid rgba(36, 91, 178, 0.2);
+  outline-offset: 3px;
+}
+
+.capability-dialog {
+  width: min(780px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #d2dae1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17212b;
+  box-shadow: 0 24px 64px rgba(23, 33, 43, 0.24);
+}
+
+.capability-dialog::backdrop {
+  background: rgba(23, 33, 43, 0.48);
+}
+
+.capability-dialog-surface {
+  display: grid;
+  min-width: 0;
+  max-height: calc(100dvh - 34px);
+}
+
+.capability-dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px;
+  border-bottom: 1px solid #e1e6ea;
+}
+
+.capability-dialog-heading h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.capability-dialog-heading p {
+  margin: 4px 0 0;
+  color: #66717d;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.icon-button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #cdd6dd;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #536271;
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  background: #f2f5f7;
+  color: #253443;
+}
+
+.capability-matrix-scroll {
+  min-width: 0;
+  padding: 20px;
+  overflow: auto;
+}
+
+.capability-matrix-scroll table {
   width: 100%;
+  min-width: 620px;
   border-collapse: collapse;
   white-space: nowrap;
 }
 
-.capability-matrix th,
-.capability-matrix td {
-  padding: 6px 8px;
+.capability-matrix-scroll th,
+.capability-matrix-scroll td {
+  padding: 10px 12px;
   border: 1px solid #dce2e7;
   text-align: left;
 }
 
-.capability-matrix th {
+.capability-matrix-scroll th {
+  position: sticky;
+  top: 0;
   background: #f4f7f9;
   color: #253443;
 }
@@ -409,6 +489,43 @@ button:disabled {
 
 .format-note strong {
   color: #193f52;
+}
+
+.problem-selection {
+  display: grid;
+  gap: 10px;
+}
+
+.problem-choice-list {
+  display: grid;
+  gap: 8px;
+  max-height: 240px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow-y: auto;
+  border: 1px solid #cdd6dd;
+  border-radius: 6px;
+}
+
+.problem-choice-list legend {
+  padding: 0 4px;
+  color: #536271;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.problem-choice-list .checkbox-row {
+  display: grid;
+  grid-template-columns: 16px minmax(80px, auto) 1fr;
+  align-items: center;
+}
+
+.problem-choice-list small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #6b7785;
+  font-weight: 500;
+  text-align: right;
 }
 
 .conversion-report {
@@ -805,5 +922,10 @@ select:focus {
 
   .button-row > * {
     width: 100%;
+  }
+
+  .capability-dialog-heading,
+  .capability-matrix-scroll {
+    padding: 14px;
   }
 }

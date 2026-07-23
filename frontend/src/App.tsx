@@ -1,4 +1,4 @@
-import { AlertTriangle, Archive, CheckCircle2, Download, FileArchive, RotateCcw, Shield, Trash2, UploadCloud, Wrench, XCircle } from "lucide-react";
+import { AlertTriangle, Archive, CheckCircle2, Download, FileArchive, RotateCcw, Shield, Trash2, UploadCloud, Wrench, X, XCircle } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ConversionReport,
@@ -26,6 +26,7 @@ type IcpcLicense = "unknown" | "public domain" | "cc0" | "cc by" | "cc by-sa" | 
 
 const formatLabels: Record<FormatId, string> = {
   polygon: "Polygon / Codeforces",
+  probhub: "ProbHub Workspace / Legacy / DOMjudge",
   hydro: "HydroOJ",
   icpc: "ICPC / DOMjudge / Kattis",
   hoj: "HOJ",
@@ -38,15 +39,30 @@ const formatLabels: Record<FormatId, string> = {
 const readableFormats = Object.keys(formatLabels) as FormatId[];
 const writableFormats: TargetFormat[] = ["hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj"];
 const packageKinds: Record<FormatId, string> = {
-  polygon: "完整源包",
-  hydro: "完整包",
-  icpc: "完整包",
-  hoj: "完整包",
-  fps: "交换包",
-  qduoj: "完整包",
-  uoj: "评测数据 + sidecar",
-  dmoj: "评测数据 + sidecar",
-  generic: "推断目录"
+  polygon: "单题源包或比赛包",
+  probhub: "单题目录或多题工作区",
+  hydro: "单题或多题完整包",
+  icpc: "单题目录或嵌套多题包",
+  hoj: "单题或多题完整包",
+  fps: "单题或多题 XML",
+  qduoj: "单题或多题完整包",
+  uoj: "单题或多题评测数据 + sidecar",
+  dmoj: "单题或多题评测数据 + sidecar",
+  generic: "单题或多题推断目录"
+};
+const packageScopeLabels: Record<InspectResult["package_scope"], string> = {
+  single: "单题包",
+  multi: "多题包",
+  unknown: "题目数量未知"
+};
+const packageLayoutLabels: Record<InspectResult["package_layout"], string> = {
+  directory: "目录结构",
+  contest: "比赛结构",
+  workspace: "工作区结构",
+  nested: "嵌套单题 ZIP",
+  xml: "XML 集合",
+  mixed: "混合结构",
+  unknown: "未知结构"
 };
 const progressLabels: Record<NonNullable<JobResponse["progress"]>["phase"], string> = {
   validate_archive: "校验压缩包",
@@ -100,6 +116,7 @@ export default function App() {
   const [owner, setOwner] = useState(1);
   const [tags, setTags] = useState("");
   const [only, setOnly] = useState("");
+  const [selectionMode, setSelectionMode] = useState<"all" | "selected">("all");
   const [runDoall, setRunDoall] = useState(false);
   const [missingEnv, setMissingEnv] = useState<MissingEnv>("warn");
   const [domjudgeCodeStart, setDomjudgeCodeStart] = useState("A");
@@ -118,11 +135,16 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const capabilityDialogRef = useRef<HTMLDialogElement>(null);
   const requestEpoch = useRef(0);
 
   const isRunning = job?.status === "queued" || job?.status === "running";
   const canStart = Boolean(inspect && file && inspectedFile === file) && !isRunning && !busy && !resetting;
   const effectiveSource = sourceFormat === "auto" ? inspect?.detected_format ?? null : sourceFormat;
+  const targetFormats =
+    inspect && effectiveSource === inspect.detected_format
+      ? inspect.supported_targets
+      : writableFormats.filter((format) => format !== effectiveSource);
   const usesHydroOutputOptions = targetFormat === "hydro";
   const usesDomjudgeOutputOptions = targetFormat === "icpc";
   const usesPolygonSource = effectiveSource === "polygon";
@@ -131,9 +153,32 @@ export default function App() {
     ? Math.min(100, Math.round(((job.progress.current ?? 0) / job.progress.total) * 100))
     : null;
 
+  const openCapabilityMatrix = () => {
+    const dialog = capabilityDialogRef.current;
+    if (!dialog) return;
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute("open", "");
+    }
+  };
+
+  const closeCapabilityMatrix = () => {
+    const dialog = capabilityDialogRef.current;
+    if (!dialog) return;
+    if (typeof dialog.close === "function") {
+      dialog.close();
+    } else {
+      dialog.removeAttribute("open");
+    }
+  };
+
   const validation = useMemo(() => {
     if (inspect && sourceFormat === "auto" && !inspect.detected_format) {
       return "自动识别未达到置信阈值，请手动选择输入格式。";
+    }
+    if (selectionMode === "selected" && splitList(only).length === 0) {
+      return "指定题目模式下至少选择一道题目。";
     }
     if (effectiveSource === targetFormat) return "输入和输出格式不能相同。";
     if (targetFormat === "hydro") {
@@ -154,7 +199,7 @@ export default function App() {
       if (domjudgeAutoValidator && domjudgeDefaultValidator) return "自动识别 checker 和强制默认 validator 不能同时启用。";
     }
     return null;
-  }, [domjudgeAutoValidator, domjudgeCodeStart, domjudgeColor, domjudgeDefaultValidator, effectiveSource, icpcLicense, icpcRightsOwner, inspect, owner, pidStart, sourceFormat, targetFormat, usesPolygonSource]);
+  }, [domjudgeAutoValidator, domjudgeCodeStart, domjudgeColor, domjudgeDefaultValidator, effectiveSource, icpcLicense, icpcRightsOwner, inspect, only, owner, pidStart, selectionMode, sourceFormat, targetFormat, usesPolygonSource]);
 
   useEffect(() => {
     if (!job || (job.status !== "queued" && job.status !== "running")) return;
@@ -276,6 +321,14 @@ export default function App() {
       if (requestEpoch.current !== epoch) return;
       setInspect(nextInspect);
       setInspectedFile(selectedFile);
+      setOnly("");
+      setSelectionMode("all");
+      if (
+        nextInspect.detected_format === targetFormat &&
+        nextInspect.supported_targets.length > 0
+      ) {
+        setTargetFormat(nextInspect.supported_targets[0]);
+      }
     } catch (err) {
       if (requestEpoch.current !== epoch) return;
       setInspect(null);
@@ -345,6 +398,7 @@ export default function App() {
     setOwner(1);
     setTags("");
     setOnly("");
+    setSelectionMode("all");
     setRunDoall(false);
     setMissingEnv("warn");
     setSourceFormat("auto");
@@ -382,6 +436,8 @@ export default function App() {
     setReport(null);
     setRepairChoices({});
     setError(null);
+    setOnly("");
+    setSelectionMode("all");
     if (previousJobId && !isRunning) {
       void deleteJob(previousJobId).catch(() => {
         // Invalidating the old inspection is sufficient even if backend cleanup races with TTL cleanup.
@@ -465,7 +521,7 @@ export default function App() {
             <div className="panel-heading">
               <div>
                 <h2>上传题包</h2>
-                <p>接受 Polygon、HydroOJ、ICPC、HOJ、FPS、QDUOJ、UOJ、DMOJ 或通用 zip。</p>
+                <p>接受 Polygon、ProbHub、HydroOJ、ICPC、HOJ、FPS、QDUOJ、UOJ、DMOJ 或通用 zip。</p>
               </div>
               <FileArchive size={20} aria-hidden="true" />
             </div>
@@ -504,6 +560,11 @@ export default function App() {
                       ? `识别为 ${formatLabels[inspect.detected_format]}`
                       : "未唯一识别，请手动选择输入格式"}
                   </span>
+                  <span>
+                    {packageScopeLabels[inspect.package_scope]}
+                    {inspect.problem_count !== null ? ` · ${inspect.problem_count} 题` : ""}
+                    {` · ${packageLayoutLabels[inspect.package_layout]}`}
+                  </span>
                 </div>
               </div>
             )}
@@ -529,26 +590,52 @@ export default function App() {
                 )}
               </div>
             )}
-            <details className="capability-matrix">
-              <summary>查看格式能力矩阵</summary>
-              <div>
-                <table>
-                  <thead>
-                    <tr><th>格式</th><th>读取</th><th>输出</th><th>包类型</th></tr>
-                  </thead>
-                  <tbody>
-                    {readableFormats.map((format) => (
-                      <tr key={format}>
-                        <td>{formatLabels[format]}</td>
-                        <td>支持</td>
-                        <td>{writableFormats.includes(format as TargetFormat) ? "支持" : "—"}</td>
-                        <td>{packageKinds[format]}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <button className="capability-trigger" type="button" onClick={openCapabilityMatrix}>
+              查看格式能力矩阵
+            </button>
+            <dialog
+              ref={capabilityDialogRef}
+              className="capability-dialog"
+              aria-labelledby="capability-dialog-title"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) closeCapabilityMatrix();
+              }}
+            >
+              <div className="capability-dialog-surface">
+                <div className="capability-dialog-heading">
+                  <div>
+                    <h2 id="capability-dialog-title">格式能力矩阵</h2>
+                    <p>查看各类题包的读取、输出和包结构支持情况。</p>
+                  </div>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    aria-label="关闭格式能力矩阵"
+                    title="关闭"
+                    onClick={closeCapabilityMatrix}
+                  >
+                    <X size={20} aria-hidden="true" />
+                  </button>
+                </div>
+                <div className="capability-matrix-scroll">
+                  <table>
+                    <thead>
+                      <tr><th>格式</th><th>读取</th><th>输出</th><th>包类型</th></tr>
+                    </thead>
+                    <tbody>
+                      {readableFormats.map((format) => (
+                        <tr key={format}>
+                          <td>{formatLabels[format]}</td>
+                          <td>支持</td>
+                          <td>{writableFormats.includes(format as TargetFormat) ? "支持" : "—"}</td>
+                          <td>{packageKinds[format]}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </details>
+            </dialog>
           </section>
 
           <form className="panel config-panel" onSubmit={handleStart}>
@@ -564,7 +651,18 @@ export default function App() {
                 <span>输入格式</span>
                 <select
                   value={sourceFormat}
-                  onChange={(event) => setSourceFormat(event.target.value as SourceFormat)}
+                  onChange={(event) => {
+                    const nextSource = event.target.value as SourceFormat;
+                    const nextEffective =
+                      nextSource === "auto" ? inspect?.detected_format ?? null : nextSource;
+                    setSourceFormat(nextSource);
+                    if (nextEffective === targetFormat) {
+                      const nextTarget = writableFormats.find(
+                        (format) => format !== nextEffective
+                      );
+                      if (nextTarget) setTargetFormat(nextTarget);
+                    }
+                  }}
                   disabled={isRunning}
                 >
                   <option value="auto">自动识别{inspect?.detected_format ? ` · ${formatLabels[inspect.detected_format]}` : ""}</option>
@@ -581,8 +679,8 @@ export default function App() {
                   onChange={(event) => setTargetFormat(event.target.value as TargetFormat)}
                   disabled={isRunning}
                 >
-                  {writableFormats.map((format) => (
-                    <option key={format} value={format} disabled={effectiveSource === format}>
+                  {targetFormats.map((format) => (
+                    <option key={format} value={format}>
                       {formatLabels[format]}
                     </option>
                   ))}
@@ -770,10 +868,77 @@ export default function App() {
               </div>
             )}
 
-            <label>
-              <span>only</span>
-              <input value={only} onChange={(event) => setOnly(event.target.value)} placeholder="a, b, buy-cpu" disabled={isRunning} />
-            </label>
+            {inspect?.package_scope === "multi" && (
+              <div className="problem-selection">
+                <label>
+                  <span>转换范围</span>
+                  <select
+                    value={selectionMode}
+                    onChange={(event) => {
+                      const mode = event.target.value as "all" | "selected";
+                      setSelectionMode(mode);
+                      if (mode === "all") setOnly("");
+                    }}
+                    disabled={isRunning}
+                  >
+                    <option value="all">全部 {inspect.problem_count ?? ""} 题</option>
+                    <option value="selected">指定题目</option>
+                  </select>
+                </label>
+
+                {selectionMode === "selected" && inspect.problems.length > 0 && !inspect.problems_truncated && (
+                  <fieldset className="problem-choice-list">
+                    <legend>题目</legend>
+                    {inspect.problems.map((problem) => {
+                      const selected = splitList(only).includes(problem.id);
+                      return (
+                        <label className="checkbox-row" key={`${problem.id}:${problem.path}`}>
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={(event) => {
+                              const values = splitList(only);
+                              const next = event.target.checked
+                                ? [...values, problem.id]
+                                : values.filter((value) => value !== problem.id);
+                              setOnly(Array.from(new Set(next)).join(", "));
+                            }}
+                            disabled={isRunning}
+                          />
+                          <span>{problem.id}</span>
+                          <small>{problem.path}</small>
+                        </label>
+                      );
+                    })}
+                  </fieldset>
+                )}
+
+                {selectionMode === "selected" && (inspect.problems.length === 0 || inspect.problems_truncated) && (
+                  <label>
+                    <span>题目标识</span>
+                    <input
+                      value={only}
+                      onChange={(event) => setOnly(event.target.value)}
+                      placeholder="a, b, buy-cpu"
+                      disabled={isRunning}
+                      list="detected-problem-options"
+                    />
+                    <datalist id="detected-problem-options">
+                      {inspect.problems.map((problem) => (
+                        <option value={problem.id} key={`${problem.id}:${problem.path}`} />
+                      ))}
+                    </datalist>
+                  </label>
+                )}
+              </div>
+            )}
+
+            {inspect?.package_scope === "unknown" && (
+              <label>
+                <span>题目标识（可选）</span>
+                <input value={only} onChange={(event) => setOnly(event.target.value)} placeholder="a, b, buy-cpu" disabled={isRunning} />
+              </label>
+            )}
 
             {usesPolygonSource && (
               <>

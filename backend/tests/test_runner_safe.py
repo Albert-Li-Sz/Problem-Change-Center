@@ -333,7 +333,7 @@ def test_p2h_extract_patch_rejects_zip_bomb_before_upstream_extraction(
 ) -> None:
     source = tmp_path / "bomb.zip"
     with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("problems/sum/huge.bin", b"\0" * (4 * 1024 * 1024))
+        archive.writestr("problems/sum/huge.bin", b"\0" * (32 * 1024 * 1024))
 
     p2h_module = types.ModuleType("p2h")
     p2h_module.__path__ = []  # type: ignore[attr-defined]

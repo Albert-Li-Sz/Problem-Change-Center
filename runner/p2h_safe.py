@@ -878,6 +878,7 @@ def _build_package_convert_parser() -> argparse.ArgumentParser:
         choices=[
             "auto",
             "polygon",
+            "probhub",
             "hydro",
             "icpc",
             "hoj",

@@ -5,11 +5,18 @@ export type InspectResult = {
   warnings: string[];
   detected_format: FormatId | null;
   format_candidates: Array<{ format: FormatId; confidence: number; evidence: string[] }>;
+  package_scope: "single" | "multi" | "unknown";
+  package_layout: "directory" | "contest" | "workspace" | "nested" | "xml" | "mixed" | "unknown";
+  problem_count: number | null;
+  problems: Array<{ id: string; path: string }>;
+  problems_truncated: boolean;
+  supported_targets: TargetFormat[];
 };
 
 export type JobStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 export type FormatId =
   | "polygon"
+  | "probhub"
   | "hydro"
   | "icpc"
   | "hoj"
@@ -19,7 +26,10 @@ export type FormatId =
   | "dmoj"
   | "generic";
 export type SourceFormat = "auto" | FormatId;
-export type TargetFormat = Exclude<FormatId, "polygon" | "generic">;
+export type TargetFormat = Exclude<
+  FormatId,
+  "polygon" | "probhub" | "generic"
+>;
 
 export type ConversionIssue = {
   severity: "warning" | "loss" | "fatal";

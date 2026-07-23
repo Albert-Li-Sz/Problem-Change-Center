@@ -3,7 +3,7 @@ name: Runner Images
 on:
   push:
     branches:
-      - pre
+      - main
     tags:
       - "v*"
   pull_request:

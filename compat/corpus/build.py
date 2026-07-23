@@ -106,9 +106,176 @@ def _core_files() -> dict[str, str | bytes]:
     return files
 
 
+def _probhub_workspace_files() -> dict[str, str | bytes]:
+    return {
+        ".probhub/workspace.yaml": (
+            "schema_version: 1\n"
+            "contest:\n"
+            "  title: ProbHub Compatibility Contest\n"
+            "problems:\n"
+            "  - id: L01\n"
+            "    directory: L01\n"
+            "  - id: L02\n"
+            "    directory: problems/L02\n"
+        ),
+        "L01/probhub.yaml": (
+            "schema_version: 1\n"
+            "id: L01\n"
+            "name: Workspace Sum\n"
+            "display_name: 工作区求和\n"
+            "difficulty: 2\n"
+            "tags: [math, compatibility]\n"
+            "limits:\n"
+            "  time: 1\n"
+            "  memory: 256\n"
+            "  output: 64\n"
+            "  processes: 32\n"
+            "statement:\n"
+            "  source: problem.md\n"
+            "judge:\n"
+            "  type: standard\n"
+            "  validator: code/validator.cpp\n"
+            "solutions:\n"
+            "  accepted: [code/std.cpp]\n"
+            "  wrong: [code/wrong.cpp]\n"
+            "generators: [code/inmaker.cpp]\n"
+            "data:\n"
+            "  sample_dir: data/sample\n"
+            "  secret_dir: data/secret\n"
+            "  groups:\n"
+            "    - name: edge\n"
+            "      patterns: [secret/edge*]\n"
+            "      targets: [code/wrong.cpp]\n"
+        ),
+        "L01/problem.md": (
+            "# Workspace Sum\n\n"
+            "## 题目描述\n\n计算两个整数之和。\n\n"
+            "## 输入格式\n\n输入两个整数。\n\n"
+            "## 输出格式\n\n输出它们的和。\n"
+        ),
+        "L01/data/sample/1.in": "1 2\n",
+        "L01/data/sample/1.ans": "3\n",
+        "L01/data/secret/edge-1.in": "100 200\n",
+        "L01/data/secret/edge-1.ans": "300\n",
+        "L01/code/std.cpp": (
+            "#include <iostream>\n"
+            "int main(){long long a,b;std::cin>>a>>b;std::cout<<a+b<<'\\n';}\n"
+        ),
+        "L01/code/validator.cpp": "int main(){return 0;}\n",
+        "L01/code/wrong.cpp": "int main(){return 0;}\n",
+        "L01/code/inmaker.cpp": "int main(){return 0;}\n",
+        "L01/assets/formula.txt": "a + b\n",
+        "problems/L02/probhub.yaml": (
+            "schema_version: 1\n"
+            "id: L02\n"
+            "name: Token Answer\n"
+            "display_name: Token Answer\n"
+            "tags: [checker]\n"
+            "limits:\n"
+            "  time: 2\n"
+            "  memory: 512\n"
+            "statement:\n"
+            "  source: problem.md\n"
+            "judge:\n"
+            "  type: custom\n"
+            "  validator: code/validator.cpp\n"
+            "  checker: code/checker.cpp\n"
+            "solutions:\n"
+            "  accepted:\n"
+            "    - file: code/std.cpp\n"
+            "data:\n"
+            "  sample_dir: data/sample\n"
+            "  secret_dir: data/secret\n"
+        ),
+        "problems/L02/problem.md": (
+            "# Token Answer\n\n"
+            "## 题目描述\n\n输出输入的整数。\n\n"
+            "## 输入格式\n\n一个整数。\n\n"
+            "## 输出格式\n\n同一个整数。\n\n"
+            "## 样例\n\n"
+            "```input1\n"
+            "7\n"
+            "```\n\n"
+            "```output1\n"
+            "7\n"
+            "```\n"
+        ),
+        "problems/L02/data/sample/1.in": "7\n",
+        "problems/L02/data/sample/1.ans": "7\n",
+        "problems/L02/data/secret/1.in": "42\n",
+        "problems/L02/data/secret/1.ans": "42\n",
+        "problems/L02/code/std.cpp": (
+            "#include <iostream>\n"
+            "int main(){long long x;std::cin>>x;std::cout<<x<<'\\n';}\n"
+        ),
+        "problems/L02/code/validator.cpp": "int main(){return 0;}\n",
+        "problems/L02/code/checker.cpp": "int main(){return 0;}\n",
+    }
+
+
+def _probhub_export_files() -> dict[str, str | bytes]:
+    return {
+        "problem.yaml": (
+            "name: ProbHub Single Export\nlimits:\n  memory: 256\nvalidation: custom\n"
+        ),
+        "domjudge-problem.ini": "timelimit='1'\n",
+        "problem.pdf": PDF,
+        "data/sample/1.in": "2 3\n",
+        "data/sample/1.ans": "5\n",
+        "data/secret/1.in": "40 2\n",
+        "data/secret/1.ans": "42\n",
+        "output_validators/validate/validate.cpp": "int main(){return 0;}\n",
+        "output_validators/validate/testlib.h": "// ProbHub testlib fixture\n",
+    }
+
+
+def _probhub_legacy_files() -> dict[str, str | bytes]:
+    metadata = {
+        "problem": {
+            "display_name": "Legacy Sum",
+            "format": "markdown",
+            "memory_limit": 512,
+            "samples": [{"input": "1 2", "output": "3"}],
+            "tags": ["legacy", "compatibility"],
+            "time_limit": 2,
+        },
+        "statement": {
+            "description": "Add two integers.",
+            "input": "Two integers.",
+            "output": "Their sum.",
+        },
+    }
+    return {
+        "legacy-sum/meta.json": json.dumps(
+            metadata, ensure_ascii=False, indent=2, sort_keys=True
+        )
+        + "\n",
+        "legacy-sum/problem.zh.md": (
+            "## 题目描述\n\n计算两个整数之和。\n\n"
+            "## 输入格式\n\n两个整数。\n\n"
+            "## 输出格式\n\n它们的和。\n"
+        ),
+        "legacy-sum/problem.pdf": PDF,
+        "legacy-sum/data/sample/01_sample.in": "1 2\n",
+        "legacy-sum/data/sample/01_sample.ans": "3\n",
+        "legacy-sum/data/secret/02_secret.in": "40 2\n",
+        "legacy-sum/data/secret/02_secret.ans": "42\n",
+        "legacy-sum/std.cpp": "int main(){return 0;}\n",
+        "legacy-sum/validator.cpp": "int main(){return 0;}\n",
+        "legacy-sum/checker.cpp": "int main(){return 0;}\n",
+        "legacy-sum/brute.cpp": "int main(){return 0;}\n",
+        "legacy-sum/gen.py": "print('40 2')\n",
+        "legacy-sum/std.exe": b"MZ legacy build artifact",
+        "legacy-sum/tmp/candidate.out": "diagnostic output\n",
+    }
+
+
 def build(destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     _write_archive(destination / "hydro-core-rich.zip", _core_files())
+    _write_archive(destination / "probhub-workspace.zip", _probhub_workspace_files())
+    _write_archive(destination / "probhub-single.zip", _probhub_export_files())
+    _write_archive(destination / "probhub-legacy.zip", _probhub_legacy_files())
     missing = {
         "P2000/problem.yaml": "title: Missing answer\npid: P2000\n",
         "P2000/problem_en.md": "# Missing answer\n",
@@ -243,6 +410,45 @@ def build(destination: Path) -> None:
                 "targets": ["hydro"],
                 "problem_count": 2,
                 "capabilities": ["multiple-problems", "unicode-paths"],
+            },
+            {
+                "path": "probhub-workspace.zip",
+                "source_format": "probhub",
+                "targets": ["hydro", "icpc"],
+                "problem_count": 2,
+                "capabilities": [
+                    "assets",
+                    "authoring-metadata",
+                    "checker",
+                    "multiple-problems",
+                    "stable-problem-ids",
+                    "validator",
+                    "workspace-schema-v1",
+                ],
+            },
+            {
+                "path": "probhub-single.zip",
+                "source_format": "probhub",
+                "targets": ["hydro"],
+                "problem_count": 1,
+                "capabilities": [
+                    "domjudge-export",
+                    "pdf-statements",
+                    "validator",
+                ],
+            },
+            {
+                "path": "probhub-legacy.zip",
+                "source_format": "probhub",
+                "targets": ["hydro", "icpc"],
+                "problem_count": 1,
+                "capabilities": [
+                    "authoring-metadata",
+                    "checker",
+                    "legacy-workspace",
+                    "pdf-statements",
+                    "validator",
+                ],
             },
             {
                 "path": "hydro-missing-answer.zip",

@@ -17,6 +17,7 @@ from .storage import JobPaths
 DEFAULT_MAX_ARCHIVE_ENTRIES = 50_000
 DEFAULT_MAX_ARCHIVE_MEMBER_BYTES = 256 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_COMPRESSION_RATIO = 200.0
+DEFAULT_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES = 16 * 1024 * 1024
 CONTAINER_TMP_PATH = "/tmp"  # nosec B108
 
 
@@ -61,6 +62,7 @@ def _base_docker_command(
         f"P2H_MAX_ARCHIVE_UNCOMPRESSED_BYTES={max_archive_bytes}",
         f"P2H_MAX_ARCHIVE_MEMBER_BYTES={max_archive_member_bytes}",
         f"P2H_MAX_ARCHIVE_COMPRESSION_RATIO={DEFAULT_MAX_ARCHIVE_COMPRESSION_RATIO:g}",
+        f"P2H_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES={DEFAULT_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES}",
     ]
     env_vars = ["TMPDIR=/work", "XDG_CACHE_HOME=/work/.cache", *archive_env_vars]
     extra_tmpfs: list[str] = []
@@ -653,6 +655,7 @@ def _validate_archive_member(
         )
     if (
         check_ratio
+        and file_size > DEFAULT_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES
         and file_size / max(compress_size, 1) > DEFAULT_MAX_ARCHIVE_COMPRESSION_RATIO
     ):
         raise ValueError(f"archive member exceeds compression ratio limit: {name}")

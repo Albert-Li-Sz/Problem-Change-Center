@@ -146,6 +146,38 @@ def _expand_nested_packages_for_detection(
     return detect_extracted(extracted)
 
 
+def _normalize_single_polygon_package(
+    source_zip: Path,
+    extracted: Path,
+    workspace: Path,
+) -> Path:
+    if any(
+        path.is_file()
+        and len(path.relative_to(extracted).parts) >= 3
+        and path.relative_to(extracted).parts[-3] == "problems"
+        for path in extracted.rglob("problem.xml")
+    ):
+        return source_zip
+    problem_xmls = [
+        path
+        for path in sorted(extracted.rglob("problem.xml"))
+        if path.is_file()
+        and "/problems/" not in f"/{path.relative_to(extracted).as_posix()}"
+    ]
+    if len(problem_xmls) != 1:
+        return source_zip
+    problem_root = problem_xmls[0].parent
+    slug_source = problem_root.name if problem_root != extracted else source_zip.stem
+    slug = bridge._safe_name(slug_source) or "problem"
+    normalized = workspace / "single-polygon.zip"
+    with zipfile.ZipFile(normalized, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(problem_root.rglob("*")):
+            if path.is_file():
+                relative = path.relative_to(problem_root).as_posix()
+                archive.write(path, f"problems/{slug}/{relative}")
+    return normalized
+
+
 def _polygon_command(
     source_zip: Path,
     output: Path,
@@ -464,8 +496,11 @@ def convert_package(
             raise ValueError(message)
         if detected == "polygon":
             try:
+                polygon_source = _normalize_single_polygon_package(
+                    source_zip, extracted, workspace
+                )
                 report = _run_polygon_route(
-                    source_zip,
+                    polygon_source,
                     output,
                     target_format=target_format,
                     loss_policy=loss_policy,

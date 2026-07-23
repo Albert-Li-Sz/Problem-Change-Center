@@ -28,10 +28,24 @@ LegacyTargetFormat = Literal[
     "hoj_to_domjudge",
 ]
 SourceFormat = Literal[
-    "auto", "polygon", "hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj", "generic"
+    "auto",
+    "polygon",
+    "probhub",
+    "hydro",
+    "icpc",
+    "hoj",
+    "fps",
+    "qduoj",
+    "uoj",
+    "dmoj",
+    "generic",
 ]
 WritableFormat = Literal["hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj"]
 LossPolicy = Literal["warn", "error"]
+PackageScope = Literal["single", "multi", "unknown"]
+PackageLayout = Literal[
+    "directory", "contest", "workspace", "nested", "xml", "mixed", "unknown"
+]
 IcpcLicense = Literal[
     "unknown",
     "public domain",
@@ -53,6 +67,11 @@ class FormatCandidate(BaseModel):
     evidence: list[str] = Field(default_factory=list)
 
 
+class DetectedProblem(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    path: str = Field(min_length=1, max_length=1024)
+
+
 class InspectResponse(BaseModel):
     job_id: str
     filename: str
@@ -60,6 +79,12 @@ class InspectResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     detected_format: str | None = None
     format_candidates: list[FormatCandidate] = Field(default_factory=list)
+    package_scope: PackageScope = "unknown"
+    package_layout: PackageLayout = "unknown"
+    problem_count: int | None = Field(default=None, ge=0)
+    problems: list[DetectedProblem] = Field(default_factory=list)
+    problems_truncated: bool = False
+    supported_targets: list[WritableFormat] = Field(default_factory=list)
 
 
 class PolygonOptions(BaseModel):

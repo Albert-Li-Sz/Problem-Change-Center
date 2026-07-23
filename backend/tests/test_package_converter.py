@@ -132,7 +132,7 @@ def test_compatibility_manifest_drives_conversion_and_failure_matrix(
 
     assert manifest["schema_version"] == 1
     assert manifest["license"] == "CC0-1.0"
-    assert len(manifest["fixtures"]) == 8
+    assert len(manifest["fixtures"]) == 11
     for fixture in manifest["fixtures"]:
         source = corpus / fixture["path"]
         assert source.is_file()
@@ -178,6 +178,99 @@ def test_compatibility_manifest_drives_conversion_and_failure_matrix(
                 for suggestion in report["repair_suggestions"]
                 for candidate in suggestion["candidates"]
             )
+
+
+def test_probhub_workspace_single_export_and_legacy_preserve_judge_semantics(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    build_compat_corpus(corpus)
+
+    workspace = _read_bundle(
+        corpus / "probhub-workspace.zip",
+        "probhub",
+        tmp_path / "workspace-read",
+    )
+    assert [problem.id for problem in workspace.problems] == ["L01", "L02"]
+    assert workspace.problems[0].title == "工作区求和"
+    assert workspace.problems[0].time_ms == 1000
+    assert workspace.problems[0].memory_mb == 256
+    assert len(workspace.problems[0].solutions) == 1
+    assert workspace.problems[0].validator is not None
+    assert workspace.problems[1].checker is not None
+    assert workspace.problems[1].checker.mode == "testlib"
+    assert sum(case.sample for case in workspace.problems[0].cases) == 1
+    assert sum(not case.sample for case in workspace.problems[0].cases) == 1
+    first_statement = workspace.problems[0].statements[0].content or ""
+    assert "## 样例" in first_statement
+    assert "```input1\n1 2\n```" in first_statement
+    assert "```output1\n3\n```" in first_statement
+    second_statement = workspace.problems[1].statements[0].content or ""
+    assert second_statement.count("```input1\n7\n```") == 1
+    assert second_statement.count("```output1\n7\n```") == 1
+    assert any(issue.code == "probhub-authoring-metadata" for issue in workspace.issues)
+
+    single = _read_bundle(
+        corpus / "probhub-single.zip",
+        "probhub",
+        tmp_path / "single-read",
+    )
+    assert len(single.problems) == 1
+    assert single.problems[0].statements[0].format == "pdf"
+    assert single.problems[0].checker is not None
+    assert single.problems[0].checker.path is not None
+    assert "output_validators/validate" in single.problems[0].checker.path.as_posix()
+
+    legacy = _read_bundle(
+        corpus / "probhub-legacy.zip",
+        "probhub",
+        tmp_path / "legacy-read",
+    )
+    assert len(legacy.problems) == 1
+    assert legacy.problems[0].id == "legacy-sum"
+    assert legacy.problems[0].title == "Legacy Sum"
+    assert legacy.problems[0].time_ms == 2000
+    assert legacy.problems[0].memory_mb == 512
+    assert legacy.problems[0].statements[0].language == "zh"
+    assert legacy.problems[0].checker is not None
+    assert legacy.problems[0].validator is not None
+    assert len(legacy.problems[0].solutions) == 1
+    assert "probhub/brute.cpp" in legacy.problems[0].attachments
+    assert "probhub/gen.py" in legacy.problems[0].attachments
+    assert all(
+        not name.endswith(".exe") and "/tmp/" not in f"/{name}"
+        for name in legacy.problems[0].attachments
+    )
+    assert any(
+        issue.code == "probhub-legacy-authoring-artifacts" for issue in legacy.issues
+    )
+
+
+@pytest.mark.parametrize(
+    "archive_name",
+    ["probhub-workspace.zip", "probhub-single.zip", "probhub-legacy.zip"],
+)
+def test_probhub_auto_detection_converts_to_hydro(
+    tmp_path: Path, archive_name: str
+) -> None:
+    corpus = tmp_path / "corpus"
+    build_compat_corpus(corpus)
+    output = tmp_path / f"{Path(archive_name).stem}-hydro"
+
+    report = convert_package(
+        corpus / archive_name,
+        output,
+        source_format="auto",
+        target_format="hydro",
+    )
+
+    assert report["source_format"] == "probhub"
+    assert report["counts"]["fatal"] == 0
+    if archive_name == "probhub-workspace.zip":
+        with zipfile.ZipFile(output / "P1000-l01.zip") as archive:
+            statement = archive.read("P1000/problem_und.md").decode("utf-8")
+        assert "```input1\n1 2\n```" in statement
+        assert "```output1\n3\n```" in statement
 
 
 def test_direct_cli_progress_reporter_enforces_stage_timeout() -> None:
@@ -344,6 +437,53 @@ def test_explicit_source_mismatch_writes_failure_report(tmp_path: Path) -> None:
     report = json.loads((output / REPORT_FILENAME).read_text())
     assert report["source_format"] == "dmoj"
     assert report["issues"][0]["code"] == "source-format-mismatch"
+
+
+def test_root_polygon_problem_is_wrapped_before_optimized_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "single-polygon.zip"
+    output = tmp_path / "output"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("problem.xml", "<problem package='test'/>")
+        archive.writestr("tests/01", "1 2\n")
+        archive.writestr("tests/01.a", "3\n")
+
+    captured_members: list[str] = []
+
+    def fake_polygon_route(
+        normalized_source: Path,
+        route_output: Path,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        with zipfile.ZipFile(normalized_source) as archive:
+            captured_members.extend(sorted(archive.namelist()))
+        route_output.mkdir(parents=True, exist_ok=True)
+        return {
+            "schema_version": 2,
+            "source_format": "polygon",
+            "target_format": "hydro",
+            "problem_count": 1,
+            "counts": {"warning": 0, "loss": 0, "fatal": 0},
+            "issues": [],
+            "artifacts": ["single-polygon.zip"],
+        }
+
+    monkeypatch.setattr(package_converter, "_run_polygon_route", fake_polygon_route)
+
+    report = convert_package(
+        source,
+        output,
+        source_format="auto",
+        target_format="hydro",
+    )
+
+    assert report["problem_count"] == 1
+    assert captured_members == [
+        "problems/single-polygon/problem.xml",
+        "problems/single-polygon/tests/01",
+        "problems/single-polygon/tests/01.a",
+    ]
 
 
 def test_polygon_icpc_2025_reuses_icpc_route_before_ir(

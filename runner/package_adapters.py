@@ -14,7 +14,7 @@ import zipfile
 import xml.etree.ElementTree as ElementTree  # nosec B405
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import unquote
 
@@ -33,7 +33,17 @@ from package_security import (
 from progress import ProgressReporter
 
 
-READABLE_FORMATS = ("hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj", "generic")
+READABLE_FORMATS = (
+    "probhub",
+    "hydro",
+    "icpc",
+    "hoj",
+    "fps",
+    "qduoj",
+    "uoj",
+    "dmoj",
+    "generic",
+)
 WRITABLE_FORMATS = ("hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj")
 MAX_XML_NODES = 100_000
 MAX_XML_DEPTH = 48
@@ -85,20 +95,115 @@ class Adapter:
     write: Callable[[ProblemBundle, Path, dict[str, Any]], list[str]] | None
 
 
+def _detection_xml_root_name(path: Path) -> str | None:
+    try:
+        text = read_limited_text(path, limit=MAX_METADATA_BYTES)
+        root = DefusedElementTree.fromstring(
+            text,
+            forbid_dtd=False,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except (OSError, UnicodeError, ValueError, DefusedElementTree.ParseError):
+        return None
+    return str(root.tag).rsplit("}", 1)[-1].casefold()
+
+
 def detect_extracted(root: Path) -> list[Detection]:
-    files = [
-        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
-    ]
+    paths = [path for path in root.rglob("*") if path.is_file()]
+    files = [path.relative_to(root).as_posix() for path in paths]
     lowered = [name.lower() for name in files]
+    lowered_set = set(lowered)
+    xml_roots = {
+        path.relative_to(root).as_posix().casefold(): _detection_xml_root_name(path)
+        for path in paths
+        if path.name.casefold() in {"problem.xml", "fps.xml"}
+    }
     candidates: list[Detection] = []
 
     def add(format_id: str, confidence: float, *evidence: str) -> None:
         candidates.append(Detection(format_id, confidence, tuple(evidence)))
 
+    probhub_workspace = any(
+        name.endswith(".probhub/workspace.yaml") for name in lowered
+    ) and any(name.endswith("/probhub.yaml") for name in lowered)
+    probhub_problem_roots = {
+        name.removesuffix("problem.yaml")
+        for name in lowered
+        if name.endswith("problem.yaml")
+    }
+    probhub_sample_roots = {
+        name.split("data/sample/", 1)[0] for name in lowered if "data/sample/" in name
+    }
+    probhub_secret_roots = {
+        name.split("data/secret/", 1)[0] for name in lowered if "data/secret/" in name
+    }
+    probhub_statement_roots = {
+        name.split(marker, 1)[0]
+        for name in lowered
+        for marker in ("problem_statement/", "statement/")
+        if marker in name
+    }
+    probhub_export = any(
+        f"{directory}domjudge-problem.ini" in lowered_set
+        and f"{directory}problem.pdf" in lowered_set
+        and directory in probhub_sample_roots
+        and directory in probhub_secret_roots
+        and directory not in probhub_statement_roots
+        for directory in probhub_problem_roots
+    )
+    probhub_legacy_roots = {
+        name.removesuffix("meta.json") for name in lowered if name.endswith("meta.json")
+    }
+    probhub_legacy = any(
+        directory in probhub_sample_roots
+        and directory in probhub_secret_roots
+        and (
+            f"{directory}problem.md" in lowered_set
+            or f"{directory}problem.pdf" in lowered_set
+            or any(
+                name.startswith(f"{directory}problem.") and name.endswith(".md")
+                for name in lowered
+            )
+        )
+        and (
+            f"{directory}std.cpp" in lowered_set
+            or f"{directory}code/std.cpp" in lowered_set
+        )
+        and (
+            f"{directory}validator.cpp" in lowered_set
+            or f"{directory}code/validator.cpp" in lowered_set
+        )
+        for directory in probhub_legacy_roots
+    )
+    if probhub_workspace:
+        add("probhub", 0.995, ".probhub/workspace.yaml", "probhub.yaml")
+    elif probhub_export:
+        add(
+            "probhub",
+            0.98,
+            "problem.yaml",
+            "domjudge-problem.ini",
+            "problem.pdf",
+            "data/sample and data/secret",
+        )
+    elif probhub_legacy:
+        add(
+            "probhub",
+            0.97,
+            "meta.json",
+            "data/sample and data/secret",
+            "legacy statement and sources",
+        )
     if any(name.endswith("contest.xml") for name in lowered) and any(
         "problems/" in name for name in lowered
     ):
         add("polygon", 0.99, "contest.xml", "problems/ directory")
+    elif any(
+        tag == "problem" and "/problems/" not in f"/{name}"
+        for name, tag in xml_roots.items()
+    ):
+        add("polygon", 0.97, "single problem.xml", "Polygon problem package")
     if any(name.endswith("/testdata/config.yaml") for name in lowered) and any(
         name.endswith("/problem.yaml") for name in lowered
     ):
@@ -115,11 +220,7 @@ def detect_extracted(root: Path) -> list[Detection]:
         add("qduoj", 0.99, "numbered problem.json", "testcase/ directory")
     if any(re.search(r"(?:^|/)problem_[^/]+\.json$", name) for name in lowered):
         add("hoj", 0.96, "problem_*.json", "paired data directory")
-    if any(
-        PurePosixPath(name).name in {"problem.xml", "fps.xml"}
-        and "/problems/" not in f"/{name}"
-        for name in lowered
-    ):
+    if any(tag == "fps" for tag in xml_roots.values()):
         add("fps", 0.96, "problem.xml/fps.xml")
     if any(name.endswith("problem.conf") for name in lowered):
         add("uoj", 0.97, "problem.conf")
@@ -582,6 +683,708 @@ def read_hydro(
     return bundle
 
 
+def _probhub_relative_path(
+    root: Path, value: Any, *, field: str, default: str | None = None
+) -> Path:
+    selected = default if value is None else value
+    if not isinstance(selected, str) or not selected.strip():
+        raise ValueError(f"ProbHub {field} must be a non-empty relative path")
+    return bridge._safe_join(root, selected.strip())
+
+
+def _probhub_program(
+    problem_dir: Path,
+    value: Any,
+    *,
+    field: str,
+    kind: str,
+    mode: str | None = None,
+) -> Program | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        value = value.get("file")
+    path = _probhub_relative_path(problem_dir, value, field=field)
+    return _program_from_path(kind, path, mode=mode)
+
+
+def _probhub_program_list(
+    problem_dir: Path, value: Any, *, field: str, mode: str
+) -> list[Program]:
+    if value is None:
+        return []
+    entries = value if isinstance(value, list) else [value]
+    return [
+        program
+        for index, entry in enumerate(entries, start=1)
+        if (
+            program := _probhub_program(
+                problem_dir,
+                entry,
+                field=f"{field}[{index}]",
+                kind="solution",
+                mode=mode,
+            )
+        )
+        is not None
+    ]
+
+
+def _probhub_unpaired_issue(
+    bundle: ProblemBundle,
+    *,
+    data_dir: Path,
+    root: Path,
+    slug: str,
+) -> None:
+    unpaired = _unpaired_case_files(data_dir)
+    if not unpaired:
+        return
+    missing_path, missing_role = _missing_partner_for_unpaired(data_dir, unpaired[0])
+    bundle.add_issue(
+        "fatal",
+        "probhub-unpaired-test",
+        f"ProbHub data directory contains an unpaired test file: {unpaired[0]}",
+        problem=slug,
+        field="cases",
+        context={
+            "expected_path": missing_path.relative_to(root).as_posix(),
+            "role": missing_role,
+            "source": "probhub.yaml",
+            "source_location": "data.sample_dir/data.secret_dir",
+        },
+    )
+
+
+def _normalized_sample_text(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+
+
+def _probhub_statement_with_samples(
+    statement: Statement,
+    sample_cases: list[bridge.CaseFile],
+) -> tuple[Statement, int]:
+    if statement.format != "markdown" or not sample_cases:
+        return statement, 0
+
+    content = statement.content or ""
+    existing_pairs = {
+        (
+            _normalized_sample_text(sample_input),
+            _normalized_sample_text(sample_output),
+        )
+        for sample_input, sample_output in hoj_bridge._parse_hydro_samples(content)
+    }
+    has_sample_heading = bool(
+        re.search(
+            r"^#{1,6}\s+(?:样例(?:输入输出)?|samples?|examples?)\s*$",
+            content,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+    )
+    remaining_bytes = max(
+        0,
+        MAX_METADATA_BYTES - len(content.encode("utf-8")),
+    )
+    blocks: list[str] = []
+    skipped = 0
+    for index, case in enumerate(sample_cases, start=1):
+        pair_size = case.input_path.stat().st_size + case.output_path.stat().st_size
+        if pair_size > remaining_bytes:
+            skipped += 1
+            continue
+        try:
+            sample_input = _normalized_sample_text(
+                read_limited_text(case.input_path, limit=MAX_METADATA_BYTES)
+            )
+            sample_output = _normalized_sample_text(
+                read_limited_text(case.output_path, limit=MAX_METADATA_BYTES)
+            )
+        except ValueError:
+            skipped += 1
+            continue
+        pair = (sample_input, sample_output)
+        if pair in existing_pairs:
+            continue
+        block = (
+            f"```input{index}\n{sample_input}\n```\n\n"
+            f"```output{index}\n{sample_output}\n```"
+        )
+        block_size = len(block.encode("utf-8"))
+        if block_size > remaining_bytes:
+            skipped += 1
+            continue
+        blocks.append(block)
+        existing_pairs.add(pair)
+        remaining_bytes -= block_size
+
+    if not blocks:
+        return statement, skipped
+    parts = [content.rstrip()]
+    if not has_sample_heading:
+        parts.append("## 样例")
+    parts.extend(blocks)
+    return (
+        Statement(
+            statement.language,
+            statement.format,
+            content="\n\n".join(part for part in parts if part).rstrip() + "\n",
+        ),
+        skipped,
+    )
+
+
+def _read_probhub_workspace(
+    workspace_file: Path,
+    only: Iterable[str],
+    reporter: ProgressReporter | None,
+) -> ProblemBundle:
+    workspace_root = workspace_file.parent.parent
+    workspace_config = load_yaml_file(workspace_file)
+    if workspace_config.get("schema_version") != 1:
+        raise ValueError("unsupported ProbHub workspace schema_version")
+    entries = workspace_config.get("problems")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("ProbHub workspace must define a non-empty problems list")
+
+    bundle = ProblemBundle("probhub", [])
+    contest = (
+        workspace_config.get("contest")
+        if isinstance(workspace_config.get("contest"), dict)
+        else {}
+    )
+    contest_title = str(contest.get("title") or "").strip() or None
+    total = len(entries)
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"ProbHub problems[{index}] must be a mapping")
+        stable_id = str(entry.get("id") or "").strip()
+        if not stable_id:
+            raise ValueError(f"ProbHub problems[{index}].id is required")
+        problem_dir = _probhub_relative_path(
+            workspace_root,
+            entry.get("directory"),
+            field=f"problems[{index}].directory",
+        )
+        if not problem_dir.is_dir():
+            raise ValueError(f"ProbHub problem directory is missing: {stable_id}")
+        config_path = problem_dir / "probhub.yaml"
+        config = load_yaml_file(config_path)
+        if config.get("schema_version") != 1:
+            raise ValueError(f"unsupported ProbHub problem schema_version: {stable_id}")
+        config_id = str(config.get("id") or "").strip()
+        if config_id != stable_id:
+            raise ValueError(
+                f"ProbHub problem id mismatch: workspace={stable_id}, config={config_id or '(missing)'}"
+            )
+
+        slug = _safe_name(stable_id, f"problem-{index}")
+        title = str(
+            config.get("display_name") or config.get("name") or stable_id
+        ).strip()
+        _report_read_progress(
+            reporter, index - 1, total, slug, "reading ProbHub workspace"
+        )
+
+        statement_config = (
+            config.get("statement") if isinstance(config.get("statement"), dict) else {}
+        )
+        statement_path = _probhub_relative_path(
+            problem_dir,
+            statement_config.get("source"),
+            field=f"{stable_id}.statement.source",
+            default="problem.md",
+        )
+        statements = (
+            [
+                Statement(
+                    "und",
+                    "markdown",
+                    content=read_limited_text(statement_path),
+                )
+            ]
+            if statement_path.is_file()
+            else []
+        )
+        if not statements:
+            bundle.add_issue(
+                "fatal",
+                "probhub-missing-statement",
+                f"ProbHub statement source is missing: {statement_path.name}",
+                problem=slug,
+                field="statements",
+                context={
+                    "expected_path": statement_path.relative_to(
+                        workspace_root
+                    ).as_posix(),
+                    "role": "statement",
+                },
+            )
+
+        data_config = config.get("data") if isinstance(config.get("data"), dict) else {}
+        sample_dir = _probhub_relative_path(
+            problem_dir,
+            data_config.get("sample_dir"),
+            field=f"{stable_id}.data.sample_dir",
+            default="data/sample",
+        )
+        secret_dir = _probhub_relative_path(
+            problem_dir,
+            data_config.get("secret_dir"),
+            field=f"{stable_id}.data.secret_dir",
+            default="data/secret",
+        )
+        sample_cases = bridge._scan_case_pairs(sample_dir, sample=True)
+        secret_cases = bridge._scan_case_pairs(secret_dir, sample=False)
+        if statements:
+            statement_with_samples, skipped_samples = _probhub_statement_with_samples(
+                statements[0], sample_cases
+            )
+            statements = [statement_with_samples, *statements[1:]]
+            if skipped_samples:
+                bundle.add_issue(
+                    "warning",
+                    "probhub-sample-not-embedded",
+                    "Some ProbHub samples were too large or not UTF-8, so they remain as separate sample files instead of being embedded in Markdown",
+                    problem=slug,
+                    field="statements",
+                    context={"skipped": str(skipped_samples)},
+                )
+        cases = [
+            TestCase(
+                case.name,
+                case.input_path,
+                case.output_path,
+                case.sample,
+                case.score,
+            )
+            for case in sample_cases + secret_cases
+        ]
+        _probhub_unpaired_issue(
+            bundle,
+            data_dir=sample_dir,
+            root=workspace_root,
+            slug=slug,
+        )
+        _probhub_unpaired_issue(
+            bundle,
+            data_dir=secret_dir,
+            root=workspace_root,
+            slug=slug,
+        )
+
+        judge = config.get("judge") if isinstance(config.get("judge"), dict) else {}
+        judge_type = str(judge.get("type") or "standard").strip().lower()
+        if judge_type == "checker":
+            judge_type = "custom"
+        if judge_type not in {"standard", "custom", "interactive"}:
+            raise ValueError(
+                f"unsupported ProbHub judge.type for {stable_id}: {judge_type}"
+            )
+        validator = _probhub_program(
+            problem_dir,
+            judge.get("validator"),
+            field=f"{stable_id}.judge.validator",
+            kind="validator",
+        )
+        checker = _probhub_program(
+            problem_dir,
+            judge.get("checker"),
+            field=f"{stable_id}.judge.checker",
+            kind="checker",
+            mode="testlib",
+        )
+        interactor = _probhub_program(
+            problem_dir,
+            judge.get("interactor"),
+            field=f"{stable_id}.judge.interactor",
+            kind="interactor",
+        )
+        if validator is None:
+            bundle.add_issue(
+                "fatal",
+                "probhub-missing-validator",
+                "ProbHub problem does not declare judge.validator",
+                problem=slug,
+                field="validator",
+            )
+        if judge_type == "custom" and checker is None:
+            bundle.add_issue(
+                "fatal",
+                "probhub-missing-checker",
+                "ProbHub custom problem does not declare judge.checker",
+                problem=slug,
+                field="checker",
+            )
+
+        solutions_config = (
+            config.get("solutions") if isinstance(config.get("solutions"), dict) else {}
+        )
+        solutions = _probhub_program_list(
+            problem_dir,
+            solutions_config.get("accepted"),
+            field=f"{stable_id}.solutions.accepted",
+            mode="accepted",
+        )
+        claimed_paths = {
+            program.path.resolve()
+            for program in (validator, checker, interactor, *solutions)
+            if program is not None and program.path is not None
+        }
+        attachments: dict[str, Path] = {}
+        assets_dir = problem_dir / "assets"
+        if assets_dir.is_dir():
+            for path in sorted(assets_dir.rglob("*")):
+                if path.is_file():
+                    attachments[f"assets/{path.relative_to(assets_dir).as_posix()}"] = (
+                        path
+                    )
+        code_dir = problem_dir / "code"
+        if code_dir.is_dir():
+            for path in sorted(code_dir.rglob("*")):
+                if (
+                    path.is_file()
+                    and path.resolve() not in claimed_paths
+                    and path.suffix.lower() != ".exe"
+                ):
+                    attachments[
+                        f"probhub/code/{path.relative_to(code_dir).as_posix()}"
+                    ] = path
+
+        authoring_fields = [
+            name for name in ("brute", "wrong") if solutions_config.get(name)
+        ]
+        if config.get("generators"):
+            authoring_fields.append("generators")
+        if config.get("stress"):
+            authoring_fields.append("stress")
+        if data_config.get("groups"):
+            authoring_fields.append("data.groups")
+        if authoring_fields:
+            bundle.add_issue(
+                "loss",
+                "probhub-authoring-metadata",
+                "ProbHub authoring-only expectations are preserved as inert source attachments where possible",
+                problem=slug,
+                field="attachments",
+                context={"fields": ",".join(authoring_fields)},
+            )
+
+        limits = config.get("limits") if isinstance(config.get("limits"), dict) else {}
+        time_seconds = bridge._parse_seconds(limits.get("time"), default=1)
+        memory_mb = bridge._parse_memory_mb(limits.get("memory"), default=256)
+        tags = (
+            [str(value) for value in config.get("tags", [])]
+            if isinstance(config.get("tags"), list)
+            else []
+        )
+        bundle.problems.append(
+            Problem(
+                id=stable_id,
+                slug=slug,
+                title=title,
+                statements=statements,
+                cases=cases,
+                time_ms=max(1, int(float(time_seconds) * 1000)),
+                memory_mb=memory_mb,
+                tags=tags,
+                source=contest_title,
+                problem_type=(
+                    "interactive" if judge_type == "interactive" else "default"
+                ),
+                checker=checker if judge_type == "custom" else None,
+                interactor=interactor if judge_type == "interactive" else None,
+                validator=validator,
+                attachments=attachments,
+                solutions=solutions,
+                extra={
+                    "probhub_config": config,
+                    "workspace_index": index,
+                    "output_limit_mb": limits.get("output"),
+                    "process_limit": limits.get("processes"),
+                },
+            )
+        )
+        _report_read_progress(reporter, index, total, slug, "read ProbHub problem")
+
+    bundle.problems = _filter_problems(bundle.problems, only)
+    return bundle
+
+
+def _probhub_legacy_source(problem_dir: Path, *stems: str) -> Path | None:
+    wanted = {stem.casefold() for stem in stems}
+    for source_dir in (problem_dir / "code", problem_dir):
+        if not source_dir.is_dir():
+            continue
+        match = next(
+            (
+                path
+                for path in sorted(source_dir.iterdir())
+                if path.is_file()
+                and path.stem.casefold() in wanted
+                and path.suffix.lower() in bridge.SOURCE_SUFFIXES
+            ),
+            None,
+        )
+        if match is not None:
+            return match
+    return None
+
+
+def _probhub_legacy_statements(
+    problem_dir: Path, metadata: dict[str, Any]
+) -> tuple[list[Statement], set[Path]]:
+    candidates = [problem_dir / "problem.md", *sorted(problem_dir.glob("problem.*.md"))]
+    markdown_paths = list(dict.fromkeys(path for path in candidates if path.is_file()))
+    if markdown_paths:
+        return (
+            [
+                Statement(
+                    _language_from_name(path),
+                    "markdown",
+                    content=read_limited_text(path),
+                )
+                for path in markdown_paths
+            ],
+            set(markdown_paths),
+        )
+
+    statement = (
+        metadata.get("statement") if isinstance(metadata.get("statement"), dict) else {}
+    )
+    parts = [
+        f"## {heading}\n\n{value}"
+        for heading, key in (
+            ("题目描述", "description"),
+            ("输入格式", "input"),
+            ("输出格式", "output"),
+            ("提示", "notes"),
+        )
+        if (value := str(statement.get(key) or "").strip())
+    ]
+    if parts:
+        return [Statement("zh", "markdown", content="\n\n".join(parts) + "\n")], set()
+
+    pdf_path = problem_dir / "problem.pdf"
+    if pdf_path.is_file():
+        return [Statement("und", "pdf", path=pdf_path)], {pdf_path}
+    return [], set()
+
+
+def _probhub_legacy_roots(root: Path) -> list[Path]:
+    result = []
+    for meta_path in sorted(root.rglob("meta.json")):
+        problem_dir = meta_path.parent
+        if (
+            (problem_dir / "data" / "sample").is_dir()
+            and (problem_dir / "data" / "secret").is_dir()
+            and (
+                (problem_dir / "problem.md").is_file()
+                or (problem_dir / "problem.pdf").is_file()
+                or any(problem_dir.glob("problem.*.md"))
+            )
+        ):
+            result.append(problem_dir)
+    return bridge._dedupe_problem_dirs(result, root)
+
+
+def _read_probhub_legacy(
+    problem_dirs: list[Path],
+    only: Iterable[str],
+    reporter: ProgressReporter | None,
+) -> ProblemBundle:
+    bundle = ProblemBundle("probhub", [])
+    total = len(problem_dirs)
+    for index, problem_dir in enumerate(problem_dirs, start=1):
+        metadata = load_json_file(problem_dir / "meta.json")
+        problem_meta = (
+            metadata.get("problem") if isinstance(metadata.get("problem"), dict) else {}
+        )
+        stable_id = str(problem_meta.get("id") or problem_dir.name).strip()
+        slug = _safe_name(stable_id, f"problem-{index}")
+        title = str(problem_meta.get("display_name") or stable_id).strip()
+        _report_read_progress(
+            reporter, index - 1, total, slug, "reading ProbHub legacy problem"
+        )
+
+        statements, statement_paths = _probhub_legacy_statements(problem_dir, metadata)
+        if not statements:
+            bundle.add_issue(
+                "fatal",
+                "probhub-legacy-missing-statement",
+                "ProbHub legacy problem has no problem Markdown, statement metadata, or PDF",
+                problem=slug,
+                field="statements",
+            )
+
+        sample_dir = problem_dir / "data" / "sample"
+        secret_dir = problem_dir / "data" / "secret"
+        sample_cases = bridge._scan_case_pairs(sample_dir, sample=True)
+        secret_cases = bridge._scan_case_pairs(secret_dir, sample=False)
+        cases = [
+            TestCase(
+                case.name,
+                case.input_path,
+                case.output_path,
+                case.sample,
+                case.score,
+            )
+            for case in sample_cases + secret_cases
+        ]
+        for data_dir in (sample_dir, secret_dir):
+            _probhub_unpaired_issue(
+                bundle,
+                data_dir=data_dir,
+                root=problem_dir,
+                slug=slug,
+            )
+
+        validator_path = _probhub_legacy_source(problem_dir, "validator")
+        checker_path = _probhub_legacy_source(problem_dir, "checker")
+        interactor_path = _probhub_legacy_source(problem_dir, "interactor")
+        solution_path = _probhub_legacy_source(problem_dir, "std", "solution")
+        validator = (
+            _program_from_path("validator", validator_path)
+            if validator_path is not None
+            else None
+        )
+        checker = (
+            _program_from_path("checker", checker_path, mode="testlib")
+            if checker_path is not None
+            else None
+        )
+        interactor = (
+            _program_from_path("interactor", interactor_path, mode="testlib")
+            if interactor_path is not None
+            else None
+        )
+        solutions = (
+            [_program_from_path("solution", solution_path, mode="accepted")]
+            if solution_path is not None
+            else []
+        )
+        if validator is None:
+            bundle.add_issue(
+                "fatal",
+                "probhub-legacy-missing-validator",
+                "ProbHub legacy problem has no validator source",
+                problem=slug,
+                field="validator",
+            )
+
+        claimed_paths = {
+            program.path.resolve()
+            for program in (validator, checker, interactor, *solutions)
+            if program is not None and program.path is not None
+        }
+        attachments: dict[str, Path] = {}
+        skipped_authoring_artifacts = False
+        for path in sorted(problem_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(problem_dir)
+            if relative.parts[0] in {"data", "tmp", ".probhub", "output_validators"}:
+                skipped_authoring_artifacts |= relative.parts[0] == "tmp"
+                continue
+            if path.suffix.lower() == ".exe":
+                skipped_authoring_artifacts = True
+                continue
+            if (
+                path.resolve() in claimed_paths
+                or path in statement_paths
+                or relative.as_posix() == "meta.json"
+            ):
+                continue
+            attachments[f"probhub/{relative.as_posix()}"] = path
+
+        authoring_sources = {
+            path.stem.casefold()
+            for path in attachments.values()
+            if path.suffix.lower() in bridge.SOURCE_SUFFIXES
+        }
+        if authoring_sources.intersection({"brute", "wrong", "gen", "inmaker"}):
+            skipped_authoring_artifacts = True
+        if skipped_authoring_artifacts:
+            bundle.add_issue(
+                "loss",
+                "probhub-legacy-authoring-artifacts",
+                "ProbHub legacy authoring sources are preserved as inert attachments; executables and temporary files are excluded",
+                problem=slug,
+                field="attachments",
+            )
+
+        time_value = problem_meta.get("time_limit")
+        memory_value = problem_meta.get("memory_limit")
+        if time_value is None or memory_value is None:
+            bundle.add_issue(
+                "warning",
+                "probhub-legacy-default-limits",
+                "ProbHub legacy metadata omits portable limits; missing values use 1 second and 256 MiB",
+                problem=slug,
+            )
+        time_seconds = bridge._parse_seconds(time_value, default=1)
+        memory_mb = bridge._parse_memory_mb(memory_value, default=256)
+        tags = (
+            [str(value) for value in problem_meta.get("tags", [])]
+            if isinstance(problem_meta.get("tags"), list)
+            else []
+        )
+        bundle.problems.append(
+            Problem(
+                id=stable_id,
+                slug=slug,
+                title=title,
+                statements=statements,
+                cases=cases,
+                time_ms=max(1, int(float(time_seconds) * 1000)),
+                memory_mb=memory_mb,
+                tags=tags,
+                source="ProbHub Legacy",
+                problem_type="interactive" if interactor is not None else "default",
+                checker=checker,
+                interactor=interactor,
+                validator=validator,
+                attachments=attachments,
+                solutions=solutions,
+                extra={"probhub_legacy_meta": metadata, "legacy_index": index},
+            )
+        )
+        _report_read_progress(
+            reporter, index, total, slug, "read ProbHub legacy problem"
+        )
+
+    bundle.problems = _filter_problems(bundle.problems, only)
+    return bundle
+
+
+def read_probhub(
+    root: Path,
+    workspace: Path,
+    only: Iterable[str],
+    budget: bridge.ArchiveExtractionBudget | None = None,
+    reporter: ProgressReporter | None = None,
+) -> ProblemBundle:
+    workspace_files = sorted(
+        path
+        for path in root.rglob("workspace.yaml")
+        if path.is_file() and path.parent.name == ".probhub"
+    )
+    if len(workspace_files) > 1:
+        raise ValueError("archive contains multiple ProbHub workspaces")
+    if workspace_files:
+        return _read_probhub_workspace(workspace_files[0], only, reporter)
+
+    legacy_roots = _probhub_legacy_roots(root)
+    if legacy_roots:
+        return _read_probhub_legacy(legacy_roots, only, reporter)
+
+    bundle = read_icpc(root, workspace, only, budget, reporter)
+    bundle.source_format = "probhub"
+    for problem in bundle.problems:
+        problem.extra["probhub_export"] = True
+    return bundle
+
+
 def _find_icpc_dirs(root: Path) -> list[Path]:
     candidates: list[Path] = []
     for marker in sorted(root.rglob("problem.yaml")):
@@ -589,6 +1392,7 @@ def _find_icpc_dirs(root: Path) -> list[Path]:
         if (directory / "data").is_dir() and (
             (directory / "statement").is_dir()
             or (directory / "problem_statement").is_dir()
+            or (directory / "problem.pdf").is_file()
         ):
             candidates.append(directory)
     return bridge._dedupe_problem_dirs(candidates, root)
@@ -653,42 +1457,65 @@ def read_icpc(
         )
         statements: list[Statement] = []
         attachments: dict[str, Path] = {}
-        statement_root = problem_dir / (
-            "statement" if (problem_dir / "statement").is_dir() else "problem_statement"
+        statement_root = next(
+            (
+                path
+                for path in (
+                    problem_dir / "statement",
+                    problem_dir / "problem_statement",
+                )
+                if path.is_dir()
+            ),
+            None,
         )
-        for path in sorted(statement_root.rglob("*")):
-            if not path.is_file():
-                continue
-            language = _language_from_name(path)
-            suffix = path.suffix.lower()
-            if suffix == ".pdf":
-                statements.append(Statement(language, "pdf", path=path))
-            elif suffix == ".md":
-                statements.append(
-                    Statement(language, "markdown", content=read_limited_text(path))
-                )
-            elif suffix in {".html", ".htm"}:
-                statements.append(
-                    Statement(language, "html", content=read_limited_text(path))
-                )
-            elif suffix == ".tex":
-                text = read_limited_text(path)
-                generated_body = _generated_verbatim_tex_body(text)
-                if generated_body is not None:
+        if statement_root is not None:
+            for path in sorted(statement_root.rglob("*")):
+                if not path.is_file():
+                    continue
+                language = _language_from_name(path)
+                suffix = path.suffix.lower()
+                if suffix == ".pdf":
+                    statements.append(Statement(language, "pdf", path=path))
+                elif suffix == ".md":
                     statements.append(
-                        Statement(language, "markdown", content=generated_body)
+                        Statement(
+                            language,
+                            "markdown",
+                            content=read_limited_text(path),
+                        )
                     )
-                else:
-                    attachments[
-                        f"{statement_root.name}/{path.relative_to(statement_root).as_posix()}"
-                    ] = path
-                    bundle.add_issue(
-                        "loss",
-                        "icpc-tex-statement",
-                        "LaTeX statement is preserved as an attachment but cannot be rendered by every target",
-                        problem=slug,
-                        field="statements",
+                elif suffix in {".html", ".htm"}:
+                    statements.append(
+                        Statement(
+                            language,
+                            "html",
+                            content=read_limited_text(path),
+                        )
                     )
+                elif suffix == ".tex":
+                    text = read_limited_text(path)
+                    generated_body = _generated_verbatim_tex_body(text)
+                    if generated_body is not None:
+                        statements.append(
+                            Statement(
+                                language,
+                                "markdown",
+                                content=generated_body,
+                            )
+                        )
+                    else:
+                        attachments[
+                            f"{statement_root.name}/{path.relative_to(statement_root).as_posix()}"
+                        ] = path
+                        bundle.add_issue(
+                            "loss",
+                            "icpc-tex-statement",
+                            "LaTeX statement is preserved as an attachment but cannot be rendered by every target",
+                            problem=slug,
+                            field="statements",
+                        )
+        elif (problem_dir / "problem.pdf").is_file():
+            statements.append(Statement("und", "pdf", path=problem_dir / "problem.pdf"))
         secret_cases = bridge._scan_case_pairs(
             problem_dir / "data" / "secret", sample=False
         )
@@ -725,9 +1552,11 @@ def read_icpc(
                 )
         validation = str(meta.get("validation") or "").lower()
         is_interactive = "interactive" in validation
-        checker_path = _find_first_source(
-            problem_dir / "output_validator"
-        ) or _find_first_source(problem_dir / "output_validators" / "checker")
+        checker_path = (
+            _find_first_source(problem_dir / "output_validator")
+            or _find_first_source(problem_dir / "output_validators" / "checker")
+            or _find_first_source(problem_dir / "output_validators" / "validate")
+        )
         interactor_path = _find_first_source(
             problem_dir / "output_validators" / "interactor"
         )
@@ -3740,6 +4569,13 @@ def _validate_dmoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> Non
 
 
 ADAPTERS: dict[str, Adapter] = {
+    "probhub": Adapter(
+        "probhub",
+        _registered_detection("probhub"),
+        read_probhub,
+        None,
+        None,
+    ),
     "hydro": Adapter(
         "hydro",
         _registered_detection("hydro"),

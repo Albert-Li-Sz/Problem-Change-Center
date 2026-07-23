@@ -79,6 +79,7 @@ def test_docker_command_includes_security_flags_and_safe_mode() -> None:
     assert f"{paths.output_dir.resolve()}:/output:rw" not in cmd
     assert "P2H_MAX_ARCHIVE_UNCOMPRESSED_BYTES=1073741824" in cmd
     assert "P2H_MAX_ARCHIVE_COMPRESSION_RATIO=200" in cmd
+    assert "P2H_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES=16777216" in cmd
     assert "--no-run-doall" in cmd
     assert "--run-doall" not in cmd
 

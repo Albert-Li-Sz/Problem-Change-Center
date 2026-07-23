@@ -295,10 +295,26 @@ def test_hydro_to_domjudge_rejects_high_ratio_zip_bomb_and_cleans_extraction(
 ) -> None:
     source = tmp_path / "bomb.zip"
     with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("P1000/huge.bin", b"\0" * (4 * 1024 * 1024))
+        archive.writestr("P1000/huge.bin", b"\0" * (32 * 1024 * 1024))
 
     with pytest.raises(ValueError, match="compression ratio limit"):
         convert_hydro_to_domjudge(source, tmp_path / "output")
+
+
+def test_safe_extract_allows_small_high_ratio_testdata(tmp_path: Path) -> None:
+    source = tmp_path / "testdata.zip"
+    target = tmp_path / "target"
+    content = (b"1000000000\n" * 1_000_002)[:11_000_017]
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("problem_1292/18.in", content)
+
+    with zipfile.ZipFile(source) as archive:
+        info = archive.getinfo("problem_1292/18.in")
+        assert info.file_size / info.compress_size > 200
+
+    _safe_extract_zip(source, target)
+
+    assert (target / "problem_1292" / "18.in").read_bytes() == content
 
 
 def test_safe_extract_counts_directory_entries_toward_archive_limit(
@@ -316,6 +332,7 @@ def test_safe_extract_counts_directory_entries_toward_archive_limit(
         max_uncompressed_bytes=1024,
         max_member_bytes=1024,
         max_compression_ratio=200,
+        min_compression_ratio_bytes=16 * 1024 * 1024,
     )
     with pytest.raises(ValueError, match="entry limit"):
         _safe_extract_zip(source, target, budget=budget)
