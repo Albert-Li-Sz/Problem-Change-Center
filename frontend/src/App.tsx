@@ -500,24 +500,51 @@ export default function App() {
   }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <Archive size={24} aria-hidden="true" />
-          <div>
-            <h1>OJ 题包转换器</h1>
-            <p>在受限 Docker runner 内转换主流 OJ 与 ICPC 标准题包</p>
+    <div className="site-shell">
+      <nav className="app-navigation" aria-label="主导航">
+        <div className="navigation-inner">
+          <div className="navigation-brand">
+            <span className="navigation-brand-mark">
+              <Archive size={18} aria-hidden="true" />
+            </span>
+            <span>Problem Change Center</span>
+          </div>
+          <div className="navigation-tabs">
+            <span className="navigation-tab active" aria-current="page">题包转换</span>
+            <button
+              className="navigation-tab"
+              type="button"
+              aria-label="查看格式能力矩阵"
+              onClick={openCapabilityMatrix}
+            >
+              格式能力
+            </button>
+          </div>
+          <div className="navigation-status" title="默认不执行 doall.sh">
+            <Shield size={15} aria-hidden="true" />
+            安全模式
           </div>
         </div>
-        <div className="security-chip">
-          <Shield size={16} aria-hidden="true" />
-          默认不执行 doall.sh
-        </div>
-      </header>
+      </nav>
 
-      <section className="workspace">
-        <div className="left-column">
-          <section className="panel upload-panel">
+      <main className="app-shell">
+        <header className="topbar">
+          <div className="brand">
+            <h1>OJ 题包转换器</h1>
+            <p>在隔离环境中转换主流 OJ 与 ICPC 标准题包</p>
+          </div>
+          <div className="security-chip">
+            <span className="security-indicator" aria-hidden="true" />
+            <div>
+              <strong>隔离运行</strong>
+              <span>默认不执行 doall.sh</span>
+            </div>
+          </div>
+        </header>
+
+        <section className="workspace">
+          <div className="left-column">
+            <section className="panel upload-panel">
             <div className="panel-heading">
               <div>
                 <h2>上传题包</h2>
@@ -590,9 +617,6 @@ export default function App() {
                 )}
               </div>
             )}
-            <button className="capability-trigger" type="button" onClick={openCapabilityMatrix}>
-              查看格式能力矩阵
-            </button>
             <dialog
               ref={capabilityDialogRef}
               className="capability-dialog"
@@ -636,9 +660,9 @@ export default function App() {
                 </div>
               </div>
             </dialog>
-          </section>
+            </section>
 
-          <form className="panel config-panel" onSubmit={handleStart}>
+            <form className="panel config-panel" onSubmit={handleStart}>
             <div className="panel-heading">
               <div>
                 <h2>转换参数</h2>
@@ -971,11 +995,11 @@ export default function App() {
               <Shield size={17} aria-hidden="true" />
               启动容器转换
             </button>
-          </form>
-        </div>
+            </form>
+          </div>
 
-        <div className="right-column">
-          <section className="panel status-panel">
+          <div className="right-column">
+            <section className="panel status-panel">
             <div className="panel-heading">
               <div>
                 <h2>任务状态</h2>
@@ -1146,11 +1170,12 @@ export default function App() {
                 )}
               </div>
             )}
-          </section>
+            </section>
 
-          <LogViewer logs={logs} />
-        </div>
-      </section>
-    </main>
+            <LogViewer logs={logs} />
+          </div>
+        </section>
+      </main>
+    </div>
   );
 }
