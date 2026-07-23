@@ -87,6 +87,43 @@ exit 1
     assert "docker compose --profile runner build runner" in completed.stderr
 
 
+def test_start_script_accepts_local_oci_index_image(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    scripts_dir = project_root / "scripts"
+    fake_bin = tmp_path / "bin"
+    scripts_dir.mkdir(parents=True)
+    fake_bin.mkdir()
+    start_script = scripts_dir / "start.sh"
+    shutil.copy2(PROJECT_ROOT / "scripts" / "start.sh", start_script)
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+if [[ "${1:-}" == "info" ]]; then exit 0; fi
+if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then exit 1; fi
+if [[ "${1:-}" == "image" && "${2:-}" == "ls" ]]; then printf 'oci-index-id\n'; exit 0; fi
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(fake_docker.stat().st_mode | 0o100)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+
+    completed = subprocess.run(
+        ["bash", str(start_script), "--backend-only"],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "backend/.venv is missing" in completed.stderr
+    assert "configured runner image" not in completed.stderr
+
+
 def test_installer_rejects_unsupported_node_version(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     scripts_dir = project_root / "scripts"

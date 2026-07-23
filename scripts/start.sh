@@ -157,8 +157,8 @@ check_runner_image() {
   if docker image inspect "$runner_image" >/dev/null 2>&1; then
     return
   fi
-  runner_image_id="$(docker image ls "$runner_image" --format '{{.ID}}' 2>/dev/null | head -n 1)"
-  if [[ -n "$runner_image_id" ]]; then
+  if runner_image_id="$(docker image ls "$runner_image" --format '{{.ID}}' 2>/dev/null | head -n 1)" \
+    && [[ -n "$runner_image_id" ]]; then
     return
   fi
 
