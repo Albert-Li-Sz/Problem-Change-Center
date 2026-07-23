@@ -1,0 +1,89 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install backend tools
+        run: |
+          python -m pip install -r backend/requirements.txt
+          python -m pip install ruff bandit pip-audit
+      - name: Validate compatibility lock
+        run: python compat/check_lock.py
+      - name: Backend tests
+        working-directory: backend
+        run: python -m pytest -q
+      - name: Nightly near-limit package test
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        working-directory: backend
+        env:
+          P2H_RUN_NIGHTLY_LARGE: "1"
+        run: python -m pytest -q tests/test_package_converter.py -k nightly_large
+      - name: Python static and security checks
+        run: |
+          ruff check backend runner compat
+          ruff format --check backend runner compat
+          bandit -q -r backend/app runner
+          pip-audit -r backend/requirements.txt
+      - name: Frontend tests and production build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test -- --run
+          npm run build
+          npm audit --audit-level=high
+      - name: Shell checks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck install.sh scripts/*.sh runner/entrypoint.sh
+      - name: Validate production Caddy configuration
+        run: |
+          CADDY_HASH="$(docker run --rm caddy:2.10-alpine caddy hash-password --plaintext ci-password)"
+          docker run --rm \
+            -e P2H_SITE_ADDRESS=localhost \
+            -e P2H_MAX_REQUEST_BODY_BYTES=553648128 \
+            -e P2H_ADMIN_USER=ci \
+            -e P2H_ADMIN_PASSWORD_HASH="$CADDY_HASH" \
+            -e P2H_TRUSTED_PROXY_SECRET=test-only-test-only-test-only-test-only \
+            -e P2H_HSTS_MAX_AGE_SECONDS=31536000 \
+            -e P2H_FRONTEND_ROOT=/srv \
+            -e P2H_ACCESS_LOG=/tmp/access.json \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.10-alpine \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+  runner-isolation:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runner
+        run: docker compose --profile wine build runner runner-wine
+      - name: Run isolation probes
+        run: |
+          ./scripts/test-runner-isolation.sh p2h-runner
+          ./scripts/test-runner-isolation.sh p2h-runner-wine

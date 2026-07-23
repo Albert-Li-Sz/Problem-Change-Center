@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sys
+import time
 import zipfile
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,13 +15,30 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER_DIR = ROOT / "runner"
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(RUNNER_DIR))
 
 import package_converter  # noqa: E402
-from package_adapters import _filter_problems  # noqa: E402
+import format_bridge as bridge  # noqa: E402
+from compat.corpus.build import build as build_compat_corpus  # noqa: E402
+from package_adapters import ADAPTERS, _filter_problems  # noqa: E402
 from package_converter import REPORT_FILENAME, convert_package  # noqa: E402
-from package_ir import Problem  # noqa: E402
+from package_ir import (  # noqa: E402
+    ConversionIssue,
+    Problem,
+    ProblemBundle,
+    Program,
+    RepairCandidate,
+    Statement,
+    TestCase as IRTestCase,
+    compare_semantic_snapshots,
+)
+from package_repair import (  # noqa: E402
+    populate_repair_suggestions,
+    repair_source_archive,
+)
 from package_security import load_json_file, load_yaml_file  # noqa: E402
+from progress import ProgressDeadlineExceeded, ProgressReporter  # noqa: E402
 
 
 def _hydro_package(path: Path) -> None:
@@ -46,6 +67,166 @@ def _zip_directory(source: Path, destination: Path) -> None:
         for path in sorted(source.rglob("*")):
             if path.is_file():
                 archive.write(path, path.relative_to(source).as_posix())
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _read_bundle(archive: Path, source_format: str, workspace: Path) -> ProblemBundle:
+    extracted = workspace / f"read-{source_format}"
+    budget = bridge.ArchiveExtractionBudget.from_env()
+    bridge._safe_extract_zip(archive, extracted, budget=budget)
+    bundle = ADAPTERS[source_format].read(
+        extracted, workspace / f"work-{source_format}", (), budget
+    )
+    bundle.validate_integrity()
+    return bundle
+
+
+def test_redistributable_core_corpus_converts_to_icpc_and_hoj(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    build_compat_corpus(corpus)
+    source = corpus / "hydro-core-rich.zip"
+
+    for target in ("icpc", "hoj"):
+        output = tmp_path / target
+        output.mkdir()
+        report = convert_package(
+            source,
+            output,
+            source_format="hydro",
+            target_format=target,
+        )
+        assert report["problem_count"] == 5
+        assert report["counts"]["fatal"] == 0
+
+    missing_output = tmp_path / "missing"
+    with pytest.raises(ValueError, match="missing output"):
+        convert_package(
+            corpus / "hydro-missing-answer.zip",
+            missing_output,
+            source_format="hydro",
+            target_format="hoj",
+        )
+    missing_report = json.loads(
+        (missing_output / REPORT_FILENAME).read_text(encoding="utf-8")
+    )
+    assert missing_report["repair_suggestions"][0]["candidates"][0] == {
+        "path": "P2000/testdata/1.out",
+        "strategy": "extension-alias",
+        "confidence": 0.95,
+    }
+
+
+def test_direct_cli_progress_reporter_enforces_stage_timeout() -> None:
+    with pytest.raises(ProgressDeadlineExceeded) as timeout:
+        with ProgressReporter(
+            output_format="none",
+            total_timeout_seconds=10,
+            idle_timeout_seconds=10,
+            stage_timeout_seconds=1,
+            problem_timeout_seconds=10,
+        ) as reporter:
+            reporter.phase("read", detail="simulating a stuck reader")
+            time.sleep(2)
+
+    assert timeout.value.kind == "stage"
+    assert timeout.value.phase == "read"
+
+
+def test_direct_cli_heartbeats_do_not_prevent_idle_timeout() -> None:
+    stream = StringIO()
+    with pytest.raises(ProgressDeadlineExceeded) as timeout:
+        with ProgressReporter(
+            output_format="jsonl",
+            stream=stream,
+            heartbeat_seconds=0.05,
+            total_timeout_seconds=10,
+            idle_timeout_seconds=1,
+            stage_timeout_seconds=10,
+            problem_timeout_seconds=10,
+        ) as reporter:
+            reporter.phase("read", detail="simulating a stuck reader")
+            time.sleep(2)
+
+    assert timeout.value.kind == "idle"
+    assert '"event":"heartbeat"' in stream.getvalue()
+
+
+def test_repair_candidate_confidence_ambiguity_and_role_separation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    (root / "Data").mkdir(parents=True)
+    (root / "Data" / "Answer.ANS").write_text("3\n", encoding="utf-8")
+    (root / "elsewhere").mkdir()
+    classified_interactor = root / "elsewhere" / "checker.cpp"
+    classified_interactor.write_text("int main(){}\n", encoding="utf-8")
+    (root / "one").mkdir()
+    (root / "two").mkdir()
+    (root / "one" / "manual.pdf").write_bytes(b"%PDF-one")
+    (root / "two" / "manual.pdf").write_bytes(b"%PDF-two")
+    (root / "elsewhere" / "readme.txt").write_text("notes\n", encoding="utf-8")
+
+    problem = Problem(
+        id="p",
+        slug="p",
+        title="Repair candidates",
+        interactor=Program("interactor", path=classified_interactor),
+    )
+    bundle = ProblemBundle("hydro", [problem])
+    bundle.add_issue(
+        "fatal",
+        "case-only",
+        "case mismatch",
+        problem="p",
+        field="cases",
+        context={"expected_path": "data/answer.ans", "role": "output"},
+    )
+    bundle.add_issue(
+        "fatal",
+        "program-role",
+        "missing checker",
+        problem="p",
+        field="checker",
+        context={"expected_path": "wanted/checker.cpp", "role": "checker"},
+    )
+    bundle.add_issue(
+        "fatal",
+        "ambiguous-attachment",
+        "missing attachment",
+        problem="p",
+        field="attachments",
+        context={"expected_path": "docs/manual.pdf", "role": "attachment"},
+    )
+    bundle.add_issue(
+        "fatal",
+        "unique-attachment",
+        "missing attachment",
+        problem="p",
+        field="attachments",
+        context={"expected_path": "docs/readme.txt", "role": "attachment"},
+    )
+
+    populate_repair_suggestions(bundle, root)
+
+    by_code = {
+        suggestion.issue_code: suggestion for suggestion in bundle.repair_suggestions
+    }
+    assert by_code["case-only"].candidates == (
+        RepairCandidate("Data/Answer.ANS", "case-only", 1.0),
+    )
+    assert by_code["program-role"].candidates == ()
+    assert by_code["program-role"].requires_upload is True
+    assert by_code["ambiguous-attachment"].candidates == ()
+    assert by_code["unique-attachment"].candidates == (
+        RepairCandidate("elsewhere/readme.txt", "unique-basename", 0.85),
+    )
 
 
 def test_copy_output_rejects_symlink_without_reading_target(tmp_path: Path) -> None:
@@ -962,7 +1143,9 @@ def test_report_is_structured_json(tmp_path: Path) -> None:
     convert_package(source, output, source_format="hydro", target_format="fps")
     report = json.loads((output / REPORT_FILENAME).read_text())
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
+    assert report["repair_ready"] is False
+    assert report["repair_suggestions"] == []
     assert report["source_format"] == "hydro"
     assert report["target_format"] == "fps"
 
@@ -1273,3 +1456,445 @@ def test_all_non_polygon_source_target_combinations_smoke(tmp_path: Path) -> Non
             completed.add((source_format, target_format))
 
     assert len(completed) == 49
+
+
+def test_semantic_snapshot_hashes_judge_data_and_normalizes_statement_text(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "1.in"
+    output_path = tmp_path / "1.ans"
+    input_path.write_bytes(b"1 2\r\n")
+    output_path.write_bytes(b"3\n")
+    first = ProblemBundle(
+        "hydro",
+        [
+            Problem(
+                id="P1000",
+                slug="sum",
+                title="Sum",
+                statements=[Statement("en", "markdown", content="# Sum\r\n")],
+                cases=[IRTestCase("1", input_path, output_path)],
+                time_ms=1000,
+                memory_mb=256,
+            )
+        ],
+    )
+    second = ProblemBundle(
+        "hydro",
+        [
+            Problem(
+                id="renumbered",
+                slug="sum",
+                title="Sum",
+                statements=[Statement("en", "markdown", content="# Sum\n")],
+                cases=[IRTestCase("1", input_path, output_path)],
+                time_ms=1000,
+                memory_mb=256,
+            )
+        ],
+    )
+
+    assert first.semantic_snapshot() == second.semantic_snapshot()
+    original_digest = first.semantic_digest()
+    assert original_digest == second.semantic_digest()
+    output_path.write_bytes(b"4\n")
+    assert original_digest != second.semantic_digest()
+
+
+def test_semantic_difference_requires_matching_loss_field() -> None:
+    before = {"schema_version": 1, "problems": [{"groups": [{"name": "1"}]}]}
+    after = {"schema_version": 1, "problems": [{"groups": []}]}
+
+    assert compare_semantic_snapshots(before, after, target_format="icpc", issues=[])
+    assert (
+        compare_semantic_snapshots(
+            before,
+            after,
+            target_format="icpc",
+            issues=[
+                ConversionIssue(
+                    "loss",
+                    "icpc-groups",
+                    "groups are not representable",
+                    field="groups",
+                )
+            ],
+        )
+        == []
+    )
+
+
+def test_missing_answer_generates_confirmable_repair_and_can_be_applied(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "missing-answer.zip"
+    failed_output = tmp_path / "failed"
+    repaired_output = tmp_path / "repaired"
+    plan_path = tmp_path / "repair-plan.json"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("P1000/problem.yaml", "title: Sum\npid: P1000\n")
+        archive.writestr("P1000/problem_en.md", "# Sum\n")
+        archive.writestr(
+            "P1000/testdata/config.yaml",
+            "cases:\n  - input: 1.in\n    output: 1.ans\n",
+        )
+        archive.writestr("P1000/testdata/1.in", "1 2\n")
+        archive.writestr("P1000/testdata/1.out", "3\n")
+
+    with pytest.raises(ValueError, match="missing output"):
+        convert_package(
+            source,
+            failed_output,
+            source_format="hydro",
+            target_format="hoj",
+        )
+    report = json.loads((failed_output / REPORT_FILENAME).read_text())
+    suggestion = next(
+        item
+        for item in report["repair_suggestions"]
+        if item["expected_path"].endswith("P1000/testdata/1.ans")
+    )
+    candidate = suggestion["candidates"][0]
+    assert candidate == {
+        "path": "P1000/testdata/1.out",
+        "strategy": "extension-alias",
+        "confidence": 0.95,
+    }
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_sha256": _sha256(source),
+                "selections": [
+                    {
+                        "suggestion_id": suggestion["id"],
+                        "expected_path": suggestion["expected_path"],
+                        "role": suggestion["role"],
+                        "candidate_path": candidate["path"],
+                        "strategy": candidate["strategy"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repaired_report = convert_package(
+        source,
+        repaired_output,
+        source_format="hydro",
+        target_format="hoj",
+        repair_plan=plan_path,
+    )
+
+    assert repaired_report["counts"]["fatal"] == 0
+    assert repaired_report["applied_repairs"][0]["expected_path"].endswith("1.ans")
+    assert _sha256(source) == json.loads(plan_path.read_text())["source_sha256"]
+
+
+def test_repair_source_archive_copies_candidate_without_removing_original(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "missing-answer.zip"
+    repaired = tmp_path / "repaired-source.zip"
+    plan = tmp_path / "repair-plan.json"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("P1000/testdata/1.out", "3\n")
+    plan.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_sha256": _sha256(source),
+                "selections": [
+                    {
+                        "suggestion_id": "a" * 24,
+                        "expected_path": "P1000/testdata/1.ans",
+                        "role": "output",
+                        "candidate_path": "P1000/testdata/1.out",
+                        "strategy": "extension-alias",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repair_source_archive(
+        source,
+        repaired,
+        plan_path=plan,
+        supplements_dir=None,
+        workspace=tmp_path / "work",
+    )
+
+    with zipfile.ZipFile(repaired) as archive:
+        assert archive.read("P1000/testdata/1.out") == b"3\n"
+        assert archive.read("P1000/testdata/1.ans") == b"3\n"
+
+
+def test_conflicting_output_aliases_remain_fatal(tmp_path: Path) -> None:
+    source = tmp_path / "conflicting-answers.zip"
+    output = tmp_path / "output"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("P1000/problem.yaml", "title: Sum\npid: P1000\n")
+        archive.writestr("P1000/problem_en.md", "# Sum\n")
+        archive.writestr(
+            "P1000/testdata/config.yaml",
+            "cases:\n  - input: 1.in\n    output: 1.ans\n",
+        )
+        archive.writestr("P1000/testdata/1.in", "1 2\n")
+        archive.writestr("P1000/testdata/1.ans", "3\n")
+        archive.writestr("P1000/testdata/1.out", "4\n")
+
+    with pytest.raises(ValueError, match="unpaired file"):
+        convert_package(
+            source,
+            output,
+            source_format="hydro",
+            target_format="hoj",
+        )
+
+
+def test_repair_plan_rejects_tampered_source_hash(tmp_path: Path) -> None:
+    source = tmp_path / "source.zip"
+    plan = tmp_path / "plan.json"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("problem.xml", "<fps version='1.6'/>")
+    plan.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_sha256": "0" * 64,
+                "selections": [
+                    {
+                        "suggestion_id": "1" * 24,
+                        "expected_path": "1.ans",
+                        "role": "output",
+                        "candidate_path": "1.out",
+                        "strategy": "extension-alias",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="source hash"):
+        convert_package(
+            source,
+            tmp_path / "output",
+            source_format="fps",
+            target_format="hydro",
+            repair_plan=plan,
+        )
+
+
+def test_confirmed_supplement_upload_repairs_missing_file(tmp_path: Path) -> None:
+    source = tmp_path / "missing.zip"
+    failed_output = tmp_path / "failed"
+    repaired_output = tmp_path / "repaired"
+    supplements = tmp_path / "supplements"
+    supplements.mkdir()
+    supplement = supplements / "0001.upload"
+    supplement.write_text("3\n", encoding="utf-8")
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("P1000/problem.yaml", "title: Sum\npid: P1000\n")
+        archive.writestr("P1000/problem_en.md", "# Sum\n")
+        archive.writestr(
+            "P1000/testdata/config.yaml",
+            "cases:\n  - input: 1.in\n    output: 1.ans\n",
+        )
+        archive.writestr("P1000/testdata/1.in", "1 2\n")
+
+    with pytest.raises(ValueError):
+        convert_package(
+            source,
+            failed_output,
+            source_format="hydro",
+            target_format="hoj",
+        )
+    report = json.loads((failed_output / REPORT_FILENAME).read_text())
+    suggestion = next(
+        item
+        for item in report["repair_suggestions"]
+        if item["expected_path"].endswith("1.ans")
+    )
+    plan = tmp_path / "upload-plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_sha256": _sha256(source),
+                "selections": [
+                    {
+                        "suggestion_id": suggestion["id"],
+                        "expected_path": suggestion["expected_path"],
+                        "role": suggestion["role"],
+                        "upload_name": supplement.name,
+                        "upload_sha256": _sha256(supplement),
+                        "strategy": "upload",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repaired_report = convert_package(
+        source,
+        repaired_output,
+        source_format="hydro",
+        target_format="hoj",
+        repair_plan=plan,
+        supplements_dir=supplements,
+    )
+
+    assert repaired_report["counts"]["fatal"] == 0
+    assert repaired_report["applied_repairs"][0]["strategy"] == "upload"
+
+
+@pytest.mark.parametrize(
+    ("source_format", "target_format"),
+    [
+        ("hydro", "icpc"),
+        ("hydro", "hoj"),
+        ("icpc", "hydro"),
+        ("icpc", "hoj"),
+        ("hoj", "hydro"),
+        ("hoj", "icpc"),
+    ],
+)
+def test_core_format_matrix_has_no_unexplained_semantic_difference(
+    tmp_path: Path, source_format: str, target_format: str
+) -> None:
+    hydro_source = tmp_path / "hydro-source.zip"
+    _hydro_package(hydro_source)
+    if source_format == "hydro":
+        source_archive = hydro_source
+    else:
+        generated_source = tmp_path / f"generated-{source_format}"
+        generated_source.mkdir()
+        convert_package(
+            hydro_source,
+            generated_source,
+            source_format="hydro",
+            target_format=source_format,
+        )
+        if source_format == "icpc":
+            source_archive = next(generated_source.glob("*.zip"))
+        else:
+            source_archive = tmp_path / "hoj-source.zip"
+            _zip_directory(generated_source, source_archive)
+
+    converted = tmp_path / f"{source_format}-to-{target_format}"
+    converted.mkdir()
+    report = convert_package(
+        source_archive,
+        converted,
+        source_format=source_format,
+        target_format=target_format,
+    )
+    if target_format in {"hydro", "icpc"}:
+        target_archive = next(converted.glob("*.zip"))
+    else:
+        target_archive = tmp_path / "hoj-target.zip"
+        _zip_directory(converted, target_archive)
+
+    source_bundle = _read_bundle(
+        source_archive, source_format, tmp_path / "source-read"
+    )
+    target_bundle = _read_bundle(
+        target_archive, target_format, tmp_path / "target-read"
+    )
+    issues = [
+        ConversionIssue(
+            issue["severity"],
+            issue["code"],
+            issue["message"],
+            issue.get("problem"),
+            issue.get("field"),
+            issue.get("context", {}),
+        )
+        for issue in report["issues"]
+    ]
+    unexplained = compare_semantic_snapshots(
+        source_bundle.semantic_snapshot(),
+        target_bundle.semantic_snapshot(),
+        target_format=target_format,
+        issues=issues,
+    )
+
+    assert unexplained == []
+
+
+def test_large_fast_fixture_reports_progress_for_twenty_problems(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "large-generic.zip"
+    output = tmp_path / "output"
+    stream = StringIO()
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for problem_index in range(20):
+            root = f"p{problem_index:02d}"
+            archive.writestr(f"{root}/statement.md", f"# Problem {problem_index}\n")
+            for case_index in range(50):
+                archive.writestr(f"{root}/{case_index:03d}.in", f"{case_index}\n")
+                archive.writestr(f"{root}/{case_index:03d}.ans", f"{case_index}\n")
+
+    with ProgressReporter(
+        output_format="jsonl", stream=stream, heartbeat_seconds=0
+    ) as reporter:
+        report = convert_package(
+            source,
+            output,
+            source_format="generic",
+            target_format="hydro",
+            reporter=reporter,
+        )
+
+    assert report["problem_count"] == 20
+    assert len(list(output.glob("*.zip"))) == 20
+    events = [
+        json.loads(line.removeprefix("P2H_EVENT "))
+        for line in stream.getvalue().splitlines()
+    ]
+    phases = {event["phase"] for event in events}
+    assert phases == {
+        "validate_archive",
+        "extract",
+        "detect",
+        "read",
+        "validate_ir",
+        "write",
+        "validate_output",
+    }
+    write_events = [event for event in events if event["phase"] == "write"]
+    assert any(event["current"] == 20 for event in write_events)
+
+
+@pytest.mark.skipif(
+    os.getenv("P2H_RUN_NIGHTLY_LARGE") != "1",
+    reason="nightly 49,400-entry compatibility fixture",
+)
+def test_nightly_large_fixture_nears_archive_entry_limit(tmp_path: Path) -> None:
+    source = tmp_path / "nightly-large-generic.zip"
+    output = tmp_path / "output"
+    with zipfile.ZipFile(
+        source, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
+    ) as archive:
+        for problem_index in range(200):
+            root = f"p{problem_index:03d}"
+            archive.writestr(f"{root}/statement.md", f"# Problem {problem_index}\n")
+            for case_index in range(123):
+                archive.writestr(f"{root}/{case_index:03d}.in", f"{case_index}\n")
+                archive.writestr(f"{root}/{case_index:03d}.ans", f"{case_index}\n")
+
+    report = convert_package(
+        source,
+        output,
+        source_format="generic",
+        target_format="hydro",
+    )
+
+    assert report["problem_count"] == 200
+    assert len(list(output.glob("*.zip"))) == 200

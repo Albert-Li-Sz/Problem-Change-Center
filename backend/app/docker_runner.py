@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+import shutil
 
 # Docker is invoked with a fixed argv and shell=False.
 import subprocess  # nosec B404
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path, PurePosixPath
 
 from .config import Settings
@@ -30,7 +31,7 @@ def build_docker_command(
     cmd = _base_docker_command(settings, job_id, paths, runner_image)
 
     if not request.is_legacy_request:
-        _append_package_convert_args(cmd, request)
+        _append_package_convert_args(cmd, request, paths, settings)
     elif request.target == "hydro":
         _append_hydro_args(cmd, request)
     elif request.target == "domjudge":
@@ -327,7 +328,9 @@ def _append_hoj_to_domjudge_args(cmd: list[str], request: JobRequest) -> None:
         cmd.extend(["--only", slug])
 
 
-def _append_package_convert_args(cmd: list[str], request: JobRequest) -> None:
+def _append_package_convert_args(
+    cmd: list[str], request: JobRequest, paths: JobPaths, settings: Settings
+) -> None:
     cmd.extend(
         [
             "package-convert",
@@ -358,6 +361,16 @@ def _append_package_convert_args(cmd: list[str], request: JobRequest) -> None:
             request.options.polygon.missing_env,
             "--validator-mode",
             request.options.polygon.validator_mode,
+            "--progress-format",
+            "jsonl",
+            "--total-timeout",
+            str(settings.job_timeout_seconds),
+            "--idle-timeout",
+            str(settings.job_idle_timeout_seconds),
+            "--stage-timeout",
+            str(settings.job_stage_timeout_seconds),
+            "--problem-timeout",
+            str(settings.job_problem_timeout_seconds),
         ]
     )
     if request.options.icpc.rights_owner:
@@ -370,17 +383,25 @@ def _append_package_convert_args(cmd: list[str], request: JobRequest) -> None:
         cmd.append("--with-statement")
     if request.options.polygon.with_attachments:
         cmd.append("--with-attachments")
+    if paths.repair_plan_path.is_file():
+        cmd.extend(["--repair-plan", "/input/repair-plan.json"])
+        if paths.supplements_dir.is_dir():
+            cmd.extend(["--supplements-dir", "/input/supplements"])
     cmd.append("--run-doall" if request.options.polygon.run_doall else "--no-run-doall")
 
 
 def stop_container(settings: Settings, job_id: str) -> None:
     # The job id is validated and the Docker binary is administrator-configured.
-    subprocess.run(  # nosec B603
-        [settings.docker_bin, "rm", "-f", container_name(job_id)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        subprocess.run(  # nosec B603
+            [settings.docker_bin, "rm", "-f", container_name(job_id)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return
 
 
 def pack_output(
@@ -389,11 +410,34 @@ def pack_output(
     *,
     target: str = "archive",
     max_uncompressed_bytes: int = 1024 * 1024 * 1024,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> None:
+    temporary_result = result_path.with_name(f"{result_path.name}.tmp")
     if result_path.exists():
         result_path.unlink()
+    if temporary_result.exists():
+        temporary_result.unlink()
     try:
         _reject_output_symlinks(output_dir)
+        merge_hydro = target in {"hydro", "domjudge_to_hydro", "hoj_to_hydro"}
+        required_bytes = _output_uncompressed_size(
+            output_dir, expand_archives=merge_hydro
+        )
+        if required_bytes > max_uncompressed_bytes:
+            raise ValueError(
+                "output exceeds uncompressed size limit: requires "
+                f"{required_bytes} bytes, used={required_bytes} bytes, "
+                f"configured_limit={max_uncompressed_bytes} bytes"
+            )
+        disk = shutil.disk_usage(result_path.parent)
+        required_disk_bytes = required_bytes + max(1024 * 1024, required_bytes // 100)
+        if required_disk_bytes > disk.free:
+            raise ValueError(
+                "insufficient disk space for result package: "
+                f"required={required_disk_bytes} bytes used={disk.used} bytes "
+                f"available={disk.free} bytes "
+                f"configured_limit={max_uncompressed_bytes} bytes"
+            )
         if target in {"hydro", "domjudge_to_hydro", "hoj_to_hydro"}:
             hydro_packages = sorted(
                 path
@@ -403,22 +447,33 @@ def pack_output(
             if hydro_packages:
                 _pack_hydro_packages(
                     hydro_packages,
-                    result_path,
+                    temporary_result,
                     max_uncompressed_bytes=max_uncompressed_bytes,
+                    progress_callback=progress_callback,
                 )
+                temporary_result.replace(result_path)
                 return
 
         _pack_directory(
-            output_dir, result_path, max_uncompressed_bytes=max_uncompressed_bytes
+            output_dir,
+            temporary_result,
+            max_uncompressed_bytes=max_uncompressed_bytes,
+            progress_callback=progress_callback,
         )
+        temporary_result.replace(result_path)
     except Exception:
-        if result_path.exists():
-            result_path.unlink()
+        for path in (temporary_result, result_path):
+            if path.exists():
+                path.unlink()
         raise
 
 
 def _pack_directory(
-    output_dir: Path, result_path: Path, *, max_uncompressed_bytes: int
+    output_dir: Path,
+    result_path: Path,
+    *,
+    max_uncompressed_bytes: int,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> None:
     files = [path for path in sorted(output_dir.rglob("*")) if path.is_file()]
     if not files:
@@ -431,8 +486,18 @@ def _pack_directory(
         max_uncompressed_bytes=max_uncompressed_bytes,
     )
     with zipfile.ZipFile(result_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in files:
-            archive.write(path, path.relative_to(output_dir).as_posix())
+        for index, path in enumerate(files, start=1):
+            name = path.relative_to(output_dir).as_posix()
+            with (
+                path.open("rb") as source,
+                archive.open(name, "w", force_zip64=True) as destination,
+            ):
+                while chunk := source.read(1024 * 1024):
+                    destination.write(chunk)
+                    if progress_callback is not None:
+                        progress_callback(index - 1, len(files), f"packaging {name}")
+            if progress_callback is not None:
+                progress_callback(index, len(files), f"packaged {name}")
 
 
 def _reject_output_symlinks(output_dir: Path) -> None:
@@ -447,10 +512,12 @@ def _pack_hydro_packages(
     result_path: Path,
     *,
     max_uncompressed_bytes: int,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> None:
     seen: set[str] = set()
     total_bytes = 0
     total_entries = 0
+    expected_entries = sum(_zip_file_count(path) for path in package_paths)
     with zipfile.ZipFile(result_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for package_path in package_paths:
             with zipfile.ZipFile(package_path) as package:
@@ -458,11 +525,12 @@ def _pack_hydro_packages(
                     if info.is_dir():
                         continue
                     name = _safe_zip_member_name(info.filename)
-                    if name in seen:
+                    name_key = name.casefold()
+                    if name_key in seen:
                         raise ValueError(
                             f"duplicate Hydro package member while merging: {name}"
                         )
-                    seen.add(name)
+                    seen.add(name_key)
                     total_entries += 1
                     total_bytes += info.file_size
                     _validate_archive_member(
@@ -501,16 +569,59 @@ def _pack_hydro_packages(
                                     f"archive member expanded beyond declared size: {name}"
                                 )
                             target.write(chunk)
+                            if progress_callback is not None:
+                                progress_callback(
+                                    total_entries - 1,
+                                    expected_entries,
+                                    f"packaging {name}",
+                                )
+                    if progress_callback is not None:
+                        progress_callback(
+                            total_entries,
+                            expected_entries,
+                            f"packaging {name}",
+                        )
+
+
+def _output_uncompressed_size(output_dir: Path, *, expand_archives: bool) -> int:
+    total = 0
+    for path in sorted(output_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        if expand_archives and path.suffix.lower() == ".zip":
+            try:
+                with zipfile.ZipFile(path) as archive:
+                    total += sum(
+                        info.file_size
+                        for info in archive.infolist()
+                        if not info.is_dir()
+                    )
+                continue
+            except zipfile.BadZipFile:
+                pass
+        total += path.stat().st_size
+    return total
+
+
+def _zip_file_count(path: Path) -> int:
+    with zipfile.ZipFile(path) as archive:
+        return sum(not info.is_dir() for info in archive.infolist())
 
 
 def _validate_output_sizes(
     entries: Iterable[tuple[str, int]], *, max_uncompressed_bytes: int
 ) -> None:
     total_bytes = 0
+    seen: set[str] = set()
     for total_entries, (name, file_size) in enumerate(entries, start=1):
+        normalized = _safe_zip_member_name(name)
+        name_key = normalized.casefold()
+        if name_key in seen:
+            raise ValueError(f"duplicate output path: {normalized}")
+        seen.add(name_key)
         total_bytes += file_size
         _validate_archive_member(
-            name,
+            normalized,
             file_size=file_size,
             compress_size=file_size,
             total_entries=total_entries,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import stat
 import sys
 import threading
+import time
 import json
 import zipfile
 from dataclasses import replace
@@ -401,6 +402,7 @@ def test_cancel_during_pack_remains_cancelled(monkeypatch: pytest.MonkeyPatch) -
             *,
             target: str,
             max_uncompressed_bytes: int,
+            progress_callback: object | None = None,
         ) -> None:
             assert target == "hydro"
             assert max_uncompressed_bytes == 1024**3
@@ -422,6 +424,49 @@ def test_cancel_during_pack_remains_cancelled(monkeypatch: pytest.MonkeyPatch) -
         assert cancelled.deleted is False
         assert not thread.is_alive()
         assert not storage.paths_for(job_id).root.exists()
+
+
+def test_package_stage_timeout_removes_partial_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        fake_docker = root / "fake-docker"
+        _write_fake_docker(fake_docker, "#!/usr/bin/env bash\nexit 0\n")
+        settings = replace(
+            _settings(root, fake_docker, timeout=8),
+            job_stage_timeout_seconds=1,
+        )
+        storage = Storage(settings)
+        job_id = "1" * 32
+        _prepare_job(storage, job_id)
+        manager = JobManager(settings, storage)
+
+        def slow_pack(
+            _output_dir: Path,
+            result_path: Path,
+            *,
+            target: str,
+            max_uncompressed_bytes: int,
+            progress_callback: object | None = None,
+        ) -> None:
+            assert target == "hydro"
+            assert max_uncompressed_bytes == 1024**3
+            result_path.write_bytes(b"partial")
+            time.sleep(1.1)
+            assert callable(progress_callback)
+            progress_callback(0, 1, "still packaging")
+
+        monkeypatch.setattr("app.jobs.pack_output", slow_pack)
+        manager.start(JobRequest(job_id=job_id, pid_start="P1000", owner=1))
+        manager._runtime[job_id].thread.join(timeout=4)  # type: ignore[union-attr]
+
+        response = manager.response(job_id)
+        assert response.status == "failed"
+        assert response.timeout is not None
+        assert response.timeout.kind == "stage"
+        assert response.timeout.phase == "package"
+        assert not storage.paths_for(job_id).result_path.exists()
 
 
 def test_global_concurrency_limit_rejects_another_job(
@@ -475,6 +520,56 @@ def test_cleanup_expired_jobs_removes_only_inactive_expired_data() -> None:
         assert manager.cleanup_expired(now=now) == 1
         assert not storage.paths_for(expired_job).root.exists()
         assert storage.paths_for(current_job).root.exists()
+
+
+def test_recover_interrupted_marks_active_jobs_failed() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        fake_docker = root / "fake-docker"
+        _write_fake_docker(fake_docker, "#!/usr/bin/env bash\nexit 0\n")
+        settings = _settings(root, fake_docker)
+        storage = Storage(settings)
+        job_id = "a" * 32
+        _prepare_job(storage, job_id)
+        paths = storage.paths_for(job_id)
+        paths.result_path.write_bytes(b"partial")
+        manager = JobManager(settings, storage)
+
+        assert manager.recover_interrupted() == 1
+
+        metadata = storage.read_metadata(job_id)
+        assert metadata.status == "failed"
+        assert metadata.finished_at is not None
+        assert "backend restart" in (metadata.error or "")
+        assert not paths.result_path.exists()
+        assert "backend restart" in storage.read_logs(job_id)
+
+
+def test_shutdown_cancels_active_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        fake_docker = root / "fake-docker"
+        _write_fake_docker(fake_docker, "#!/usr/bin/env bash\nexit 0\n")
+        settings = _settings(root, fake_docker)
+        storage = Storage(settings)
+        job_id = "b" * 32
+        _prepare_job(storage, job_id)
+        manager = JobManager(settings, storage)
+        entered = threading.Event()
+
+        def wait_for_cancel(_request: JobRequest) -> None:
+            entered.set()
+            assert manager._runtime[job_id].cancel_event.wait(timeout=5)
+
+        monkeypatch.setattr(manager, "_run_job", wait_for_cancel)
+        manager.start(JobRequest(job_id=job_id))
+        assert entered.wait(timeout=5)
+
+        assert manager.shutdown() == 1
+        assert storage.read_metadata(job_id).status == "cancelled"
+        assert not manager._runtime[job_id].thread.is_alive()  # type: ignore[union-attr]
 
 
 def test_logs_are_truncated_at_the_configured_byte_limit() -> None:
@@ -576,3 +671,164 @@ def test_matrix_request_rejects_detected_source_mismatch() -> None:
 
         assert mismatch.value.status_code == 422
         assert "does not match" in str(mismatch.value.detail)
+
+
+def test_structured_progress_is_persisted_without_polluting_logs() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        fake_docker = root / "fake-docker"
+        _write_fake_docker(
+            fake_docker,
+            """#!/usr/bin/env bash
+if [ "${1:-}" = "rm" ]; then exit 0; fi
+printf '%s\n' 'P2H_EVENT {"schema_version":1,"sequence":1,"event":"progress","phase":"write","current":1,"total":2,"unit":"problems","problem":"sum","detail":"writing sum","timestamp":"2026-01-01T00:00:00+00:00"}'
+printf 'human readable line\n'
+exit 7
+""",
+        )
+        settings = _settings(root, fake_docker)
+        storage = Storage(settings)
+        job_id = "1" * 32
+        _prepare_job(storage, job_id)
+        manager = JobManager(settings, storage)
+
+        manager.start(
+            JobRequest(job_id=job_id, source_format="fps", target_format="hydro")
+        )
+        manager._runtime[job_id].thread.join(timeout=5)  # type: ignore[union-attr]
+
+        response = manager.response(job_id)
+        assert response.progress is not None
+        assert response.progress.phase == "write"
+        assert response.progress.current == 1
+        assert response.progress.total == 2
+        assert response.progress.problem == "sum"
+        logs = storage.read_logs(job_id)
+        assert "human readable line" in logs
+        assert "P2H_EVENT" not in logs
+
+
+@pytest.mark.parametrize(
+    ("kind", "settings_overrides", "event"),
+    [
+        ("idle", {"job_idle_timeout_seconds": 1}, ""),
+        (
+            "stage",
+            {
+                "job_idle_timeout_seconds": 10,
+                "job_stage_timeout_seconds": 1,
+            },
+            'P2H_EVENT {"schema_version":1,"sequence":1,"event":"phase_started","phase":"read","current":0,"total":1,"unit":"problems","problem":null,"detail":"reading","timestamp":"2026-01-01T00:00:00+00:00"}',
+        ),
+        (
+            "problem",
+            {
+                "job_idle_timeout_seconds": 10,
+                "job_stage_timeout_seconds": 10,
+                "job_problem_timeout_seconds": 1,
+            },
+            'P2H_EVENT {"schema_version":1,"sequence":1,"event":"progress","phase":"write","current":0,"total":1,"unit":"problems","problem":"sum","detail":"writing","timestamp":"2026-01-01T00:00:00+00:00"}',
+        ),
+    ],
+)
+def test_job_deadline_kinds_are_reported(
+    kind: str, settings_overrides: dict[str, int], event: str
+) -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        fake_docker = root / "fake-docker"
+        event_command = f"printf '%s\\n' '{event}'" if event else ""
+        _write_fake_docker(
+            fake_docker,
+            f"""#!/usr/bin/env bash
+if [ "${{1:-}}" = "rm" ]; then exit 0; fi
+{event_command}
+sleep 5
+""",
+        )
+        settings = replace(
+            _settings(root, fake_docker, timeout=8), **settings_overrides
+        )
+        storage = Storage(settings)
+        job_id = ({"idle": "2", "stage": "3", "problem": "4"}[kind]) * 32
+        _prepare_job(storage, job_id)
+        manager = JobManager(settings, storage)
+
+        manager.start(
+            JobRequest(job_id=job_id, source_format="fps", target_format="hydro")
+        )
+        manager._runtime[job_id].thread.join(timeout=4)  # type: ignore[union-attr]
+
+        response = manager.response(job_id)
+        assert response.status == "failed"
+        assert response.timeout is not None
+        assert response.timeout.kind == kind
+        assert "timed out" in (response.error or "")
+
+
+def test_heartbeat_events_do_not_mask_backend_idle_timeout() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        fake_docker = root / "fake-docker"
+        _write_fake_docker(
+            fake_docker,
+            """#!/usr/bin/env bash
+if [ "${1:-}" = "rm" ]; then exit 0; fi
+i=0
+while [ "$i" -lt 30 ]; do
+  printf '%s\n' 'P2H_EVENT {"schema_version":1,"sequence":1,"event":"heartbeat","phase":"read","current":0,"total":1,"unit":"problems","problem":null,"detail":"waiting","timestamp":"2026-01-01T00:00:00+00:00"}'
+  sleep 0.1
+  i=$((i + 1))
+done
+sleep 5
+""",
+        )
+        settings = replace(
+            _settings(root, fake_docker, timeout=8),
+            job_idle_timeout_seconds=1,
+            job_stage_timeout_seconds=10,
+        )
+        storage = Storage(settings)
+        job_id = "6" * 32
+        _prepare_job(storage, job_id)
+        manager = JobManager(settings, storage)
+
+        manager.start(
+            JobRequest(job_id=job_id, source_format="fps", target_format="hydro")
+        )
+        manager._runtime[job_id].thread.join(timeout=4)  # type: ignore[union-attr]
+
+        response = manager.response(job_id)
+        assert response.status == "failed"
+        assert response.timeout is not None
+        assert response.timeout.kind == "idle"
+
+
+def test_cancel_keeps_logs_and_metadata_for_diagnostics() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        fake_docker = root / "fake-docker"
+        _write_fake_docker(
+            fake_docker,
+            """#!/usr/bin/env bash
+if [ "${1:-}" = "rm" ]; then exit 0; fi
+printf 'started\n'
+sleep 5
+""",
+        )
+        settings = _settings(root, fake_docker)
+        storage = Storage(settings)
+        job_id = "5" * 32
+        _prepare_job(storage, job_id)
+        manager = JobManager(settings, storage)
+        manager.start(
+            JobRequest(job_id=job_id, source_format="fps", target_format="hydro")
+        )
+
+        response = manager.cancel(job_id)
+        manager._runtime[job_id].thread.join(timeout=4)  # type: ignore[union-attr]
+
+        assert response.status == "cancelled"
+        assert response.deleted is False
+        assert storage.paths_for(job_id).root.is_dir()
+        assert manager.response(job_id).status == "cancelled"

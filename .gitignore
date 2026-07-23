@@ -1,4 +1,5 @@
 .env
+production.env
 
 backend/.venv/
 backend/backend_data/

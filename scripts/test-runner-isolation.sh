@@ -3,18 +3,28 @@ set -euo pipefail
 
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 runner_image="${1:-p2h-runner:latest}"
+docker_bin="${P2H_DOCKER_BIN:-docker}"
 probe_dir="$project_root/security/isolation-probe"
-audit_dir="$(mktemp -d -t p2h-isolation-audit)"
+if [[ -n "${P2H_ISOLATION_AUDIT_ROOT:-}" ]]; then
+  [[ -d "$P2H_ISOLATION_AUDIT_ROOT" && -w "$P2H_ISOLATION_AUDIT_ROOT" ]] || {
+    printf 'error: P2H_ISOLATION_AUDIT_ROOT must be a writable directory\n' >&2
+    exit 1
+  }
+  audit_dir="$(mktemp -d "$P2H_ISOLATION_AUDIT_ROOT/.p2h-isolation-audit.XXXXXXXX")"
+else
+  audit_dir="$(mktemp -d -t p2h-isolation-audit)"
+fi
 
 cleanup() {
   rm -r -- "$audit_dir"
 }
 trap cleanup EXIT
 
+chmod 711 "$audit_dir"
 mkdir "$audit_dir/result"
 chmod 777 "$audit_dir/result"
 
-docker run --rm \
+"$docker_bin" run --rm \
   --network none \
   --read-only \
   --cap-drop ALL \

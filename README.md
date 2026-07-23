@@ -4,8 +4,12 @@
 
 项目提供 React Web 界面、FastAPI 任务服务和隔离 Docker runner，可自动识别题包格式、转换题面与评测数据、展示实时日志，并对无法无损表达的字段生成结构化报告。除 Polygon 的成熟优化链路外，其他格式统一经过 `ProblemBundle` 中间模型，因此不需要为每一种源/目标组合维护独立转换器。
 
+当前版本为 `0.6.0`。
+
 > [!IMPORTANT]
-> 本项目默认仅监听 `127.0.0.1`，没有用户认证。不要把服务直接暴露到局域网或公网；远程部署时必须在前面配置身份认证、TLS、限速和上传大小限制。
+> 本项目默认是仅监听 `127.0.0.1` 的本机模式。不要直接暴露开发服务器；
+> 公网部署必须启用 `production` 模式，并使用 [deploy/README.md](deploy/README.md)
+> 提供的认证、TLS、rootless Docker 和服务加固方案。
 
 ## 主要功能
 
@@ -14,8 +18,14 @@
 - 保留多语言题面、Markdown/HTML/PDF、测试点、样例、分组、依赖、checker、interactor、模板、附件和标程等信息。
 - DOMjudge/ICPC PDF 转 Hydro 时复制原 PDF，并使用 `@[pdf](file://文件名)` 生成 Hydro 题面引用。
 - 用 `warning`、`loss`、`fatal` 三级报告区分默认值、有损映射和影响判题正确性的错误。
+- 对 Hydro、ICPC 和 HOJ 生成规范化语义快照，核心六条双向链路会检查未报告的语义差异。
+- 提供八阶段结构化进度、15 秒心跳、总/空闲/阶段/单题超时和保留诊断的取消操作。
+- 缺失文件修复助手只提供受控候选或补充上传；用户确认后创建派生任务，不修改原 ZIP。
+- 解压、复制、哈希和打包使用有界缓冲；结果校验完成后才原子发布。
 - Polygon 包可显式运行 `doall.sh`；包含 C/C++ 源码时会优先在 Linux 内原生重编译，避免依赖 Wine。
 - 对上传、解压、任务调度、容器运行、输出复制和结果打包实施分层安全限制。
+- 提供显式生产模式：受信反向代理密钥、Host/Origin 校验、请求限流、请求体硬上限、
+  安全响应头、就绪探针、Caddy 和 systemd 加固模板。
 - 保留旧版七条转换命令和旧 API 字段，便于平滑升级。
 
 ## 目录
@@ -30,6 +40,7 @@
 - [CLI](#cli)
 - [API](#api)
 - [安全模型](#安全模型)
+- [生产部署](#生产部署)
 - [测试与验收](#测试与验收)
 - [常见问题](#常见问题)
 - [致谢](#致谢)
@@ -115,9 +126,10 @@ cd Polygon-to-Hydro-or-Domujudge-Web-UI
 3. 选择目标格式。
 4. 按需填写题号起点、所有者、ICPC profile、FPS profile 等参数。
 5. Polygon 包只有在缺少完整测试数据时才启用“运行 `doall.sh`”。
-6. 启动任务并查看实时日志。
+6. 启动任务并查看阶段进度、当前题目、阶段耗时、最后活动时间和实时日志。
 7. 检查 warning/loss/fatal 报告。
-8. 下载题包，并在目标 OJ 的测试环境中做最终复核。
+8. 如果报告提供缺失文件建议，显式选择包内候选或上传补充文件，然后创建派生任务重新转换。
+9. 下载题包，并在目标 OJ 的测试环境中做最终复核。
 
 自动识别只有在唯一候选置信度达到 `0.8` 时才会直接采用。格式冲突或结构不足时，系统会返回候选证据，不会静默猜测。
 
@@ -134,7 +146,7 @@ cd Polygon-to-Hydro-or-Domujudge-Web-UI
 - `warn`：默认值。允许有损转换，结果与报告同时生成。
 - `error`：任何 `loss` 都提升为失败，适合迁移验收或自动化流水线。
 
-报告通过 Web UI 展示，也可从 `GET /api/jobs/{id}/report` 读取。报告是独立文件，不会混入目标 OJ 的可导入题包。
+新 runner 生成 schema v2 报告，包含语义摘要、修复建议和已应用修复；后端仍可读取 schema v1，便于滚动升级。报告通过 Web UI 展示，也可从 `GET /api/jobs/{id}/report` 读取。报告是独立文件，不会混入目标 OJ 的可导入题包。
 
 转换失败时不会提供 writer 留下的半成品；容器只允许导出结构化失败报告。
 
@@ -220,7 +232,7 @@ cd Polygon-to-Hydro-or-Domujudge-Web-UI
 
 ## 缺失文件如何处理
 
-转换器不会猜测或伪造会影响判题结果的文件。
+转换器不会猜测或伪造会影响判题结果的文件，也不会未经确认修改上传包。
 
 | 情况 | 处理结果 | 建议修复方式 |
 |---|---|---|
@@ -235,6 +247,20 @@ cd Polygon-to-Hydro-or-Domujudge-Web-UI
 | 本地缺少 runner 镜像 | 启动前失败 | 运行 `./install.sh` 或重新构建对应镜像 |
 
 Windows 中不区分大小写的路径在 Linux runner 中可能失效，例如 `Check.cpp` 与 `check.cpp` 是不同文件。修复后请重新打包并确认上传的是新 ZIP。
+
+schema v2 报告会为可修复的缺失文件记录预期路径、角色、来源配置位置和所属题目。候选规则固定为：
+
+- 仅大小写不同：`1.0`。
+- 同目录、同 stem，`.out/.ans` 等已知扩展名变化：`0.95`。
+- ZIP 内其他目录中唯一同名文件：`0.85`。
+- 低于 `0.8` 或存在歧义：不提供默认候选，只允许人工选择补充文件。
+
+checker、interactor、validator、标程、样例和正式测试数据不会互相替代。修复请求只能引用当前报告中存在的 suggestion ID，不能修改预期路径；补充文件会重新经过大小、路径、符号链接、重复路径、大小写冲突和压缩包预算检查。成功确认后：
+
+1. 保留原任务、原 ZIP 哈希、日志和失败报告。
+2. 保存独立的 `repair-plan.json` 和补充文件哈希。
+3. 创建带父任务 ID 和修复版本的新任务。
+4. runner 在临时目录构造修复副本，并使用原任务的规范化转换参数从头执行。
 
 ## 安装与配置
 
@@ -273,7 +299,10 @@ Windows 中不区分大小写的路径在 Linux runner 中可能失效，例如 
 | `P2H_DATA_DIR` | `~/.p2h-web-ui/backend_data` | 上传、任务元数据和结果目录 |
 | `P2H_RUNNER_IMAGE` | `p2h-runner` | runner 镜像 |
 | `P2H_MAX_UPLOAD_BYTES` | `536870912` | 单次上传上限 |
-| `P2H_JOB_TIMEOUT_SECONDS` | `600` | 单任务超时 |
+| `P2H_JOB_TIMEOUT_SECONDS` | `7200` | 单任务总超时 |
+| `P2H_JOB_IDLE_TIMEOUT_SECONDS` | `300` | 没有日志或心跳的空闲超时 |
+| `P2H_JOB_STAGE_TIMEOUT_SECONDS` | `1800` | 单转换阶段超时 |
+| `P2H_JOB_PROBLEM_TIMEOUT_SECONDS` | `1200` | 单题处理超时 |
 | `P2H_JOB_TTL_SECONDS` | `86400` | 完成任务保留时间 |
 | `P2H_MAX_CONCURRENT_JOBS` | `2` | 最大并发任务数 |
 | `P2H_MAX_STORED_JOBS` | `100` | 最大保存任务数 |
@@ -287,6 +316,15 @@ Windows 中不区分大小写的路径在 Linux runner 中可能失效，例如 
 | `P2H_DOCKER_TMP_SIZE` | `512m` | `/tmp` tmpfs |
 | `P2H_DOCKER_WORK_SIZE` | `1g` | `/work` tmpfs 与展开总量基准 |
 | `P2H_DOCKER_OUTPUT_SIZE` | `1g` | `/output` tmpfs |
+| `P2H_DEPLOYMENT_MODE` | `local` | `local` 或显式加固的 `production` |
+| `P2H_ALLOWED_HOSTS` | 本机地址 | 允许的 HTTP Host，逗号分隔 |
+| `P2H_ALLOWED_ORIGINS` | Vite 本机地址 | 允许的浏览器 Origin，逗号分隔 |
+| `P2H_TRUSTED_PROXY_SECRET` | 空 | 生产反向代理共享密钥，随机 32+ 字符 |
+| `P2H_MAX_REQUEST_BODY_BYTES` | 上传上限 + 16 MiB | 含 multipart 开销的 HTTP 请求体硬上限 |
+| `P2H_RATE_LIMIT_REQUESTS_PER_MINUTE` | `240` | 单客户端普通 API 每分钟请求数 |
+| `P2H_RATE_LIMIT_UPLOADS_PER_MINUTE` | `12` | 单客户端上传/修复每分钟请求数 |
+| `P2H_READINESS_TIMEOUT_SECONDS` | `5` | Docker 就绪检查超时 |
+| `P2H_HSTS_MAX_AGE_SECONDS` | `31536000` | 生产 HSTS 秒数；`0` 禁用 |
 | `P2H_BACKEND_HOST` | `127.0.0.1` | 后端监听地址 |
 | `P2H_BACKEND_PORT` | `8000` | 后端端口 |
 | `P2H_FRONTEND_HOST` | `127.0.0.1` | 前端监听地址 |
@@ -365,7 +403,19 @@ package-convert INPUT.zip \
 --icpc-profile legacy-icpc|2025-09
 --fps-profile hustoj-1.6|qduoj-1.2
 --run-doall
+--progress-format text|jsonl|none
+--total-timeout 7200
+--idle-timeout 300
+--stage-timeout 1800
+--problem-timeout 1200
+--repair-plan repair-plan.json
+--supplements-dir supplements/
 ```
+
+JSONL 进度行以 `P2H_EVENT ` 开头，固定阶段为
+`validate_archive`、`extract`、`detect`、`read`、`validate_ir`、
+`write`、`validate_output` 和 `package`。直接运行 CLI 与 Web 后端使用相同
+的四级超时；发生超时时返回非零状态，不发布半成品。
 
 查看完整帮助：
 
@@ -389,14 +439,19 @@ hoj-to-domjudge
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/health` | 健康检查 |
+| `GET` | `/api/health` | 兼容健康检查 |
+| `GET` | `/api/health/live` | 仅报告进程存活，不返回运行配置 |
+| `GET` | `/api/health/ready` | 检查数据目录、Docker daemon 和 runner 镜像 |
 | `POST` | `/api/inspect` | 上传并检查 ZIP，返回任务 ID 与格式候选 |
 | `POST` | `/api/jobs` | 启动转换 |
 | `GET` | `/api/jobs/{id}` | 查询状态 |
 | `GET` | `/api/jobs/{id}/logs` | 获取纯文本日志 |
 | `GET` | `/api/jobs/{id}/report` | 获取结构化转换报告 |
+| `POST` | `/api/jobs/{id}/cancel` | 取消运行任务，保留日志、报告和超时诊断 |
+| `GET` | `/api/jobs/{id}/repairs` | 获取报告中的修复建议与已应用修复 |
+| `POST` | `/api/jobs/{id}/repairs` | 确认候选/上传补充文件并创建派生任务 |
 | `GET` | `/api/jobs/{id}/download` | 下载成功结果 |
-| `DELETE` | `/api/jobs/{id}` | 取消或删除任务 |
+| `DELETE` | `/api/jobs/{id}` | 清理终态任务；运行中旧行为兼容保留一个小版本 |
 
 上传：
 
@@ -432,6 +487,11 @@ curl -X POST http://127.0.0.1:8000/api/jobs \
 
 旧版 `target` 七个枚举仍在一个小版本周期内接受。旧字段和新字段同时出现时返回 `422`，避免参数含义冲突。
 
+`JobResponse.progress` 返回阶段、完成量、单位、当前题目、说明、阶段开始和
+最后活动时间；`JobResponse.timeout` 返回 `overall`、`idle`、`stage` 或
+`problem` 及对应限制。取消后的任务状态为 `cancelled`，下载不可用，但诊断
+信息继续保留到 TTL 或显式 `DELETE`。
+
 ## 安全模型
 
 ### 上传与解析
@@ -457,6 +517,40 @@ curl -X POST http://127.0.0.1:8000/api/jobs \
 除用户显式启用的 Polygon `doall.sh` 外，转换器不会执行导入包中的 checker、generator、validator、interactor 或脚本。
 
 Docker 是风险降低措施，不是绝对沙箱。处理不可信第三方题包的高安全环境应进一步采用 gVisor、Kata Containers、Firecracker 或隔离主机。
+
+### Web 与生产边界
+
+- `local` 模式继续允许 Vite 本机开发，不要求代理密钥。
+- `production` 模式启动时强制要求明确的 Host、HTTPS Origin 和随机代理密钥；
+  通配符、弱密钥与非 HTTPS 公网 Origin 会直接导致启动失败。
+- 除最小存活探针外，所有生产 API 请求必须携带 Caddy 覆盖并注入的代理密钥，
+  防止绕过认证代理直连后端。
+- 状态变更请求拒绝跨站 `Origin`、`Referer` 和 `Sec-Fetch-Site`，降低 Basic Auth
+  自动携带凭据造成的 CSRF 风险。
+- HTTP 请求体在 multipart 解析前同时检查声明大小和实际流式字节数；Caddy
+  还设置独立的外层限制。
+- 单 worker 内的有界限流器分别限制普通 API 与上传/修复请求。生产服务固定
+  `--workers 1`，不支持多个后端实例共享同一任务目录。
+- 正常停机主动取消任务和删除 runner 容器；重启后遗留的 queued/running 任务
+  会标记为失败，不会静默重复执行。
+
+## 生产部署
+
+仓库提供：
+
+- [deploy/production.env.example](deploy/production.env.example)：生产变量清单；
+- [deploy/Caddyfile](deploy/Caddyfile)：HTTPS、Basic Auth、请求上限、静态前端、
+  代理密钥注入与日志轮转；
+- [deploy/systemd/oj-package-converter.service](deploy/systemd/oj-package-converter.service)：
+  单 worker、只读系统目录、空 capability、私有 `/tmp` 和优雅停机；
+- [scripts/production-check.sh](scripts/production-check.sh)：不执行环境文件内容的
+  配置、权限、rootless Docker、runner、前端和 Caddy 预检；
+- [deploy/README.md](deploy/README.md)：安装、验证、监控、备份、升级、回滚和
+  事件处理手册。
+
+推荐使用专用 Linux 主机或 VM、Caddy 2.10+、rootless Docker 和仅开放 80/443
+的防火墙。Docker 官方说明普通 `docker` 组具有 root 级权限，因此生产模板不会
+把服务用户加入 rootful Docker 组。
 
 ## 测试与验收
 
@@ -489,6 +583,10 @@ docker compose --profile wine build runner-wine
 ./scripts/test-runner-isolation.sh p2h-runner-wine
 ```
 
+生产配置还会在 CI 中使用 Caddy 2.10 官方镜像执行 `caddy validate`。实际部署前
+运行 `scripts/production-check.sh`；它会验证密钥占位、环境文件权限、后端配置、
+rootless Docker/cgroup 驱动、runner 镜像并真实执行隔离探针。
+
 依赖与镜像：
 
 ```bash
@@ -505,14 +603,26 @@ ICPC 输出建议再做上游交叉校验：
 
 项目测试包含各适配器的格式 → IR、IR → 格式、源/目标矩阵冒烟、旧 API、loss policy、缺题面、XXE/XML Bomb、YAML alias bomb、Zip Bomb、目录穿越、重复文件名、超大 Base64、容器隔离和任务竞态回归。
 
-本轮发布验收结果：
+`compat/versions.lock.json` 固定 Hydro 4.19.x、DOMjudge 9.0.1 和 HOJ v4.6
+的不可变提交；`python3 compat/check_lock.py` 校验锁文件。原创 CC0 最小语料
+由 `python3 compat/corpus/build.py OUTPUT` 生成，覆盖 ACM、OI 依赖、文件
+IO、checker、交互、PDF、多语言、附件、模板、标程和缺失答案。
 
-- 后端 178 项测试通过。
-- 前端测试、TypeScript 检查和生产构建通过。
-- Ruff、Bandit、ShellCheck、pip check、npm audit 和 Git diff 检查通过。
-- 普通/Wine runner 隔离探针通过。
-- 真实 13 题 Polygon contest → Hydro：13/13 成功，0 warning，0 loss。
-- ICPC legacy 输出通过 `problemtools`，ICPC `2025-09` 输出通过 BAPCtools。
+`.github/workflows/quality.yml` 在提交时运行完整快速测试，并在夜间/手动触发
+时构建 runner 和执行隔离探针。真实平台导入、AC/WA、特殊 checker 和 OI
+得分验收需要受保护的临时实例与管理员凭据，具体版本与执行约束见
+`compat/README.md`；凭据不进入仓库、fixture、日志或转换报告。
+
+`0.6.0` 本地发布基线：后端 `229 passed, 1 nightly skipped`，前端 6 项测试
+与生产构建通过；49,400 条目夜间用例单独通过；Ruff、Bandit、ShellCheck、
+pip-audit、npm audit 和依赖完整性检查通过；普通/Wine runner 均完成重建和
+隔离探针。受限 Docker 中的五题兼容语料已完成 Hydro → ICPC、Hydro → HOJ
+以及“缺答案失败 → 确认候选 → 派生任务成功”的真实转换。
+
+Grype 的 `--fail-on high --only-fixed` 镜像门禁通过，无 High/Critical 发现。
+当前普通镜像仍报告 3 项 Python 3.14.6 Medium，Wine 镜像另报告 1 项 zlib
+Medium；上游给出的修复版本尚未进入本项目当前稳定基础镜像，发布时继续跟踪，
+不会用 VEX 把可达性尚未确认的问题静默隐藏。
 
 ## 常见问题
 
@@ -558,8 +668,9 @@ ICPC 输出建议再做上游交叉校验：
 backend/                     FastAPI API、存储、任务状态和 Docker 调度
 frontend/                    React 19 + Vite + TypeScript Web UI
 runner/                      中间模型、格式适配器、兼容桥与安全入口
-scripts/                     安装、启动、安全扫描和隔离测试
+scripts/                     安装、启动、安全扫描、生产预检和隔离测试
 security/                    隔离探针与 VEX 说明
+deploy/                      Caddy、systemd、生产变量模板与运维手册
 docker-compose.yml           普通/Wine runner 构建配置
 install.sh                   一键安装入口
 ```

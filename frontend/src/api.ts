@@ -27,6 +27,23 @@ export type ConversionIssue = {
   message: string;
   problem: string | null;
   field: string | null;
+  context?: Record<string, string>;
+};
+
+export type RepairCandidate = {
+  path: string;
+  strategy: "case-only" | "extension-alias" | "unique-basename";
+  confidence: number;
+};
+
+export type RepairSuggestion = {
+  id: string;
+  issue_code: string;
+  expected_path: string;
+  role: string;
+  problem: string | null;
+  candidates: RepairCandidate[];
+  requires_upload: boolean;
 };
 
 export type ConversionReport = {
@@ -37,6 +54,10 @@ export type ConversionReport = {
   counts: { warning: number; loss: number; fatal: number };
   issues: ConversionIssue[];
   artifacts: string[];
+  repair_ready?: boolean;
+  repair_suggestions?: RepairSuggestion[];
+  applied_repairs?: Array<Record<string, string>>;
+  source_semantic_digest?: string | null;
 };
 
 export type JobResponse = {
@@ -52,6 +73,22 @@ export type JobResponse = {
   target_format: string | null;
   report_ready: boolean;
   report_counts: { warning: number; loss: number; fatal: number };
+  progress?: {
+    phase: "validate_archive" | "extract" | "detect" | "read" | "validate_ir" | "write" | "validate_output" | "package";
+    current: number | null;
+    total: number | null;
+    unit: string | null;
+    problem: string | null;
+    detail: string | null;
+    started_at: string;
+    last_activity_at: string;
+  } | null;
+  timeout?: {
+    kind: "overall" | "idle" | "stage" | "problem";
+    limit_seconds: number;
+    phase: string | null;
+    problem: string | null;
+  } | null;
 };
 
 export type JobRequest = {
@@ -173,6 +210,32 @@ export async function deleteJob(jobId: string): Promise<void> {
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response));
   }
+}
+
+export async function cancelJob(jobId: string): Promise<void> {
+  const response = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+}
+
+export async function applyRepairs(
+  jobId: string,
+  selections: Array<{
+    suggestion_id: string;
+    candidate_path?: string;
+    upload_name?: string;
+  }>,
+  files: File[]
+): Promise<JobResponse> {
+  const form = new FormData();
+  form.append("plan", JSON.stringify({ selections }));
+  for (const file of files) form.append("files", file, file.name);
+  const response = await fetch(`/api/jobs/${jobId}/repairs`, {
+    method: "POST",
+    body: form
+  });
+  return parseResponse<JobResponse>(response);
 }
 
 export function downloadUrl(jobId: string): string {

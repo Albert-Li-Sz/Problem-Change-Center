@@ -6,6 +6,17 @@ from pydantic import BaseModel, Field, PrivateAttr, StringConstraints, model_val
 
 
 JobStatus = Literal["queued", "running", "success", "failed", "cancelled"]
+ProgressPhase = Literal[
+    "validate_archive",
+    "extract",
+    "detect",
+    "read",
+    "validate_ir",
+    "write",
+    "validate_output",
+    "package",
+]
+TimeoutKind = Literal["overall", "idle", "stage", "problem"]
 MissingEnvPolicy = Literal["warn", "error"]
 LegacyTargetFormat = Literal[
     "hydro",
@@ -159,6 +170,24 @@ class ReportCounts(BaseModel):
     fatal: int = 0
 
 
+class JobProgress(BaseModel):
+    phase: ProgressPhase
+    current: int | None = Field(default=None, ge=0)
+    total: int | None = Field(default=None, ge=0)
+    unit: str | None = Field(default=None, max_length=32)
+    problem: str | None = Field(default=None, max_length=256)
+    detail: str | None = Field(default=None, max_length=1024)
+    started_at: str
+    last_activity_at: str
+
+
+class JobTimeout(BaseModel):
+    kind: TimeoutKind
+    limit_seconds: int = Field(ge=1)
+    phase: ProgressPhase | None = None
+    problem: str | None = Field(default=None, max_length=256)
+
+
 class JobResponse(BaseModel):
     id: str
     status: JobStatus
@@ -172,9 +201,43 @@ class JobResponse(BaseModel):
     target_format: str | None = None
     report_ready: bool = False
     report_counts: ReportCounts = Field(default_factory=ReportCounts)
+    progress: JobProgress | None = None
+    timeout: JobTimeout | None = None
 
 
 class DeleteResponse(BaseModel):
     id: str
     status: JobStatus
     deleted: bool
+
+
+class RepairChoice(BaseModel):
+    suggestion_id: str = Field(min_length=24, max_length=24, pattern=r"^[0-9a-f]{24}$")
+    candidate_path: str | None = Field(default=None, min_length=1, max_length=1024)
+    upload_name: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def choose_one_source(self) -> "RepairChoice":
+        if (self.candidate_path is None) == (self.upload_name is None):
+            raise ValueError(
+                "repair choice must select exactly one candidate_path or upload_name"
+            )
+        return self
+
+
+class RepairRequest(BaseModel):
+    selections: list[RepairChoice] = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def unique_suggestions(self) -> "RepairRequest":
+        identifiers = [selection.suggestion_id for selection in self.selections]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("repair suggestion cannot be selected more than once")
+        upload_names = [
+            selection.upload_name
+            for selection in self.selections
+            if selection.upload_name is not None
+        ]
+        if len(upload_names) != len(set(upload_names)):
+            raise ValueError("repair upload names must be unique")
+        return self

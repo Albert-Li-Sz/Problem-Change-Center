@@ -474,6 +474,24 @@ def test_pack_output_merges_hydro_problem_packages() -> None:
             assert archive.namelist() == ["P1000/problem.yaml", "P1001/problem.yaml"]
 
 
+def test_pack_output_rejects_case_insensitive_hydro_member_collisions() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        output_dir = root / "output"
+        output_dir.mkdir()
+        result_path = root / "result.zip"
+
+        with zipfile.ZipFile(output_dir / "a.zip", "w") as archive:
+            archive.writestr("P1000/problem.yaml", "title: A\n")
+        with zipfile.ZipFile(output_dir / "b.zip", "w") as archive:
+            archive.writestr("p1000/problem.yaml", "title: B\n")
+
+        with pytest.raises(ValueError, match="duplicate Hydro package member"):
+            pack_output(output_dir, result_path, target="hydro")
+
+        assert not result_path.exists()
+
+
 def test_pack_output_keeps_non_hydro_packages_nested() -> None:
     with TemporaryDirectory() as td:
         root = Path(td)

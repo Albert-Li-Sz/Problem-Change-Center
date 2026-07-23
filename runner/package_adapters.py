@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
+from urllib.parse import unquote
 
 from defusedxml import ElementTree as DefusedElementTree
 
@@ -29,6 +30,7 @@ from package_security import (
     load_yaml_file,
     read_limited_text,
 )
+from progress import ProgressReporter
 
 
 READABLE_FORMATS = ("hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj", "generic")
@@ -70,7 +72,13 @@ class Adapter:
     format: str
     detect: Callable[[Path], Detection | None]
     read: Callable[
-        [Path, Path, Iterable[str], bridge.ArchiveExtractionBudget | None],
+        [
+            Path,
+            Path,
+            Iterable[str],
+            bridge.ArchiveExtractionBudget | None,
+            ProgressReporter | None,
+        ],
         ProblemBundle,
     ]
     validate_target: Callable[[ProblemBundle, dict[str, Any]], None] | None
@@ -218,11 +226,29 @@ def _filter_problems(problems: list[Problem], only: Iterable[str]) -> list[Probl
     return selected
 
 
+def _report_read_progress(
+    reporter: ProgressReporter | None,
+    current: int,
+    total: int,
+    problem: str,
+    detail: str,
+) -> None:
+    if reporter is not None:
+        reporter.update(
+            current=current,
+            total=total,
+            unit="problems",
+            problem=problem,
+            detail=f"{detail}: {problem}",
+        )
+
+
 def _validate_hydro_declared_cases(
     bundle: ProblemBundle,
     problem: str,
     testdata_dir: Path,
     config: dict[str, Any],
+    source_root: Path,
 ) -> None:
     for index, (raw, _) in enumerate(bridge._iter_hydro_config_cases(config), start=1):
         if isinstance(raw, str):
@@ -265,6 +291,12 @@ def _validate_hydro_declared_cases(
                     f"Hydro test case #{index} references a missing {role} file: {path.name}",
                     problem=problem,
                     field="cases",
+                    context={
+                        "expected_path": path.relative_to(source_root).as_posix(),
+                        "role": role,
+                        "source": "testdata/config.yaml",
+                        "source_location": "testdata/config.yaml",
+                    },
                 )
 
 
@@ -306,6 +338,7 @@ def read_hydro(
     workspace: Path,
     only: Iterable[str],
     budget: bridge.ArchiveExtractionBudget | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> ProblemBundle:
     package_root = bridge._strip_single_root(root)
     problem_dirs = bridge._find_hydro_problems(package_root)
@@ -314,6 +347,9 @@ def read_hydro(
     problems: list[Problem] = []
     bundle = ProblemBundle("hydro", problems)
     for index, problem_dir in enumerate(problem_dirs, start=1):
+        _report_read_progress(
+            reporter, index - 1, len(problem_dirs), problem_dir.name, "reading Hydro"
+        )
         meta = load_yaml_file(problem_dir / "problem.yaml")
         config = load_yaml_file(problem_dir / "testdata" / "config.yaml")
         pid = str(meta.get("pid") or meta.get("id") or problem_dir.name)
@@ -328,23 +364,61 @@ def read_hydro(
             if pdf is not None:
                 statements.append(Statement(language, "pdf", path=pdf))
             else:
+                statement_text = read_limited_text(statement_path)
+                pdf_reference = re.fullmatch(
+                    r"\s*@\[pdf\]\(([^)]+)\)\s*", statement_text
+                )
+                if pdf_reference is not None:
+                    source = unquote(pdf_reference.group(1).strip())
+                    if source.startswith("file://"):
+                        source = source.removeprefix("file://")
+                    if "://" not in source:
+                        expected = bridge._safe_join(
+                            problem_dir / "additional_file", source
+                        )
+                        bundle.add_issue(
+                            "fatal",
+                            "hydro-missing-statement-pdf",
+                            f"Hydro statement references a missing PDF file: {expected.name}",
+                            problem=slug,
+                            field="statements",
+                            context={
+                                "expected_path": expected.relative_to(root).as_posix(),
+                                "role": "statement-pdf",
+                                "source": statement_path.relative_to(root).as_posix(),
+                                "source_location": statement_path.relative_to(
+                                    root
+                                ).as_posix(),
+                            },
+                        )
+                        statements.append(Statement(language, "pdf", path=expected))
+                        continue
                 statements.append(
-                    Statement(
-                        language, "markdown", content=read_limited_text(statement_path)
-                    )
+                    Statement(language, "markdown", content=statement_text)
                 )
         groups, case_to_group = _case_groups_from_hydro(config)
         cases = []
         hydro_case_names: dict[str, str] = {}
-        _validate_hydro_declared_cases(bundle, slug, problem_dir / "testdata", config)
+        _validate_hydro_declared_cases(
+            bundle, slug, problem_dir / "testdata", config, root
+        )
         unpaired = _unpaired_case_files(problem_dir / "testdata")
         if unpaired:
+            missing_path, missing_role = _missing_partner_for_unpaired(
+                problem_dir / "testdata", unpaired[0]
+            )
             bundle.add_issue(
                 "fatal",
                 "hydro-unpaired-test-file",
                 f"Hydro testdata contains an unpaired file: {unpaired[0]}",
                 problem=slug,
                 field="cases",
+                context={
+                    "expected_path": missing_path.relative_to(root).as_posix(),
+                    "role": missing_role,
+                    "source": "testdata directory",
+                    "source_location": "testdata directory",
+                },
             )
         for case in bridge._load_hydro_cases(problem_dir, config):
             rel = case.input_path.relative_to(problem_dir / "testdata").as_posix()
@@ -401,6 +475,12 @@ def read_hydro(
                     f"Hydro config references a missing {kind} file: {path.name}",
                     problem=slug,
                     field=kind,
+                    context={
+                        "expected_path": path.relative_to(root).as_posix(),
+                        "role": kind,
+                        "source": "testdata/config.yaml",
+                        "source_location": "testdata/config.yaml",
+                    },
                 )
         problem_type = (
             "interactive" if bridge._is_hydro_interactive(config) else "default"
@@ -495,6 +575,9 @@ def read_hydro(
                 extra={"hydro_meta": meta, "hydro_config": config, "index": index},
             )
         )
+        _report_read_progress(
+            reporter, index, len(problem_dirs), slug, "read Hydro problem"
+        )
     bundle.problems = _filter_problems(problems, only)
     return bundle
 
@@ -524,11 +607,27 @@ def _generated_verbatim_tex_body(text: str) -> str | None:
     return "\n".join(lines[2:-1]).rstrip("\n") + "\n"
 
 
+def _is_generated_hash_validator(path: Path) -> bool:
+    if path.suffix.lower() != ".py":
+        return False
+    try:
+        content = read_limited_text(path)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return (
+        "ALLOWED = [" in content
+        and "hashlib.sha256" in content
+        and "digest in ALLOWED" in content
+        and "SystemExit(42" in content
+    )
+
+
 def read_icpc(
     root: Path,
     workspace: Path,
     only: Iterable[str],
     budget: bridge.ArchiveExtractionBudget | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> ProblemBundle:
     problem_dirs = _find_icpc_dirs(root)
     if not problem_dirs:
@@ -536,6 +635,9 @@ def read_icpc(
     problems: list[Problem] = []
     bundle = ProblemBundle("icpc", problems)
     for index, problem_dir in enumerate(problem_dirs, start=1):
+        _report_read_progress(
+            reporter, index - 1, len(problem_dirs), problem_dir.name, "reading ICPC"
+        )
         meta = load_yaml_file(problem_dir / "problem.yaml")
         ini = bridge._read_domjudge_ini(problem_dir / "domjudge-problem.ini")
         slug = bridge._domjudge_problem_slug(problem_dir, meta, ini)
@@ -605,14 +707,24 @@ def read_icpc(
         ):
             unpaired = _unpaired_case_files(data_directory)
             if unpaired:
+                missing_path, missing_role = _missing_partner_for_unpaired(
+                    data_directory, unpaired[0]
+                )
                 bundle.add_issue(
                     "fatal",
                     "icpc-unpaired-test",
                     f"ICPC data directory contains an unpaired test file: {unpaired[0]}",
                     problem=slug,
                     field="cases",
+                    context={
+                        "expected_path": missing_path.relative_to(root).as_posix(),
+                        "role": missing_role,
+                        "source": "data directory",
+                        "source_location": "data directory",
+                    },
                 )
         validation = str(meta.get("validation") or "").lower()
+        is_interactive = "interactive" in validation
         checker_path = _find_first_source(
             problem_dir / "output_validator"
         ) or _find_first_source(problem_dir / "output_validators" / "checker")
@@ -620,20 +732,46 @@ def read_icpc(
             problem_dir / "output_validators" / "interactor"
         )
         validator_path = _find_first_source(problem_dir / "input_validators")
-        if "interactive" in validation and interactor_path is None:
+        if validator_path is not None and _is_generated_hash_validator(validator_path):
+            validator_path = None
+        if is_interactive and interactor_path is None:
             interactor_path = checker_path
             checker_path = None
+            if interactor_path is None:
+                expected = (
+                    problem_dir / "output_validators" / "interactor" / "interactor.cpp"
+                )
+                bundle.add_issue(
+                    "fatal",
+                    "icpc-missing-interactor",
+                    "ICPC metadata declares an interactive problem but no interactor source was found",
+                    problem=slug,
+                    field="interactor",
+                    context={
+                        "expected_path": expected.relative_to(root).as_posix(),
+                        "role": "interactor",
+                        "source": "problem.yaml",
+                        "source_location": "problem.yaml",
+                    },
+                )
         elif (
-            "interactive" not in validation
+            not is_interactive
             and validation.startswith("custom")
             and checker_path is None
         ):
+            expected = problem_dir / "output_validators" / "checker" / "checker.cpp"
             bundle.add_issue(
                 "fatal",
                 "icpc-missing-checker",
                 "ICPC metadata requires custom validation but no output validator source was found",
                 problem=slug,
                 field="checker",
+                context={
+                    "expected_path": expected.relative_to(root).as_posix(),
+                    "role": "checker",
+                    "source": "problem.yaml",
+                    "source_location": "problem.yaml",
+                },
             )
         for base in (
             problem_dir / "attachments",
@@ -686,7 +824,7 @@ def read_icpc(
                 time_ms=max(1, int(float(time_seconds) * 1000)),
                 memory_mb=memory_mb,
                 source=str(meta.get("source")) if meta.get("source") else None,
-                problem_type="interactive" if interactor_path else "default",
+                problem_type="interactive" if is_interactive else "default",
                 checker=_program_from_path("checker", checker_path, mode="testlib")
                 if checker_path
                 else None,
@@ -701,6 +839,9 @@ def read_icpc(
                 extra={"icpc_meta": meta, "index": index},
             )
         )
+        _report_read_progress(
+            reporter, index, len(problem_dirs), slug, "read ICPC problem"
+        )
     bundle.problems = _filter_problems(problems, only)
     return bundle
 
@@ -710,17 +851,113 @@ def read_hoj(
     workspace: Path,
     only: Iterable[str],
     budget: bridge.ArchiveExtractionBudget | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> ProblemBundle:
     items = hoj_bridge._filter_hoj_problems(hoj_bridge._find_hoj_problems(root), only)
     if not items:
         raise ValueError("no HOJ problem export found")
+    missing_bundle = _hoj_missing_file_bundle(items, root)
+    if missing_bundle is not None:
+        return missing_bundle
     staged = workspace / "hoj-as-hydro"
     for index, item in enumerate(items, start=1):
+        _report_read_progress(reporter, index - 1, len(items), item.key, "reading HOJ")
         pid = f"H{index}"
         hoj_bridge._write_hoj_as_hydro(item, staged / pid, pid, 1, [], verbose=False)
-    bundle = read_hydro(staged, workspace / "hoj-hydro-read", (), budget)
+        _report_read_progress(
+            reporter, index, len(items), item.key, "staged HOJ problem"
+        )
+    bundle = read_hydro(staged, workspace / "hoj-hydro-read", (), budget, reporter)
     bundle.source_format = "hoj"
     return bundle
+
+
+def _hoj_missing_file_bundle(
+    items: list[hoj_bridge.HojProblem], root: Path
+) -> ProblemBundle | None:
+    problems: list[Problem] = []
+    bundle = ProblemBundle("hoj", problems)
+    found_missing = False
+    for index, item in enumerate(items, start=1):
+        pdoc = item.problem
+        title = str(pdoc.get("title") or pdoc.get("problemId") or item.key)
+        statement, _ = hoj_bridge._build_hydro_statement(pdoc)
+        cases = [
+            TestCase(
+                case.input_path.name,
+                case.input_path,
+                case.output_path,
+                False,
+                case.score,
+                str(case.group_num) if case.group_num is not None else None,
+            )
+            for case in hoj_bridge._load_hoj_cases(item)
+        ]
+        problems.append(
+            Problem(
+                id=str(pdoc.get("problemId") or index),
+                slug=_safe_name(item.key, f"problem-{index}"),
+                title=title,
+                statements=[Statement("zh", "markdown", content=statement)],
+                cases=cases,
+                time_ms=hoj_bridge._positive_int(pdoc.get("timeLimit"), 1000),
+                memory_mb=hoj_bridge._positive_int(pdoc.get("memoryLimit"), 256),
+                file_io_base=Path(str(pdoc.get("ioReadFileName") or "")).stem
+                if pdoc.get("isFileIO") and pdoc.get("ioReadFileName")
+                else None,
+            )
+        )
+        declared = item.document.get("samples")
+        if isinstance(declared, list):
+            for case_index, raw in enumerate(declared, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                for role, key in (("input", "input"), ("output", "output")):
+                    name = raw.get(key)
+                    if not isinstance(name, str):
+                        continue
+                    expected = bridge._safe_join(item.data_dir, name)
+                    if expected.is_file():
+                        continue
+                    found_missing = True
+                    bundle.add_issue(
+                        "fatal",
+                        f"hoj-missing-test-{role}",
+                        f"HOJ test case #{case_index} references a missing {role} file: {expected.name}",
+                        problem=item.key,
+                        field="cases",
+                        context={
+                            "expected_path": expected.relative_to(root).as_posix(),
+                            "role": role,
+                            "source": item.json_path.relative_to(root).as_posix(),
+                            "source_location": item.json_path.relative_to(
+                                root
+                            ).as_posix(),
+                        },
+                    )
+        for relative in _unpaired_case_files(item.data_dir):
+            missing, role = _missing_partner_for_unpaired(item.data_dir, relative)
+            if any(
+                issue.context.get("expected_path")
+                == missing.relative_to(root).as_posix()
+                for issue in bundle.issues
+            ):
+                continue
+            found_missing = True
+            bundle.add_issue(
+                "fatal",
+                f"hoj-missing-test-{role}",
+                f"HOJ data directory contains an unpaired file: {relative}",
+                problem=item.key,
+                field="cases",
+                context={
+                    "expected_path": missing.relative_to(root).as_posix(),
+                    "role": role,
+                    "source": item.data_dir.relative_to(root).as_posix(),
+                    "source_location": item.data_dir.relative_to(root).as_posix(),
+                },
+            )
+    return bundle if found_missing else None
 
 
 def _validate_xml_tree(root: Any) -> None:
@@ -777,6 +1014,7 @@ def read_fps(
     workspace: Path,
     only: Iterable[str],
     budget: bridge.ArchiveExtractionBudget | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> ProblemBundle:
     xml_paths = [
         path
@@ -944,6 +1182,7 @@ def read_qduoj(
     workspace: Path,
     only: Iterable[str],
     budget: bridge.ArchiveExtractionBudget | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> ProblemBundle:
     documents = [
         path
@@ -1170,6 +1409,7 @@ def read_uoj(
     workspace: Path,
     only: Iterable[str],
     budget: bridge.ArchiveExtractionBudget | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> ProblemBundle:
     conf_paths = sorted(root.rglob("problem.conf"))
     if not conf_paths:
@@ -1502,6 +1742,7 @@ def read_dmoj(
     workspace: Path,
     only: Iterable[str],
     budget: bridge.ArchiveExtractionBudget | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> ProblemBundle:
     init_paths = sorted(root.rglob("init.yml"))
     if not init_paths:
@@ -1880,6 +2121,10 @@ def _unpaired_case_files(root: Path) -> list[str]:
         for path in sorted(root.rglob("*"))
         if path.is_file() and path.suffix.lower() in bridge.OUT_SUFFIXES
     ]
+    outputs_by_stem: dict[str, list[Path]] = {}
+    for output_path in outputs:
+        key = output_path.relative_to(root).with_suffix("").as_posix().casefold()
+        outputs_by_stem.setdefault(key, []).append(output_path)
     paired_outputs: set[Path] = set()
     unpaired = []
     for input_path in inputs:
@@ -1888,6 +2133,10 @@ def _unpaired_case_files(root: Path) -> list[str]:
             unpaired.append(input_path.relative_to(root).as_posix())
         else:
             paired_outputs.add(output_path.resolve())
+            key = input_path.relative_to(root).with_suffix("").as_posix().casefold()
+            aliases = outputs_by_stem.get(key, [])
+            if all(_files_have_equal_contents(output_path, alias) for alias in aliases):
+                paired_outputs.update(alias.resolve() for alias in aliases)
     unpaired.extend(
         path.relative_to(root).as_posix()
         for path in outputs
@@ -1896,11 +2145,32 @@ def _unpaired_case_files(root: Path) -> list[str]:
     return unpaired
 
 
+def _files_have_equal_contents(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_file, right.open("rb") as right_file:
+        while True:
+            left_chunk = left_file.read(1024 * 1024)
+            right_chunk = right_file.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
+def _missing_partner_for_unpaired(root: Path, relative: str) -> tuple[Path, str]:
+    path = bridge._safe_join(root, relative)
+    if path.suffix.lower() in bridge.IN_SUFFIXES:
+        return path.with_suffix(".ans"), "output"
+    return path.with_suffix(".in"), "input"
+
+
 def read_generic(
     root: Path,
     workspace: Path,
     only: Iterable[str],
     budget: bridge.ArchiveExtractionBudget | None = None,
+    reporter: ProgressReporter | None = None,
 ) -> ProblemBundle:
     problem_roots = _generic_problem_roots(bridge._strip_single_root(root))
     if not problem_roots:
@@ -2018,7 +2288,7 @@ def _dmoj_program_language(program: Program) -> str | None:
 def _write_program(program: Program, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     if program.path is not None:
-        shutil.copy2(program.path, target)
+        bridge._copy_file(program.path, target)
     elif program.content is not None:
         target.write_text(program.content, encoding="utf-8")
     else:
@@ -2274,6 +2544,9 @@ def write_hydro(
     with tempfile.TemporaryDirectory(prefix="ir-to-hydro-") as temporary:
         root = Path(temporary)
         for index, problem in enumerate(bundle.problems, start=1):
+            _report_problem_progress(
+                options, index - 1, len(bundle.problems), problem.slug, "writing Hydro"
+            )
             pid = f"{prefix}{number + index - 1:0{width}d}"
             package_root = root / f"{index:04d}"
             _write_hydro_problem_dir(
@@ -2287,6 +2560,9 @@ def write_hydro(
             destination = output / f"{pid}-{_safe_name(problem.slug)}.zip"
             bridge._zip_dir(package_root, destination)
             artifacts.append(destination.name)
+            _report_problem_progress(
+                options, index, len(bundle.problems), problem.slug, "wrote Hydro"
+            )
     return artifacts
 
 
@@ -2462,6 +2738,9 @@ def write_icpc(
     with tempfile.TemporaryDirectory(prefix="ir-to-icpc-") as temporary:
         root = Path(temporary)
         for index, problem in enumerate(bundle.problems, start=1):
+            _report_problem_progress(
+                options, index - 1, len(bundle.problems), problem.slug, "writing ICPC"
+            )
             if profile == "2025-09" and not any(
                 (solution.mode or "").lower() == "accepted"
                 for solution in problem.solutions
@@ -2496,6 +2775,9 @@ def write_icpc(
             destination = output / f"{archive_name}.zip"
             bridge._zip_dir(package_dir, destination)
             artifacts.append(destination.name)
+            _report_problem_progress(
+                options, index, len(bundle.problems), problem.slug, "wrote ICPC"
+            )
     return artifacts
 
 
@@ -2507,6 +2789,9 @@ def write_hoj(
         root = Path(temporary)
         used: set[str] = set()
         for index, problem in enumerate(bundle.problems, start=1):
+            _report_problem_progress(
+                options, index - 1, len(bundle.problems), problem.slug, "writing HOJ"
+            )
             hydro_dir = root / f"H{index}"
             _write_hydro_problem_dir(
                 bundle,
@@ -2522,7 +2807,28 @@ def write_hoj(
             meta = load_yaml_file(hydro_dir / "problem.yaml")
             hoj_bridge._write_hydro_as_hoj(hydro_dir, output, key, meta, verbose=False)
             artifacts.extend([f"{key}.json", key])
+            _report_problem_progress(
+                options, index, len(bundle.problems), problem.slug, "wrote HOJ"
+            )
     return artifacts
+
+
+def _report_problem_progress(
+    options: dict[str, Any],
+    current: int,
+    total: int,
+    problem: str,
+    detail: str,
+) -> None:
+    reporter = options.get("_progress")
+    if reporter is not None and hasattr(reporter, "update"):
+        reporter.update(
+            current=current,
+            total=total,
+            unit="problems",
+            problem=problem,
+            detail=f"{detail}: {problem}",
+        )
 
 
 def _program_text(program: Program) -> str:
@@ -3148,6 +3454,14 @@ def _validate_icpc_target(bundle: ProblemBundle, options: dict[str, Any]) -> Non
                 "ICPC output preserves templates only as attachments, not native templates",
                 "templates",
             )
+        if problem.tags:
+            _loss(
+                bundle,
+                problem,
+                "icpc-tags",
+                "ICPC problem packages do not have a portable native tag field",
+                "tags",
+            )
         if profile == "legacy-icpc" and len(problem.statements) > 1:
             _loss(
                 bundle,
@@ -3160,6 +3474,14 @@ def _validate_icpc_target(bundle: ProblemBundle, options: dict[str, Any]) -> Non
 
 def _validate_hoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     for problem in bundle.problems:
+        if any(case.sample for case in problem.cases):
+            _loss(
+                bundle,
+                problem,
+                "hoj-samples",
+                "HOJ export derives samples from statement markup and cannot preserve separate sample files exactly",
+                "cases",
+            )
         if any(group.dependencies for group in problem.groups):
             _loss(
                 bundle,
@@ -3198,6 +3520,14 @@ def _validate_hoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None
                 problem,
                 "hoj-multilingual-statement",
                 "HOJ native export keeps only one statement language",
+                "statements",
+            )
+        elif problem.statements:
+            _loss(
+                bundle,
+                problem,
+                "hoj-statement-normalization",
+                "HOJ stores statement sections as HTML fields, so Markdown formatting and language metadata are normalized",
                 "statements",
             )
 

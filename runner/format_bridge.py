@@ -1228,7 +1228,10 @@ def _copy_optional_tree(src: Path, dst: Path) -> None:
 
 def _copy_file(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
+    with src.open("rb") as source, dst.open("wb") as destination:
+        while chunk := source.read(1024 * 1024):
+            destination.write(chunk)
+    shutil.copystat(src, dst, follow_symlinks=False)
 
 
 def _zip_dir(src_dir: Path, output_zip: Path) -> None:
@@ -1236,7 +1239,13 @@ def _zip_dir(src_dir: Path, output_zip: Path) -> None:
     with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(src_dir.rglob("*")):
             if path.is_file():
-                archive.write(path, path.relative_to(src_dir).as_posix())
+                name = path.relative_to(src_dir).as_posix()
+                with (
+                    path.open("rb") as source,
+                    archive.open(name, "w", force_zip64=True) as destination,
+                ):
+                    while chunk := source.read(1024 * 1024):
+                        destination.write(chunk)
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

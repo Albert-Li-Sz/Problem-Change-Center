@@ -5,16 +5,26 @@ import pytest
 from app.config import Settings
 
 
+PROXY_SECRET = "test-only-" * 4
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
         ("P2H_MAX_UPLOAD_BYTES", "0"),
         ("P2H_JOB_TIMEOUT_SECONDS", "-1"),
+        ("P2H_JOB_IDLE_TIMEOUT_SECONDS", "0"),
+        ("P2H_JOB_STAGE_TIMEOUT_SECONDS", "0"),
+        ("P2H_JOB_PROBLEM_TIMEOUT_SECONDS", "0"),
         ("P2H_MAX_CONCURRENT_JOBS", "0"),
         ("P2H_MAX_STORED_JOBS", "not-an-int"),
         ("P2H_MAX_STORAGE_BYTES", "-5"),
         ("P2H_MAX_LOG_BYTES", "0"),
         ("P2H_DOCKER_PIDS_LIMIT", "0"),
+        ("P2H_RATE_LIMIT_REQUESTS_PER_MINUTE", "0"),
+        ("P2H_RATE_LIMIT_UPLOADS_PER_MINUTE", "-1"),
+        ("P2H_MAX_REQUEST_BODY_BYTES", "0"),
+        ("P2H_READINESS_TIMEOUT_SECONDS", "0"),
     ],
 )
 def test_invalid_integer_limits_fail_at_startup(
@@ -79,3 +89,85 @@ def test_empty_data_directory_fails_at_startup(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(ValueError, match="P2H_DATA_DIR"):
         Settings.from_env()
+
+
+def test_production_requires_explicit_security_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("P2H_DEPLOYMENT_MODE", "production")
+    monkeypatch.delenv("P2H_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("P2H_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("P2H_TRUSTED_PROXY_SECRET", raising=False)
+
+    with pytest.raises(ValueError, match="P2H_ALLOWED_HOSTS"):
+        Settings.from_env()
+
+    monkeypatch.setenv("P2H_ALLOWED_HOSTS", "converter.example.com")
+    with pytest.raises(ValueError, match="P2H_ALLOWED_ORIGINS"):
+        Settings.from_env()
+
+    monkeypatch.setenv("P2H_ALLOWED_ORIGINS", "https://converter.example.com")
+    with pytest.raises(ValueError, match="P2H_TRUSTED_PROXY_SECRET"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("P2H_ALLOWED_HOSTS", "*", "must not contain"),
+        ("P2H_ALLOWED_ORIGINS", "*", "must not contain"),
+        (
+            "P2H_ALLOWED_ORIGINS",
+            "http://converter.example.com",
+            "must use HTTPS",
+        ),
+        (
+            "P2H_ALLOWED_ORIGINS",
+            "https://converter.example.com:not-a-port",
+            "valid port",
+        ),
+        ("P2H_TRUSTED_PROXY_SECRET", "too-short", "at least 32"),
+    ],
+)
+def test_production_rejects_weak_boundary_values(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv("P2H_DEPLOYMENT_MODE", "production")
+    monkeypatch.setenv("P2H_ALLOWED_HOSTS", "converter.example.com")
+    monkeypatch.setenv("P2H_ALLOWED_ORIGINS", "https://converter.example.com")
+    monkeypatch.setenv("P2H_TRUSTED_PROXY_SECRET", PROXY_SECRET)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=message):
+        Settings.from_env()
+
+
+def test_request_body_limit_must_cover_upload_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("P2H_MAX_UPLOAD_BYTES", "1024")
+    monkeypatch.setenv("P2H_MAX_REQUEST_BODY_BYTES", "1023")
+
+    with pytest.raises(ValueError, match="must be at least"):
+        Settings.from_env()
+
+
+def test_valid_production_settings_are_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("P2H_DEPLOYMENT_MODE", "production")
+    monkeypatch.setenv("P2H_ALLOWED_HOSTS", " converter.example.com,admin.example.com ")
+    monkeypatch.setenv("P2H_ALLOWED_ORIGINS", " https://converter.example.com ")
+    monkeypatch.setenv("P2H_TRUSTED_PROXY_SECRET", PROXY_SECRET)
+
+    settings = Settings.from_env()
+
+    assert settings.is_production is True
+    assert settings.allowed_hosts == (
+        "converter.example.com",
+        "admin.example.com",
+    )
+    assert settings.allowed_origins == ("https://converter.example.com",)

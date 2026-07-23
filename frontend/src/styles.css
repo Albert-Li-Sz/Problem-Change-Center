@@ -462,6 +462,99 @@ button:disabled {
   color: #66717d;
 }
 
+.job-progress {
+  display: grid;
+  gap: 7px;
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid #bdd8e5;
+  border-radius: 8px;
+  background: #f0f8fb;
+}
+
+.progress-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.progress-summary span,
+.job-progress small {
+  color: #526b78;
+}
+
+.progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #d5e5ec;
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #217ea5;
+  transition: width 180ms ease;
+}
+
+.progress-track.indeterminate span {
+  width: 35%;
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
+}
+
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid #c23b3b;
+  border-radius: 8px;
+  background: #fff7f7;
+  color: #a62929;
+  cursor: pointer;
+}
+
+.repair-assistant {
+  display: grid;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid #d7dee3;
+}
+
+.repair-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #24536a;
+}
+
+.repair-item {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #d7dee3;
+  border-radius: 7px;
+  background: #fff;
+}
+
+.repair-item small {
+  color: #66717d;
+}
+
+.repair-upload {
+  font-size: 12px;
+}
+
 .color-control {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);

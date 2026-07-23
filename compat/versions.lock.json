@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "platforms": {
+    "hydro": {
+      "version": "4.19.0",
+      "source": "npm:hydrooj@4.19.0",
+      "git_commit": "2267ac9984bf2a03311b765d1b1928f9f4cc2bd8",
+      "integrity": "sha512-Zf9+bxoniADwjcnefOFfvz2zLACnZpwmZ/+jlG1xtlOdr+nPIuhLEFK1My0BJeuVNekgTsb0CSl1FmJvTEd/2w=="
+    },
+    "domjudge": {
+      "version": "9.0.1",
+      "source": "https://github.com/DOMjudge/domjudge.git",
+      "git_commit": "26f1b92883cb47b9939b1b3b1c4c786b21b0a099"
+    },
+    "hoj": {
+      "version": "v4.6",
+      "source": "https://github.com/HimitZH/HOJ.git",
+      "git_commit": "9a65e3f24e81ed76cc1aa1c06da68262434eaadd"
+    }
+  }
+}

@@ -19,6 +19,8 @@ from package_adapters import (
     detect_extracted,
 )
 from package_ir import ProblemBundle, write_report
+from package_repair import populate_repair_suggestions, repair_source_archive
+from progress import ProgressReporter
 
 
 REPORT_FILENAME = ".p2h-report.json"
@@ -26,8 +28,16 @@ MAX_NESTED_PACKAGES = 1000
 EXPECTED_CONVERSION_ERRORS = (OSError, UnicodeError, ValueError, zipfile.BadZipFile)
 
 
-def _copy_output(source: Path, destination: Path) -> None:
+def _copy_output(
+    source: Path,
+    destination: Path,
+    *,
+    reporter: ProgressReporter | None = None,
+) -> None:
     destination.mkdir(parents=True, exist_ok=True)
+    files = [path for path in sorted(source.rglob("*")) if path.is_file()]
+    total_bytes = sum(path.stat().st_size for path in files if not path.is_symlink())
+    copied_bytes = 0
     for path in sorted(source.rglob("*")):
         relative = path.relative_to(source)
         target = destination / relative
@@ -37,7 +47,18 @@ def _copy_output(source: Path, destination: Path) -> None:
             target.mkdir(parents=True, exist_ok=True)
         elif path.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, target)
+            with path.open("rb") as input_file, target.open("wb") as output_file:
+                while chunk := input_file.read(1024 * 1024):
+                    output_file.write(chunk)
+                    copied_bytes += len(chunk)
+                    if reporter is not None:
+                        reporter.update(
+                            current=copied_bytes,
+                            total=total_bytes,
+                            unit="bytes",
+                            detail=f"copying {relative.as_posix()}",
+                        )
+            shutil.copystat(path, target, follow_symlinks=False)
 
 
 def _ensure_convertible_with_report(
@@ -121,7 +142,7 @@ def _expand_nested_packages_for_detection(
         ):
             sidecar = archive.with_name(f"{archive.stem}.{suffix}")
             if sidecar.is_file():
-                shutil.copy2(sidecar, destination / suffix)
+                bridge._copy_file(sidecar, destination / suffix)
     return detect_extracted(extracted)
 
 
@@ -192,7 +213,9 @@ def _run_polygon_route(
     only: Iterable[str],
     options: dict[str, Any],
     workspace: Path,
+    reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
+    reporter = reporter or ProgressReporter(output_format="none")
     return_direct_icpc = (
         target_format == "icpc"
         and str(options.get("profile") or "legacy-icpc") != "2025-09"
@@ -200,6 +223,10 @@ def _run_polygon_route(
     direct_target = "icpc" if target_format == "icpc" else "hydro"
     polygon_output = workspace / "polygon-output"
     polygon_output.mkdir()
+    reporter.phase(
+        "write",
+        detail=f"running Polygon optimized route to {direct_target}",
+    )
     # The argv is internally constructed and shell=False is retained.
     result = subprocess.run(  # nosec B603
         _polygon_command(
@@ -232,7 +259,10 @@ def _run_polygon_route(
             )
         report = ProblemBundle("polygon", []).report(target_format, artifacts)
         report["problem_count"] = problem_count
-        _copy_output(polygon_output, output)
+        reporter.complete(detail=f"Polygon produced {problem_count} problem packages")
+        reporter.phase("validate_output", detail="validating Polygon output")
+        _copy_output(polygon_output, output, reporter=reporter)
+        reporter.complete(detail="Polygon output validated")
         write_report(output / REPORT_FILENAME, report)
         return report
 
@@ -244,10 +274,18 @@ def _run_polygon_route(
             package, intermediate_root / f"{index:04d}", budget=budget
         )
     bundle = ADAPTERS[direct_target].read(
-        intermediate_root, workspace / "polygon-ir", (), budget
+        intermediate_root, workspace / "polygon-ir", (), budget, reporter
     )
     bundle.source_format = "polygon"
+    reporter.phase(
+        "validate_ir",
+        detail="validating Polygon intermediate representation",
+        total=len(bundle.problems),
+        unit="problems",
+    )
     bundle.validate_integrity()
+    populate_repair_suggestions(bundle, intermediate_root)
+    reporter.complete(detail="Polygon intermediate representation validated")
     _ensure_convertible_with_report(
         bundle,
         target_format=target_format,
@@ -268,6 +306,13 @@ def _run_polygon_route(
     )
     staged = workspace / "target-output"
     staged.mkdir()
+    options["_progress"] = reporter
+    reporter.phase(
+        "write",
+        detail=f"writing {target_format} packages",
+        total=len(bundle.problems),
+        unit="problems",
+    )
     try:
         artifacts = writer(bundle, staged, options)
     except EXPECTED_CONVERSION_ERRORS as exc:
@@ -284,6 +329,8 @@ def _run_polygon_route(
             output=output,
         )
         raise
+    reporter.complete(detail=f"wrote {len(artifacts)} target artifacts")
+    reporter.phase("validate_output", detail="validating target artifacts")
     _validate_writer_output(bundle, staged, artifacts)
     _ensure_convertible_with_report(
         bundle,
@@ -292,7 +339,8 @@ def _run_polygon_route(
         output=output,
         artifacts=artifacts,
     )
-    _copy_output(staged, output)
+    _copy_output(staged, output, reporter=reporter)
+    reporter.complete(detail="target artifacts validated")
     report = bundle.report(target_format, artifacts)
     write_report(output / REPORT_FILENAME, report)
     return report
@@ -307,7 +355,11 @@ def convert_package(
     loss_policy: str = "warn",
     only: Iterable[str] = (),
     options: dict[str, Any] | None = None,
+    reporter: ProgressReporter | None = None,
+    repair_plan: Path | None = None,
+    supplements_dir: Path | None = None,
 ) -> dict[str, Any]:
+    progress = reporter or ProgressReporter(output_format="none")
     if source_format not in {"auto", "polygon", *READABLE_FORMATS}:
         raise ValueError(f"unsupported source format: {source_format}")
     if target_format not in WRITABLE_FORMATS:
@@ -316,6 +368,7 @@ def convert_package(
         raise ValueError("loss_policy must be warn or error")
     if not source_zip.is_file():
         raise ValueError("input ZIP does not exist")
+    progress.phase("validate_archive", detail="validating source ZIP archive")
     try:
         bridge.validate_zip_archive(source_zip)
     except (OSError, zipfile.BadZipFile, ValueError) as exc:
@@ -327,16 +380,36 @@ def convert_package(
             message=f"input is not a valid safe ZIP archive: {exc}",
         )
         raise ValueError(f"input is not a valid safe ZIP archive: {exc}") from exc
+    progress.complete(detail="source ZIP archive is safe")
     options = dict(options or {})
     with tempfile.TemporaryDirectory(prefix="package-convert-") as temporary:
         workspace = Path(temporary)
+        applied_repairs: list[dict[str, str]] = []
+        if repair_plan is not None:
+            repaired_zip = workspace / "repaired-source.zip"
+            progress.phase("validate_archive", detail="applying confirmed repair plan")
+            applied_repairs = repair_source_archive(
+                source_zip,
+                repaired_zip,
+                plan_path=repair_plan,
+                supplements_dir=supplements_dir,
+                workspace=workspace,
+            )
+            source_zip = repaired_zip
+            progress.complete(
+                detail=f"applied {len(applied_repairs)} confirmed repairs"
+            )
         extracted = workspace / "input"
         extraction_budget = bridge.ArchiveExtractionBudget.from_env()
+        progress.phase("extract", detail="safely extracting source package")
         try:
             bridge._safe_extract_zip(source_zip, extracted, budget=extraction_budget)
+            progress.complete(detail="source package extracted")
+            progress.phase("detect", detail="detecting source package format")
             candidates = _expand_nested_packages_for_detection(
                 extracted, extraction_budget
             )
+            progress.complete(detail="source package format candidates collected")
         except EXPECTED_CONVERSION_ERRORS as exc:
             _write_fatal_report_if_missing(
                 output,
@@ -391,7 +464,7 @@ def convert_package(
             raise ValueError(message)
         if detected == "polygon":
             try:
-                return _run_polygon_route(
+                report = _run_polygon_route(
                     source_zip,
                     output,
                     target_format=target_format,
@@ -399,7 +472,11 @@ def convert_package(
                     only=only,
                     options=options,
                     workspace=workspace,
+                    reporter=progress,
                 )
+                report["applied_repairs"] = applied_repairs
+                write_report(output / REPORT_FILENAME, report)
+                return report
             except EXPECTED_CONVERSION_ERRORS as exc:
                 _write_fatal_report_if_missing(
                     output,
@@ -412,9 +489,14 @@ def convert_package(
         adapter = ADAPTERS.get(detected)
         if adapter is None:
             raise ValueError(f"no reader for source format: {detected}")
+        progress.phase("read", detail=f"reading {detected} package")
         try:
             bundle = adapter.read(
-                extracted, workspace / "reader", only, extraction_budget
+                extracted,
+                workspace / "reader",
+                only,
+                extraction_budget,
+                progress,
             )
         except EXPECTED_CONVERSION_ERRORS as exc:
             _write_fatal_report_if_missing(
@@ -425,7 +507,19 @@ def convert_package(
                 message=f"failed to read {detected} package: {exc}",
             )
             raise
+        bundle.applied_repairs = applied_repairs
+        progress.complete(
+            detail=f"read {len(bundle.problems)} problems from {detected}"
+        )
+        progress.phase(
+            "validate_ir",
+            detail="validating intermediate representation",
+            total=len(bundle.problems),
+            unit="problems",
+        )
         bundle.validate_integrity()
+        populate_repair_suggestions(bundle, extracted)
+        progress.complete(detail="intermediate representation validated")
         _ensure_convertible_with_report(
             bundle,
             target_format=target_format,
@@ -446,6 +540,13 @@ def convert_package(
         )
         staged = workspace / "output"
         staged.mkdir()
+        options["_progress"] = progress
+        progress.phase(
+            "write",
+            detail=f"writing {target_format} packages",
+            total=len(bundle.problems),
+            unit="problems",
+        )
         try:
             artifacts = writer(bundle, staged, options)
         except EXPECTED_CONVERSION_ERRORS as exc:
@@ -462,6 +563,8 @@ def convert_package(
                 output=output,
             )
             raise
+        progress.complete(detail=f"wrote {len(artifacts)} target artifacts")
+        progress.phase("validate_output", detail="validating target artifacts")
         _validate_writer_output(bundle, staged, artifacts)
         _ensure_convertible_with_report(
             bundle,
@@ -471,6 +574,7 @@ def convert_package(
             artifacts=artifacts,
         )
         report = bundle.report(target_format, artifacts)
-        _copy_output(staged, output)
+        _copy_output(staged, output, reporter=progress)
+        progress.complete(detail="target artifacts validated")
         write_report(output / REPORT_FILENAME, report)
         return report

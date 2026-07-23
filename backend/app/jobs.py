@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import selectors
+import signal
 import shutil
 
 # The argv is built without a shell by docker_runner.
@@ -27,6 +30,17 @@ from .storage import Storage, prepare_runner_mount_permissions, utc_now_iso
 _PID_RE = re.compile(r"^[A-Za-z]+[0-9]+$")
 _DOMJUDGE_CODE_RE = re.compile(r"^[A-Za-z]+$")
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_PROGRESS_PREFIX = "P2H_EVENT "
+_PROGRESS_PHASES = {
+    "validate_archive",
+    "extract",
+    "detect",
+    "read",
+    "validate_ir",
+    "write",
+    "validate_output",
+    "package",
+}
 _TARGETS = {
     "hydro",
     "domjudge",
@@ -44,6 +58,22 @@ class RuntimeJob:
     thread: threading.Thread | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     delete_when_finished: bool = False
+
+
+class JobDeadlineExceeded(Exception):
+    def __init__(
+        self,
+        kind: str,
+        limit_seconds: int,
+        *,
+        phase: str | None,
+        problem: str | None,
+    ) -> None:
+        self.kind = kind
+        self.limit_seconds = limit_seconds
+        self.phase = phase
+        self.problem = problem
+        super().__init__(f"Job {kind} timeout after {limit_seconds} seconds")
 
 
 class JobManager:
@@ -125,7 +155,12 @@ class JobManager:
             metadata.error = None
             metadata.source_format = request.source_format
             metadata.target_format = request.effective_target_format
+            metadata.progress = None
+            metadata.timeout = None
             self.storage.write_metadata(metadata)
+            self.storage.write_request(
+                request.job_id, _persisted_request_payload(request)
+            )
             queued_response = JobResponse(
                 id=metadata.id,
                 status=metadata.status,
@@ -137,6 +172,8 @@ class JobManager:
                 error=metadata.error,
                 source_format=metadata.source_format,
                 target_format=metadata.target_format,
+                progress=metadata.progress,
+                timeout=metadata.timeout,
             )
 
             runtime = RuntimeJob()
@@ -175,7 +212,32 @@ class JobManager:
             target_format=metadata.target_format,
             report_ready=paths.report_path.is_file(),
             report_counts=report_counts,
+            progress=metadata.progress,
+            timeout=metadata.timeout,
         )
+
+    def cancel(self, job_id: str) -> DeleteResponse:
+        with self._lock:
+            metadata = self.storage.read_metadata(job_id)
+            runtime = self._runtime.get(job_id)
+            if metadata.status not in {"queued", "running"}:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Only queued or running jobs can be cancelled",
+                )
+            if runtime is not None:
+                runtime.cancel_event.set()
+            if runtime is not None and runtime.process is not None:
+                _terminate_process(runtime.process)
+            stop_container(self.settings, job_id)
+            metadata.status = "cancelled"
+            metadata.finished_at = utc_now_iso()
+            metadata.error = "Cancelled by user"
+            self.storage.write_metadata(metadata)
+            paths = self.storage.paths_for(job_id)
+            if paths.result_path.exists():
+                paths.result_path.unlink()
+            return DeleteResponse(id=job_id, status="cancelled", deleted=False)
 
     def cancel_or_delete(self, job_id: str) -> DeleteResponse:
         with self._lock:
@@ -184,6 +246,8 @@ class JobManager:
             if runtime and runtime.thread and runtime.thread.is_alive():
                 runtime.cancel_event.set()
                 runtime.delete_when_finished = True
+                if runtime.process is not None:
+                    _terminate_process(runtime.process)
                 stop_container(self.settings, job_id)
                 if metadata.status in {"queued", "running"}:
                     metadata.status = "cancelled"
@@ -198,6 +262,55 @@ class JobManager:
             self.storage.delete_job(job_id)
             self._runtime.pop(job_id, None)
             return DeleteResponse(id=job_id, status=metadata.status, deleted=True)
+
+    def recover_interrupted(self) -> int:
+        """Fail persisted active jobs after restart and remove stale containers."""
+        recovered = 0
+        for job_id in self.storage.job_ids():
+            try:
+                metadata = self.storage.read_metadata(job_id)
+            except HTTPException:
+                continue
+            if metadata.status not in {"queued", "running"}:
+                continue
+            stop_container(self.settings, job_id)
+            paths = self.storage.paths_for(job_id)
+            if paths.result_path.exists():
+                paths.result_path.unlink()
+            metadata.status = "failed"
+            metadata.finished_at = utc_now_iso()
+            metadata.error = (
+                "Conversion was interrupted by a backend restart; retry the job"
+            )
+            self.storage.append_log(job_id, f"backend error: {metadata.error}\n")
+            self.storage.write_metadata(metadata)
+            recovered += 1
+        return recovered
+
+    def shutdown(self) -> int:
+        """Cancel active work so service shutdown cannot orphan runner containers."""
+        with self._lock:
+            active = [
+                (job_id, runtime.thread)
+                for job_id, runtime in self._runtime.items()
+                if runtime.thread is not None and runtime.thread.is_alive()
+            ]
+        cancelled = 0
+        for job_id, _thread in active:
+            try:
+                self.cancel(job_id)
+                cancelled += 1
+            except HTTPException:
+                continue
+        deadline = time.monotonic() + 10
+        for _job_id, thread in active:
+            if thread is None:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
+        return cancelled
 
     def _run_job_with_cleanup(self, request: JobRequest) -> None:
         try:
@@ -217,6 +330,7 @@ class JobManager:
                             raise
 
     def _run_job(self, request: JobRequest) -> None:
+        overall_started = time.monotonic()
         paths = self.storage.paths_for(request.job_id)
         with self._lock:
             runtime = self._runtime[request.job_id]
@@ -248,10 +362,15 @@ class JobManager:
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
+                    start_new_session=True,
                 )
                 runtime.process = process
 
-            exit_code = self._stream_process_output(process, request.job_id, cmd)
+            exit_code = self._stream_process_output(
+                process,
+                request.job_id,
+                overall_started=overall_started,
+            )
             with self._lock:
                 metadata = self.storage.read_metadata(request.job_id)
                 runtime = self._runtime[request.job_id]
@@ -291,6 +410,45 @@ class JobManager:
                 problem_count = report.get("problem_count")
                 if type(problem_count) is not int or problem_count < 1:
                     raise ValueError("converter did not produce any problem packages")
+            self._set_progress(
+                request.job_id,
+                phase="package",
+                detail="packaging validated conversion output",
+                current=0,
+                total=None,
+                unit="files",
+            )
+            package_started = time.monotonic()
+
+            def report_package_progress(current: int, total: int, detail: str) -> None:
+                now = time.monotonic()
+                if now - overall_started >= self.settings.job_timeout_seconds:
+                    raise JobDeadlineExceeded(
+                        "overall",
+                        self.settings.job_timeout_seconds,
+                        phase="package",
+                        problem=None,
+                    )
+                if now - package_started >= self.settings.job_stage_timeout_seconds:
+                    raise JobDeadlineExceeded(
+                        "stage",
+                        self.settings.job_stage_timeout_seconds,
+                        phase="package",
+                        problem=None,
+                    )
+                with self._lock:
+                    runtime = self._runtime[request.job_id]
+                    if runtime.cancel_event.is_set():
+                        raise RuntimeError("Job cancelled while packaging")
+                self._set_progress(
+                    request.job_id,
+                    phase="package",
+                    detail=detail,
+                    current=current,
+                    total=total,
+                    unit="files",
+                )
+
             pack_output(
                 paths.output_dir,
                 paths.result_path,
@@ -298,6 +456,15 @@ class JobManager:
                 max_uncompressed_bytes=parse_size_bytes(
                     self.settings.docker_output_size
                 ),
+                progress_callback=report_package_progress,
+            )
+            self._set_progress(
+                request.job_id,
+                phase="package",
+                detail="conversion result package is ready",
+                current=1,
+                total=1,
+                unit="archives",
             )
             with self._lock:
                 metadata = self.storage.read_metadata(request.job_id)
@@ -310,10 +477,12 @@ class JobManager:
                 metadata.finished_at = utc_now_iso()
                 metadata.error = None
                 self.storage.write_metadata(metadata)
-        except subprocess.TimeoutExpired:
-            stop_container(self.settings, request.job_id)
+        except JobDeadlineExceeded as exc:
             if process is not None:
-                process.kill()
+                _terminate_process(process)
+            stop_container(self.settings, request.job_id)
+            if paths.result_path.exists():
+                paths.result_path.unlink()
             with self._lock:
                 metadata = self.storage.read_metadata(request.job_id)
                 runtime = self._runtime[request.job_id]
@@ -322,12 +491,22 @@ class JobManager:
                 metadata.status = "failed"
                 metadata.finished_at = utc_now_iso()
                 metadata.error = (
-                    f"Job timed out after {self.settings.job_timeout_seconds} seconds"
+                    f"Job timed out ({exc.kind}) after {exc.limit_seconds} seconds"
                 )
+                metadata.timeout = {
+                    "kind": exc.kind,
+                    "limit_seconds": exc.limit_seconds,
+                    "phase": exc.phase,
+                    "problem": exc.problem,
+                }
                 self.storage.append_log(request.job_id, metadata.error + "\n")
                 self.storage.write_metadata(metadata)
         except Exception as exc:
+            if process is not None:
+                _terminate_process(process)
             stop_container(self.settings, request.job_id)
+            if paths.result_path.exists():
+                paths.result_path.unlink()
             with self._lock:
                 metadata = self.storage.read_metadata(request.job_id)
                 runtime = self._runtime[request.job_id]
@@ -372,11 +551,19 @@ class JobManager:
         return removed
 
     def _stream_process_output(
-        self, process: subprocess.Popen[str], job_id: str, cmd: list[str]
+        self,
+        process: subprocess.Popen[str],
+        job_id: str,
+        *,
+        overall_started: float,
     ) -> int:
         if process.stdout is None:
             raise RuntimeError("Runner stdout pipe is unavailable")
-        deadline = time.monotonic() + self.settings.job_timeout_seconds
+        last_activity = time.monotonic()
+        phase_started = last_activity
+        problem_started: float | None = None
+        current_phase: str | None = None
+        current_problem: str | None = None
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
         try:
@@ -384,7 +571,22 @@ class JobManager:
                 for key, _ in selector.select(timeout=0.2):
                     line = key.fileobj.readline()
                     if line:
-                        self.storage.append_log(job_id, line)
+                        event = self._handle_progress_line(job_id, line)
+                        if event is None or event.get("event") != "heartbeat":
+                            last_activity = time.monotonic()
+                        if event is None:
+                            self.storage.append_log(job_id, line)
+                        else:
+                            phase = event.get("phase")
+                            problem = event.get("problem")
+                            if phase != current_phase:
+                                current_phase = str(phase) if phase else None
+                                phase_started = time.monotonic()
+                            if problem != current_problem:
+                                current_problem = str(problem) if problem else None
+                                problem_started = (
+                                    time.monotonic() if current_problem else None
+                                )
 
                 if process.poll() is not None:
                     remainder = process.stdout.read()
@@ -392,12 +594,126 @@ class JobManager:
                         self.storage.append_log(job_id, remainder)
                     return process.returncode if process.returncode is not None else 0
 
-                if time.monotonic() >= deadline:
-                    raise subprocess.TimeoutExpired(
-                        cmd, self.settings.job_timeout_seconds
+                now = time.monotonic()
+                timeout: tuple[str, int] | None = None
+                if now - overall_started >= self.settings.job_timeout_seconds:
+                    timeout = ("overall", self.settings.job_timeout_seconds)
+                elif now - last_activity >= self.settings.job_idle_timeout_seconds:
+                    timeout = ("idle", self.settings.job_idle_timeout_seconds)
+                elif (
+                    current_phase is not None
+                    and now - phase_started >= self.settings.job_stage_timeout_seconds
+                ):
+                    timeout = ("stage", self.settings.job_stage_timeout_seconds)
+                elif (
+                    current_problem is not None
+                    and problem_started is not None
+                    and now - problem_started
+                    >= self.settings.job_problem_timeout_seconds
+                ):
+                    timeout = ("problem", self.settings.job_problem_timeout_seconds)
+                if timeout is not None:
+                    raise JobDeadlineExceeded(
+                        timeout[0],
+                        timeout[1],
+                        phase=current_phase,
+                        problem=current_problem,
                     )
         finally:
             selector.close()
+
+    def _handle_progress_line(self, job_id: str, line: str) -> dict[str, object] | None:
+        if not line.startswith(_PROGRESS_PREFIX):
+            return None
+        try:
+            event = json.loads(line.removeprefix(_PROGRESS_PREFIX))
+        except json.JSONDecodeError:
+            self.storage.append_log(job_id, "warning: invalid progress event\n")
+            return {}
+        if not isinstance(event, dict) or event.get("schema_version") != 1:
+            self.storage.append_log(job_id, "warning: invalid progress event\n")
+            return {}
+        phase = event.get("phase")
+        if phase not in _PROGRESS_PHASES:
+            self.storage.append_log(job_id, "warning: invalid progress phase\n")
+            return {}
+        current = event.get("current")
+        total = event.get("total")
+        for value in (current, total):
+            if value is not None and (type(value) is not int or value < 0):
+                self.storage.append_log(job_id, "warning: invalid progress count\n")
+                return {}
+        for name, limit in (
+            ("unit", 32),
+            ("problem", 256),
+            ("detail", 1024),
+            ("timestamp", 128),
+        ):
+            value = event.get(name)
+            if value is not None and (not isinstance(value, str) or len(value) > limit):
+                self.storage.append_log(job_id, "warning: invalid progress field\n")
+                return {}
+        timestamp = event.get("timestamp")
+        now = utc_now_iso()
+        with self._lock:
+            metadata = self.storage.read_metadata(job_id)
+            if metadata.status not in {"queued", "running"}:
+                return event
+            previous = metadata.progress or {}
+            started_at = (
+                str(previous.get("started_at"))
+                if previous.get("phase") == phase and previous.get("started_at")
+                else str(timestamp or now)
+            )
+            last_activity_at = (
+                str(previous["last_activity_at"])
+                if event.get("event") == "heartbeat"
+                and previous.get("last_activity_at")
+                else str(timestamp or now)
+            )
+            metadata.progress = {
+                "phase": phase,
+                "current": current,
+                "total": total,
+                "unit": event.get("unit"),
+                "problem": event.get("problem"),
+                "detail": event.get("detail"),
+                "started_at": started_at,
+                "last_activity_at": last_activity_at,
+            }
+            self.storage.write_metadata(metadata)
+        return event
+
+    def _set_progress(
+        self,
+        job_id: str,
+        *,
+        phase: str,
+        detail: str,
+        current: int | None,
+        total: int | None,
+        unit: str | None,
+    ) -> None:
+        with self._lock:
+            metadata = self.storage.read_metadata(job_id)
+            now = utc_now_iso()
+            previous = metadata.progress or {}
+            started_at = (
+                str(previous.get("started_at"))
+                if previous.get("phase") == phase and previous.get("started_at")
+                else now
+            )
+            metadata.progress = {
+                "phase": phase,
+                "current": current,
+                "total": total,
+                "unit": unit,
+                "problem": None,
+                "detail": detail,
+                "started_at": started_at,
+                "last_activity_at": now,
+            }
+            self.storage.write_metadata(metadata)
 
     def _validate_request(self, request: JobRequest) -> None:
         if request.target not in _TARGETS:
@@ -521,3 +837,47 @@ def _quote_command(cmd: list[str]) -> str:
     import shlex
 
     return " ".join(shlex.quote(part) for part in cmd)
+
+
+def _persisted_request_payload(request: JobRequest) -> dict[str, object]:
+    data = request.model_dump()
+    if request.is_legacy_request:
+        names = {
+            "job_id",
+            "target",
+            "pid_start",
+            "owner",
+            "tags",
+            "only",
+            "run_doall",
+            "missing_env",
+            "domjudge_code_start",
+            "domjudge_color",
+            "domjudge_with_statement",
+            "domjudge_with_attachments",
+            "domjudge_auto_validator",
+            "domjudge_default_validator",
+        }
+    else:
+        names = {
+            "job_id",
+            "source_format",
+            "target_format",
+            "loss_policy",
+            "options",
+            "only",
+        }
+    return {name: data[name] for name in names}
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=10)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

@@ -1,0 +1,51 @@
+[Unit]
+Description=OJ Package Converter backend
+Documentation=file:/opt/oj-package-converter/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ojconverter
+Group=ojconverter
+WorkingDirectory=/opt/oj-package-converter/backend
+EnvironmentFile=/etc/oj-package-converter/production.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+StateDirectory=oj-package-converter
+StateDirectoryMode=0700
+ExecStartPre=/opt/oj-package-converter/scripts/production-check.sh --backend-only /etc/oj-package-converter/production.env
+ExecStart=/opt/oj-package-converter/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers --limit-concurrency 128 --timeout-keep-alive 5 --h11-max-incomplete-event-size 65536
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=120s
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+KillMode=control-group
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+IPAddressDeny=any
+IPAddressAllow=localhost
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/oj-package-converter
+RemoveIPC=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

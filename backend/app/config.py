@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import os
+import ipaddress
 import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 DEFAULT_DATA_DIR = Path.home() / ".p2h-web-ui" / "backend_data"
@@ -70,6 +72,108 @@ def _nonempty_env(name: str, default: str) -> str:
     return value
 
 
+def _csv_env(name: str, default: str, *, required: bool = False) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None:
+        if required:
+            raise ValueError(f"{name} must be explicitly configured")
+        raw = default
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    if not values:
+        raise ValueError(f"{name} must contain at least one value")
+    if len(values) > 64 or any(len(item) > 255 for item in values):
+        raise ValueError(f"{name} contains too many or overly long values")
+    return values
+
+
+def _deployment_mode_env() -> str:
+    value = os.getenv("P2H_DEPLOYMENT_MODE", "local").strip().lower()
+    if value not in {"local", "production"}:
+        raise ValueError("P2H_DEPLOYMENT_MODE must be local or production")
+    return value
+
+
+def _proxy_secret_env(*, required: bool) -> str | None:
+    value = os.getenv("P2H_TRUSTED_PROXY_SECRET")
+    if value is None or not value.strip():
+        if required:
+            raise ValueError(
+                "P2H_TRUSTED_PROXY_SECRET must contain at least 32 characters "
+                "in production"
+            )
+        return None
+    if value != value.strip():
+        raise ValueError("P2H_TRUSTED_PROXY_SECRET must not have outer whitespace")
+    if len(value) < 32 or len(value) > 256:
+        raise ValueError(
+            "P2H_TRUSTED_PROXY_SECRET must contain at least 32 and at most "
+            "256 characters"
+        )
+    if any(ord(character) < 33 or ord(character) > 126 for character in value):
+        raise ValueError(
+            "P2H_TRUSTED_PROXY_SECRET must contain printable ASCII without spaces"
+        )
+    if len(set(value)) < 8 or value.lower().startswith(
+        ("change", "generate", "replace")
+    ):
+        raise ValueError("P2H_TRUSTED_PROXY_SECRET must be a randomly generated secret")
+    return value
+
+
+def _validate_production_origins(origins: tuple[str, ...]) -> None:
+    for origin in origins:
+        if origin == "*":
+            raise ValueError("P2H_ALLOWED_ORIGINS must not contain * in production")
+        parsed = urlsplit(origin)
+        try:
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError(
+                "P2H_ALLOWED_ORIGINS entries must contain a valid port"
+            ) from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "P2H_ALLOWED_ORIGINS entries must be origins such as "
+                "https://converter.example.com"
+            )
+        if parsed.scheme != "https" and parsed.hostname not in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }:
+            raise ValueError(
+                "P2H_ALLOWED_ORIGINS must use HTTPS outside loopback in production"
+            )
+
+
+def _validate_allowed_hosts(hosts: tuple[str, ...], *, production: bool) -> None:
+    for host in hosts:
+        if host == "*" and production:
+            raise ValueError("P2H_ALLOWED_HOSTS must not contain * in production")
+        if any(character.isspace() for character in host) or any(
+            marker in host for marker in ("/", "@", "?", "#")
+        ):
+            raise ValueError(
+                "P2H_ALLOWED_HOSTS entries must be hostnames without scheme, "
+                "port, path, or credentials"
+            )
+        if ":" in host:
+            try:
+                ipaddress.ip_address(host)
+            except ValueError as exc:
+                raise ValueError(
+                    "P2H_ALLOWED_HOSTS entries must not include ports"
+                ) from exc
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path
@@ -90,17 +194,65 @@ class Settings:
     max_stored_jobs: int = 100
     max_storage_bytes: int = 10 * 1024 * 1024 * 1024
     max_log_bytes: int = 10 * 1024 * 1024
+    job_idle_timeout_seconds: int = 300
+    job_stage_timeout_seconds: int = 1800
+    job_problem_timeout_seconds: int = 1200
+    deployment_mode: str = "local"
+    allowed_hosts: tuple[str, ...] = (
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "testserver",
+    )
+    allowed_origins: tuple[str, ...] = (
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    )
+    trusted_proxy_secret: str | None = None
+    rate_limit_requests_per_minute: int = 240
+    rate_limit_uploads_per_minute: int = 12
+    max_request_body_bytes: int = 528 * 1024 * 1024
+    readiness_timeout_seconds: int = 5
+    hsts_max_age_seconds: int = 31_536_000
+
+    @property
+    def is_production(self) -> bool:
+        return self.deployment_mode == "production"
 
     @classmethod
     def from_env(cls) -> "Settings":
+        deployment_mode = _deployment_mode_env()
+        is_production = deployment_mode == "production"
+        max_upload_bytes = _int_env("P2H_MAX_UPLOAD_BYTES", 512 * 1024 * 1024)
+        max_request_body_bytes = _int_env(
+            "P2H_MAX_REQUEST_BODY_BYTES",
+            max_upload_bytes + 16 * 1024 * 1024,
+        )
+        if max_request_body_bytes < max_upload_bytes:
+            raise ValueError(
+                "P2H_MAX_REQUEST_BODY_BYTES must be at least P2H_MAX_UPLOAD_BYTES"
+            )
+        allowed_hosts = _csv_env(
+            "P2H_ALLOWED_HOSTS",
+            "localhost,127.0.0.1,::1,testserver",
+            required=is_production,
+        )
+        _validate_allowed_hosts(allowed_hosts, production=is_production)
+        allowed_origins = _csv_env(
+            "P2H_ALLOWED_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+            required=is_production,
+        )
+        if is_production:
+            _validate_production_origins(allowed_origins)
         return cls(
             data_dir=Path(_nonempty_env("P2H_DATA_DIR", str(DEFAULT_DATA_DIR)))
             .expanduser()
             .resolve(),
             docker_bin=_nonempty_env("P2H_DOCKER_BIN", "docker"),
             runner_image=_nonempty_env("P2H_RUNNER_IMAGE", "p2h-runner"),
-            max_upload_bytes=_int_env("P2H_MAX_UPLOAD_BYTES", 512 * 1024 * 1024),
-            job_timeout_seconds=_int_env("P2H_JOB_TIMEOUT_SECONDS", 600),
+            max_upload_bytes=max_upload_bytes,
+            job_timeout_seconds=_int_env("P2H_JOB_TIMEOUT_SECONDS", 7200),
             job_ttl_seconds=_int_env("P2H_JOB_TTL_SECONDS", 24 * 60 * 60),
             docker_memory=_size_env("P2H_DOCKER_MEMORY", "1g"),
             docker_cpus=_positive_number_env("P2H_DOCKER_CPUS", "2"),
@@ -120,6 +272,26 @@ class Settings:
                 "P2H_MAX_STORAGE_BYTES", 10 * 1024 * 1024 * 1024
             ),
             max_log_bytes=_int_env("P2H_MAX_LOG_BYTES", 10 * 1024 * 1024),
+            job_idle_timeout_seconds=_int_env("P2H_JOB_IDLE_TIMEOUT_SECONDS", 300),
+            job_stage_timeout_seconds=_int_env("P2H_JOB_STAGE_TIMEOUT_SECONDS", 1800),
+            job_problem_timeout_seconds=_int_env(
+                "P2H_JOB_PROBLEM_TIMEOUT_SECONDS", 1200
+            ),
+            deployment_mode=deployment_mode,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
+            trusted_proxy_secret=_proxy_secret_env(required=is_production),
+            rate_limit_requests_per_minute=_int_env(
+                "P2H_RATE_LIMIT_REQUESTS_PER_MINUTE", 240
+            ),
+            rate_limit_uploads_per_minute=_int_env(
+                "P2H_RATE_LIMIT_UPLOADS_PER_MINUTE", 12
+            ),
+            max_request_body_bytes=max_request_body_bytes,
+            readiness_timeout_seconds=_int_env("P2H_READINESS_TIMEOUT_SECONDS", 5),
+            hsts_max_age_seconds=_int_env(
+                "P2H_HSTS_MAX_AGE_SECONDS", 31_536_000, minimum=0
+            ),
         )
 
 

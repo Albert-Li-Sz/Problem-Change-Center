@@ -1,7 +1,9 @@
-import { AlertTriangle, Archive, CheckCircle2, Download, FileArchive, RotateCcw, Shield, Trash2, UploadCloud } from "lucide-react";
+import { AlertTriangle, Archive, CheckCircle2, Download, FileArchive, RotateCcw, Shield, Trash2, UploadCloud, Wrench, XCircle } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ConversionReport,
+  applyRepairs,
+  cancelJob,
   deleteJob,
   downloadUrl,
   FormatId,
@@ -45,6 +47,16 @@ const packageKinds: Record<FormatId, string> = {
   dmoj: "评测数据 + sidecar",
   generic: "推断目录"
 };
+const progressLabels: Record<NonNullable<JobResponse["progress"]>["phase"], string> = {
+  validate_archive: "校验压缩包",
+  extract: "安全解压",
+  detect: "识别格式",
+  read: "读取源题包",
+  validate_ir: "校验题目语义",
+  write: "写出目标题包",
+  validate_output: "校验输出",
+  package: "打包结果"
+};
 
 function splitList(value: string): string[] {
   return value
@@ -57,6 +69,19 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatElapsed(startedAt: string, lastActivityAt: string): string {
+  const elapsed = Math.max(
+    0,
+    Math.floor(
+      (new Date(lastActivityAt).getTime() - new Date(startedAt).getTime()) / 1000
+    )
+  );
+  if (elapsed < 60) return `${elapsed} 秒`;
+  const minutes = Math.floor(elapsed / 60);
+  const seconds = elapsed % 60;
+  return `${minutes} 分 ${seconds} 秒`;
 }
 
 export default function App() {
@@ -85,6 +110,8 @@ export default function App() {
   const [icpcRightsOwner, setIcpcRightsOwner] = useState("");
   const [fpsProfile, setFpsProfile] = useState<"hustoj-1.6" | "qduoj-1.2">("hustoj-1.6");
   const [report, setReport] = useState<ConversionReport | null>(null);
+  const [repairChoices, setRepairChoices] = useState<Record<string, { candidatePath?: string; file?: File }>>({});
+  const [repairing, setRepairing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +124,9 @@ export default function App() {
   const usesDomjudgeOutputOptions = targetFormat === "icpc";
   const usesPolygonSource = effectiveSource === "polygon";
   const domjudgeColorPickerValue = /^#[0-9A-Fa-f]{6}$/.test(domjudgeColor) ? domjudgeColor : "#000000";
+  const progressPercent = job?.progress?.total
+    ? Math.min(100, Math.round(((job.progress.current ?? 0) / job.progress.total) * 100))
+    : null;
 
   const validation = useMemo(() => {
     if (inspect && sourceFormat === "auto" && !inspect.detected_format) {
@@ -236,7 +266,7 @@ export default function App() {
   }
 
   async function handleReset() {
-    const jobId = inspect?.job_id;
+    const jobId = job?.id ?? inspect?.job_id;
     const epoch = ++requestEpoch.current;
     setResetting(true);
     setBusy(false);
@@ -246,6 +276,7 @@ export default function App() {
     setJob(null);
     setLogs("");
     setReport(null);
+    setRepairChoices({});
     setError(null);
     setPidStart("P1000");
     setOwner(1);
@@ -266,6 +297,7 @@ export default function App() {
     setIcpcLicense("unknown");
     setIcpcRightsOwner("");
     setFpsProfile("hustoj-1.6");
+    setRepairing(false);
     if (jobId) {
       try {
         await deleteJob(jobId);
@@ -278,18 +310,73 @@ export default function App() {
 
   function handleFileChange(nextFile: File | null) {
     requestEpoch.current += 1;
-    const previousJobId = inspect?.job_id;
+    const previousJobId = job?.id ?? inspect?.job_id;
     setFile(nextFile);
     setInspectedFile(null);
     setInspect(null);
     setJob(null);
     setLogs("");
     setReport(null);
+    setRepairChoices({});
     setError(null);
     if (previousJobId && !isRunning) {
       void deleteJob(previousJobId).catch(() => {
         // Invalidating the old inspection is sufficient even if backend cleanup races with TTL cleanup.
       });
+    }
+  }
+
+  async function handleCancel() {
+    if (!job || !isRunning) return;
+    const epoch = requestEpoch.current;
+    setBusy(true);
+    setError(null);
+    try {
+      await cancelJob(job.id);
+      const [nextJob, nextLogs] = await Promise.all([getJob(job.id), getLogs(job.id)]);
+      if (requestEpoch.current !== epoch) return;
+      setJob(nextJob);
+      setLogs(nextLogs);
+    } catch (err) {
+      if (requestEpoch.current !== epoch) return;
+      setError(err instanceof Error ? err.message : "取消任务失败");
+    } finally {
+      if (requestEpoch.current === epoch) setBusy(false);
+    }
+  }
+
+  async function handleApplyRepairs() {
+    if (!job || !report?.repair_suggestions?.length) return;
+    const selections: Array<{ suggestion_id: string; candidate_path?: string; upload_name?: string }> = [];
+    const files: File[] = [];
+    for (const suggestion of report.repair_suggestions) {
+      const choice = repairChoices[suggestion.id];
+      if (choice?.candidatePath) {
+        selections.push({ suggestion_id: suggestion.id, candidate_path: choice.candidatePath });
+      } else if (choice?.file) {
+        selections.push({ suggestion_id: suggestion.id, upload_name: choice.file.name });
+        files.push(choice.file);
+      }
+    }
+    if (!selections.length) {
+      setError("请至少确认一个缺失文件修复。");
+      return;
+    }
+    const epoch = requestEpoch.current;
+    setRepairing(true);
+    setError(null);
+    try {
+      const nextJob = await applyRepairs(job.id, selections, files);
+      if (requestEpoch.current !== epoch) return;
+      setJob(nextJob);
+      setLogs("");
+      setReport(null);
+      setRepairChoices({});
+    } catch (err) {
+      if (requestEpoch.current !== epoch) return;
+      setError(err instanceof Error ? err.message : "应用修复失败");
+    } finally {
+      if (requestEpoch.current === epoch) setRepairing(false);
     }
   }
 
@@ -696,8 +783,35 @@ export default function App() {
               </div>
             </div>
 
+            {job?.progress && (
+              <div className="job-progress" aria-live="polite">
+                <div className="progress-summary">
+                  <strong>{progressLabels[job.progress.phase]}</strong>
+                  <span>
+                    {job.progress.problem ? `${job.progress.problem} · ` : ""}
+                    {progressPercent !== null ? `${progressPercent}%` : "处理中"}
+                  </span>
+                </div>
+                <div className={`progress-track ${progressPercent === null ? "indeterminate" : ""}`}>
+                  <span style={progressPercent === null ? undefined : { width: `${progressPercent}%` }} />
+                </div>
+                <small>{job.progress.detail || "任务仍在运行"}</small>
+                <small>
+                  阶段耗时 {formatElapsed(job.progress.started_at, job.progress.last_activity_at)}
+                  {" · "}
+                  最后活动 {new Date(job.progress.last_activity_at).toLocaleTimeString()}
+                </small>
+              </div>
+            )}
+
             <div aria-live="polite">
               {job?.error && <div className="inline-error" role="alert">{job.error}</div>}
+              {job?.timeout && (
+                <div className="inline-error" role="alert">
+                  超时类型：{job.timeout.kind} · 限制 {job.timeout.limit_seconds} 秒
+                  {job.timeout.problem ? ` · 题目 ${job.timeout.problem}` : ""}
+                </div>
+              )}
               {error && <div className="inline-error" role="alert">{error}</div>}
             </div>
 
@@ -706,6 +820,12 @@ export default function App() {
                 <Download size={17} aria-hidden="true" />
                 下载结果
               </a>
+              {isRunning && (
+                <button className="danger-button" type="button" onClick={handleCancel} disabled={busy}>
+                  <XCircle size={17} aria-hidden="true" />
+                  取消并保留诊断
+                </button>
+              )}
               <button className="ghost-button" type="button" onClick={handleReset} disabled={!inspect || resetting}>
                 <Trash2 size={17} aria-hidden="true" />
                 清理任务
@@ -729,6 +849,72 @@ export default function App() {
                       </li>
                     ))}
                   </ul>
+                )}
+                {report.repair_ready && report.repair_suggestions && report.repair_suggestions.length > 0 && (
+                  <div className="repair-assistant">
+                    <div className="repair-heading">
+                      <Wrench size={16} aria-hidden="true" />
+                      <strong>缺失文件修复助手</strong>
+                    </div>
+                    <p>系统只提供候选；选择或上传文件并点击确认后，原 ZIP 不会被修改，将创建一个派生任务。</p>
+                    {report.repair_suggestions.map((suggestion) => {
+                      const choice = repairChoices[suggestion.id] || {};
+                      const issueContext = report.issues.find(
+                        (issue) =>
+                          issue.code === suggestion.issue_code &&
+                          issue.problem === suggestion.problem &&
+                          issue.context?.expected_path === suggestion.expected_path
+                      )?.context;
+                      return (
+                        <div className="repair-item" key={suggestion.id}>
+                          <strong>{suggestion.problem ? `${suggestion.problem} · ` : ""}{suggestion.expected_path}</strong>
+                          <small>{suggestion.role} · {suggestion.issue_code}</small>
+                          {(issueContext?.source_location || issueContext?.source) && (
+                            <small>
+                              来源配置：{issueContext.source_location || issueContext.source}
+                            </small>
+                          )}
+                          {suggestion.candidates.length > 0 && (
+                            <select
+                              aria-label={`选择 ${suggestion.expected_path} 的包内候选`}
+                              value={choice.candidatePath || ""}
+                              onChange={(event) => setRepairChoices((current) => ({
+                                ...current,
+                                [suggestion.id]: event.target.value ? { candidatePath: event.target.value } : {}
+                              }))}
+                              disabled={repairing}
+                            >
+                              <option value="">选择包内候选…</option>
+                              {suggestion.candidates.map((candidate) => (
+                                <option key={candidate.path} value={candidate.path}>
+                                  {candidate.path} · {Math.round(candidate.confidence * 100)}%
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                          <label className="repair-upload">
+                            <span>或上传补充文件</span>
+                            <input
+                              type="file"
+                              disabled={repairing}
+                              onChange={(event) => {
+                                const nextFile = event.target.files?.[0];
+                                setRepairChoices((current) => ({
+                                  ...current,
+                                  [suggestion.id]: nextFile ? { file: nextFile } : {}
+                                }));
+                              }}
+                            />
+                          </label>
+                          {choice.file && <small>已选择：{choice.file.name}</small>}
+                        </div>
+                      );
+                    })}
+                    <button className="primary-button" type="button" onClick={handleApplyRepairs} disabled={repairing}>
+                      <Wrench size={17} aria-hidden="true" />
+                      {repairing ? "正在创建派生任务…" : "确认修复并重新转换"}
+                    </button>
+                  </div>
                 )}
               </div>
             )}

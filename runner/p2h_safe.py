@@ -929,6 +929,15 @@ def _build_package_convert_parser() -> argparse.ArgumentParser:
     parser.set_defaults(run_doall=False)
     parser.add_argument("--with-statement", action="store_true")
     parser.add_argument("--with-attachments", action="store_true")
+    parser.add_argument(
+        "--progress-format", choices=["text", "jsonl", "none"], default="text"
+    )
+    parser.add_argument("--total-timeout", type=int, default=7200)
+    parser.add_argument("--idle-timeout", type=int, default=300)
+    parser.add_argument("--stage-timeout", type=int, default=1800)
+    parser.add_argument("--problem-timeout", type=int, default=1200)
+    parser.add_argument("--repair-plan", type=Path)
+    parser.add_argument("--supplements-dir", type=Path)
     return parser
 
 
@@ -937,6 +946,14 @@ def _convert_package(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if not re.fullmatch(r"#[0-9A-Fa-f]{6}", args.color):
         parser.error("--color must be in #RRGGBB format")
+    for name in (
+        "total_timeout",
+        "idle_timeout",
+        "stage_timeout",
+        "problem_timeout",
+    ):
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
     options = {
         "pid_start": args.pid_start,
         "owner": args.owner,
@@ -956,16 +973,35 @@ def _convert_package(argv: list[str]) -> int:
     }
     try:
         from package_converter import convert_package
+        from progress import ProgressReporter
 
-        report = convert_package(
-            args.source_zip,
-            args.output,
-            source_format=args.source_format,
-            target_format=args.target_format,
-            loss_policy=args.loss_policy,
-            only=args.only,
-            options=options,
-        )
+        with ProgressReporter(
+            output_format=args.progress_format,
+            total_timeout_seconds=args.total_timeout,
+            idle_timeout_seconds=args.idle_timeout,
+            stage_timeout_seconds=args.stage_timeout,
+            problem_timeout_seconds=args.problem_timeout,
+        ) as reporter:
+            report = convert_package(
+                args.source_zip,
+                args.output,
+                source_format=args.source_format,
+                target_format=args.target_format,
+                loss_policy=args.loss_policy,
+                only=args.only,
+                options=options,
+                reporter=reporter,
+                repair_plan=args.repair_plan,
+                supplements_dir=args.supplements_dir,
+            )
+            reporter.phase(
+                "package",
+                detail="conversion artifacts finalized for host packaging",
+                current=1,
+                total=1,
+                unit="outputs",
+            )
+            reporter.complete(detail="conversion artifacts are ready")
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"package-convert failed: {exc}", file=sys.stderr)
         return 1
