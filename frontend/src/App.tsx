@@ -1,16 +1,50 @@
 import { AlertTriangle, Archive, CheckCircle2, Download, FileArchive, RotateCcw, Shield, Trash2, UploadCloud } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { deleteJob, downloadUrl, getJob, getLogs, inspectZip, JobResponse, startJob, TargetFormat } from "./api";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ConversionReport,
+  deleteJob,
+  downloadUrl,
+  FormatId,
+  getJob,
+  getLogs,
+  getReport,
+  inspectZip,
+  InspectResult,
+  JobResponse,
+  SourceFormat,
+  startJob,
+  TargetFormat
+} from "./api";
 import { LogViewer } from "./components/LogViewer";
 import { StatusBadge } from "./components/StatusBadge";
 
 type MissingEnv = "warn" | "error";
+type IcpcLicense = "unknown" | "public domain" | "cc0" | "cc by" | "cc by-sa" | "educational" | "permission";
 
-const targetOptions: Array<{ value: TargetFormat; label: string; hint: string }> = [
-  { value: "hydro", label: "Polygon -> HydroOJ", hint: "Polygon contest zip" },
-  { value: "domjudge", label: "Polygon -> DOMjudge", hint: "Polygon contest zip" },
-  { value: "hydro_to_domjudge", label: "HydroOJ -> DOMjudge", hint: "HydroOJ package zip" }
-];
+const formatLabels: Record<FormatId, string> = {
+  polygon: "Polygon / Codeforces",
+  hydro: "HydroOJ",
+  icpc: "ICPC / DOMjudge / Kattis",
+  hoj: "HOJ",
+  fps: "FPS / HUSTOJ",
+  qduoj: "QDUOJ",
+  uoj: "UOJ",
+  dmoj: "DMOJ / LQDOJ",
+  generic: "通用测试数据目录"
+};
+const readableFormats = Object.keys(formatLabels) as FormatId[];
+const writableFormats: TargetFormat[] = ["hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj"];
+const packageKinds: Record<FormatId, string> = {
+  polygon: "完整源包",
+  hydro: "完整包",
+  icpc: "完整包",
+  hoj: "完整包",
+  fps: "交换包",
+  qduoj: "完整包",
+  uoj: "评测数据 + sidecar",
+  dmoj: "评测数据 + sidecar",
+  generic: "推断目录"
+};
 
 function splitList(value: string): string[] {
   return value
@@ -27,10 +61,13 @@ function formatBytes(bytes: number): string {
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
-  const [inspect, setInspect] = useState<{ job_id: string; filename: string; size: number; warnings: string[] } | null>(null);
+  const [inspectedFile, setInspectedFile] = useState<File | null>(null);
+  const [inspect, setInspect] = useState<InspectResult | null>(null);
   const [job, setJob] = useState<JobResponse | null>(null);
   const [logs, setLogs] = useState("");
-  const [target, setTarget] = useState<TargetFormat>("hydro");
+  const [sourceFormat, setSourceFormat] = useState<SourceFormat>("auto");
+  const [targetFormat, setTargetFormat] = useState<TargetFormat>("hydro");
+  const [lossPolicy, setLossPolicy] = useState<"warn" | "error">("warn");
   const [pidStart, setPidStart] = useState("P1000");
   const [owner, setOwner] = useState(1);
   const [tags, setTags] = useState("");
@@ -43,114 +80,217 @@ export default function App() {
   const [domjudgeWithAttachments, setDomjudgeWithAttachments] = useState(false);
   const [domjudgeAutoValidator, setDomjudgeAutoValidator] = useState(true);
   const [domjudgeDefaultValidator, setDomjudgeDefaultValidator] = useState(false);
+  const [icpcProfile, setIcpcProfile] = useState<"legacy-icpc" | "2025-09">("legacy-icpc");
+  const [icpcLicense, setIcpcLicense] = useState<IcpcLicense>("unknown");
+  const [icpcRightsOwner, setIcpcRightsOwner] = useState("");
+  const [fpsProfile, setFpsProfile] = useState<"hustoj-1.6" | "qduoj-1.2">("hustoj-1.6");
+  const [report, setReport] = useState<ConversionReport | null>(null);
   const [busy, setBusy] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestEpoch = useRef(0);
 
   const isRunning = job?.status === "queued" || job?.status === "running";
-  const canStart = Boolean(inspect) && !isRunning && !busy;
-  const usesHydroOptions = target === "hydro";
-  const usesDomjudgeOutputOptions = target === "domjudge" || target === "hydro_to_domjudge";
-  const usesPolygonSource = target === "hydro" || target === "domjudge";
+  const canStart = Boolean(inspect && file && inspectedFile === file) && !isRunning && !busy && !resetting;
+  const effectiveSource = sourceFormat === "auto" ? inspect?.detected_format ?? null : sourceFormat;
+  const usesHydroOutputOptions = targetFormat === "hydro";
+  const usesDomjudgeOutputOptions = targetFormat === "icpc";
+  const usesPolygonSource = effectiveSource === "polygon";
   const domjudgeColorPickerValue = /^#[0-9A-Fa-f]{6}$/.test(domjudgeColor) ? domjudgeColor : "#000000";
 
   const validation = useMemo(() => {
-    if (target === "hydro") {
+    if (inspect && sourceFormat === "auto" && !inspect.detected_format) {
+      return "自动识别未达到置信阈值，请手动选择输入格式。";
+    }
+    if (effectiveSource === targetFormat) return "输入和输出格式不能相同。";
+    if (targetFormat === "hydro") {
       if (!/^[A-Za-z]+[0-9]+$/.test(pidStart)) return "PID 起始值应类似 P1000。";
       if (!Number.isInteger(owner) || owner < 1) return "owner 必须是正整数。";
     }
-    if (target === "domjudge" || target === "hydro_to_domjudge") {
+    if (targetFormat === "icpc") {
       if (!/^[A-Za-z]+$/.test(domjudgeCodeStart)) return "DOMjudge 短名起始值应类似 A。";
       if (!/^#[0-9A-Fa-f]{6}$/.test(domjudgeColor)) return "DOMjudge 颜色必须是 #RRGGBB。";
+      if (!["unknown", "public domain"].includes(icpcLicense) && !icpcRightsOwner.trim()) {
+        return "所选 ICPC 许可证需要填写 rights owner。";
+      }
+      if (icpcLicense === "public domain" && icpcRightsOwner.trim()) {
+        return "public domain 题包不能设置 rights owner。";
+      }
     }
-    if (target === "domjudge") {
+    if (usesPolygonSource && targetFormat === "icpc") {
       if (domjudgeAutoValidator && domjudgeDefaultValidator) return "自动识别 checker 和强制默认 validator 不能同时启用。";
     }
     return null;
-  }, [domjudgeAutoValidator, domjudgeCodeStart, domjudgeColor, domjudgeDefaultValidator, owner, pidStart, target]);
+  }, [domjudgeAutoValidator, domjudgeCodeStart, domjudgeColor, domjudgeDefaultValidator, effectiveSource, icpcLicense, icpcRightsOwner, inspect, owner, pidStart, sourceFormat, targetFormat, usesPolygonSource]);
 
   useEffect(() => {
     if (!job || (job.status !== "queued" && job.status !== "running")) return;
+    const jobId = job.id;
+    const epoch = requestEpoch.current;
+    let stopped = false;
+    let timer: number | undefined;
 
-    const timer = window.setInterval(async () => {
+    const schedule = () => {
+      timer = window.setTimeout(poll, 1200);
+    };
+    const poll = async () => {
       try {
-        const [nextJob, nextLogs] = await Promise.all([getJob(job.id), getLogs(job.id)]);
+        const [nextJob, nextLogs] = await Promise.all([getJob(jobId), getLogs(jobId)]);
+        if (stopped || requestEpoch.current !== epoch) return;
+        let retryReport = false;
+        let nextReport: ConversionReport | null = null;
+        if (nextJob.report_ready) {
+          try {
+            nextReport = await getReport(jobId);
+          } catch (err) {
+            retryReport = true;
+            if (!stopped && requestEpoch.current === epoch) {
+              setError(err instanceof Error ? err.message : "无法读取转换报告");
+            }
+          }
+        }
+        if (stopped || requestEpoch.current !== epoch) return;
         setJob(nextJob);
         setLogs(nextLogs);
+        if (nextReport) setReport(nextReport);
+        if (nextJob.status === "queued" || nextJob.status === "running" || retryReport) schedule();
       } catch (err) {
+        if (stopped || requestEpoch.current !== epoch) return;
         setError(err instanceof Error ? err.message : "无法读取任务状态");
+        schedule();
       }
-    }, 1200);
+    };
 
-    return () => window.clearInterval(timer);
-  }, [job]);
+    schedule();
+
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [job?.id]);
 
   async function handleInspect() {
     if (!file) return;
+    const selectedFile = file;
+    const epoch = ++requestEpoch.current;
     setBusy(true);
     setError(null);
     setJob(null);
     setLogs("");
+    setReport(null);
     try {
-      setInspect(await inspectZip(file));
+      const nextInspect = await inspectZip(selectedFile);
+      if (requestEpoch.current !== epoch) return;
+      setInspect(nextInspect);
+      setInspectedFile(selectedFile);
     } catch (err) {
+      if (requestEpoch.current !== epoch) return;
       setInspect(null);
+      setInspectedFile(null);
       setError(err instanceof Error ? err.message : "上传失败");
     } finally {
-      setBusy(false);
+      if (requestEpoch.current === epoch) setBusy(false);
     }
   }
 
   async function handleStart(event: FormEvent) {
     event.preventDefault();
-    if (!inspect || validation) return;
+    if (!inspect || !file || inspectedFile !== file || validation) return;
+    const epoch = requestEpoch.current;
     setBusy(true);
     setError(null);
     try {
       const nextJob = await startJob({
         job_id: inspect.job_id,
-        target,
-        pid_start: pidStart,
-        owner,
-        tags: splitList(tags),
+        source_format: sourceFormat,
+        target_format: targetFormat,
+        loss_policy: lossPolicy,
         only: splitList(only),
-        run_doall: usesPolygonSource && runDoall,
-        missing_env: missingEnv,
-        domjudge_code_start: domjudgeCodeStart,
-        domjudge_color: domjudgeColor,
-        domjudge_with_statement: domjudgeWithStatement,
-        domjudge_with_attachments: domjudgeWithAttachments,
-        domjudge_auto_validator: domjudgeAutoValidator,
-        domjudge_default_validator: domjudgeDefaultValidator
+        options: {
+          polygon: {
+            run_doall: usesPolygonSource && runDoall,
+            missing_env: missingEnv,
+            with_statement: domjudgeWithStatement,
+            with_attachments: domjudgeWithAttachments,
+            validator_mode: domjudgeDefaultValidator ? "default" : domjudgeAutoValidator ? "auto" : "custom"
+          },
+          hydro: { pid_start: pidStart, owner, tags: splitList(tags) },
+          icpc: {
+            code_start: domjudgeCodeStart,
+            color: domjudgeColor,
+            profile: icpcProfile,
+            license: icpcLicense,
+            rights_owner: icpcRightsOwner.trim()
+          },
+          fps: { profile: fpsProfile }
+        }
       });
+      if (requestEpoch.current !== epoch) return;
       setJob(nextJob);
     } catch (err) {
+      if (requestEpoch.current !== epoch) return;
       setError(err instanceof Error ? err.message : "任务启动失败");
     } finally {
-      setBusy(false);
+      if (requestEpoch.current === epoch) setBusy(false);
     }
   }
 
   async function handleReset() {
-    if (inspect) {
-      try {
-        await deleteJob(inspect.job_id);
-      } catch {
-        // The job may already have been cleaned by the backend; reset the UI anyway.
-      }
-    }
+    const jobId = inspect?.job_id;
+    const epoch = ++requestEpoch.current;
+    setResetting(true);
+    setBusy(false);
     setFile(null);
+    setInspectedFile(null);
     setInspect(null);
     setJob(null);
     setLogs("");
+    setReport(null);
     setError(null);
+    setPidStart("P1000");
+    setOwner(1);
+    setTags("");
+    setOnly("");
     setRunDoall(false);
-    setTarget("hydro");
+    setMissingEnv("warn");
+    setSourceFormat("auto");
+    setTargetFormat("hydro");
+    setLossPolicy("warn");
     setDomjudgeCodeStart("A");
     setDomjudgeColor("#000000");
     setDomjudgeWithStatement(false);
     setDomjudgeWithAttachments(false);
     setDomjudgeAutoValidator(true);
     setDomjudgeDefaultValidator(false);
+    setIcpcProfile("legacy-icpc");
+    setIcpcLicense("unknown");
+    setIcpcRightsOwner("");
+    setFpsProfile("hustoj-1.6");
+    if (jobId) {
+      try {
+        await deleteJob(jobId);
+      } catch {
+        // The job may already have been cleaned by the backend; reset the UI anyway.
+      }
+    }
+    if (requestEpoch.current === epoch) setResetting(false);
+  }
+
+  function handleFileChange(nextFile: File | null) {
+    requestEpoch.current += 1;
+    const previousJobId = inspect?.job_id;
+    setFile(nextFile);
+    setInspectedFile(null);
+    setInspect(null);
+    setJob(null);
+    setLogs("");
+    setReport(null);
+    setError(null);
+    if (previousJobId && !isRunning) {
+      void deleteJob(previousJobId).catch(() => {
+        // Invalidating the old inspection is sufficient even if backend cleanup races with TTL cleanup.
+      });
+    }
   }
 
   return (
@@ -159,8 +299,8 @@ export default function App() {
         <div className="brand">
           <Archive size={24} aria-hidden="true" />
           <div>
-            <h1>Polygon Converter Web UI</h1>
-            <p>在受限 Docker runner 内转换 Polygon、HydroOJ 与 DOMjudge 题包</p>
+            <h1>OJ 题包转换器</h1>
+            <p>在受限 Docker runner 内转换主流 OJ 与 ICPC 标准题包</p>
           </div>
         </div>
         <div className="security-chip">
@@ -175,7 +315,7 @@ export default function App() {
             <div className="panel-heading">
               <div>
                 <h2>上传题包</h2>
-                <p>接受 Polygon contest、HydroOJ 或 DOMjudge zip，后端只做 zip 基础校验。</p>
+                <p>接受 Polygon、HydroOJ、ICPC、HOJ、FPS、QDUOJ、UOJ、DMOJ 或通用 zip。</p>
               </div>
               <FileArchive size={20} aria-hidden="true" />
             </div>
@@ -187,17 +327,17 @@ export default function App() {
               <input
                 type="file"
                 accept=".zip,application/zip"
-                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-                disabled={busy || isRunning}
+                onChange={(event) => handleFileChange(event.target.files?.[0] ?? null)}
+                disabled={busy || isRunning || resetting}
               />
             </label>
 
             <div className="button-row">
-              <button className="primary-button" type="button" onClick={handleInspect} disabled={!file || busy || isRunning}>
+              <button className="primary-button" type="button" onClick={handleInspect} disabled={!file || busy || isRunning || resetting}>
                 <UploadCloud size={17} aria-hidden="true" />
                 上传并检查
               </button>
-              <button className="ghost-button" type="button" onClick={handleReset} disabled={busy && !isRunning}>
+              <button className="ghost-button" type="button" onClick={handleReset} disabled={resetting || (busy && !isRunning)}>
                 <RotateCcw size={17} aria-hidden="true" />
                 重新开始
               </button>
@@ -209,9 +349,56 @@ export default function App() {
                 <div>
                   <strong>{inspect.filename}</strong>
                   <span>{formatBytes(inspect.size)} · Job {inspect.job_id.slice(0, 8)}</span>
+                  <span>
+                    {inspect.detected_format
+                      ? `识别为 ${formatLabels[inspect.detected_format]}`
+                      : "未唯一识别，请手动选择输入格式"}
+                  </span>
                 </div>
               </div>
             )}
+            {inspect && (inspect.warnings.length > 0 || (!inspect.detected_format && inspect.format_candidates.length > 0)) && (
+              <div className="inspection-details" aria-live="polite">
+                {inspect.warnings.length > 0 && (
+                  <ul>
+                    {inspect.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+                  </ul>
+                )}
+                {!inspect.detected_format && inspect.format_candidates.length > 0 && (
+                  <div>
+                    <strong>识别候选</strong>
+                    <ul>
+                      {inspect.format_candidates.map((candidate) => (
+                        <li key={candidate.format}>
+                          {formatLabels[candidate.format]} · {Math.round(candidate.confidence * 100)}%
+                          {candidate.evidence.length > 0 ? ` · ${candidate.evidence.join("；")}` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+            <details className="capability-matrix">
+              <summary>查看格式能力矩阵</summary>
+              <div>
+                <table>
+                  <thead>
+                    <tr><th>格式</th><th>读取</th><th>输出</th><th>包类型</th></tr>
+                  </thead>
+                  <tbody>
+                    {readableFormats.map((format) => (
+                      <tr key={format}>
+                        <td>{formatLabels[format]}</td>
+                        <td>支持</td>
+                        <td>{writableFormats.includes(format as TargetFormat) ? "支持" : "—"}</td>
+                        <td>{packageKinds[format]}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
           </section>
 
           <form className="panel config-panel" onSubmit={handleStart}>
@@ -222,22 +409,46 @@ export default function App() {
               </div>
             </div>
 
-            <div className="target-switch" aria-label="转换方向">
-              {targetOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={target === option.value ? "active" : ""}
-                  onClick={() => setTarget(option.value)}
+            <div className="format-selectors" aria-label="转换方向">
+              <label>
+                <span>输入格式</span>
+                <select
+                  value={sourceFormat}
+                  onChange={(event) => setSourceFormat(event.target.value as SourceFormat)}
                   disabled={isRunning}
                 >
-                  <strong>{option.label}</strong>
-                  <small>{option.hint}</small>
-                </button>
-              ))}
+                  <option value="auto">自动识别{inspect?.detected_format ? ` · ${formatLabels[inspect.detected_format]}` : ""}</option>
+                  {readableFormats.map((format) => (
+                    <option key={format} value={format}>{formatLabels[format]}</option>
+                  ))}
+                </select>
+              </label>
+              <span className="format-arrow" aria-hidden="true">→</span>
+              <label>
+                <span>输出格式</span>
+                <select
+                  value={targetFormat}
+                  onChange={(event) => setTargetFormat(event.target.value as TargetFormat)}
+                  disabled={isRunning}
+                >
+                  {writableFormats.map((format) => (
+                    <option key={format} value={format} disabled={effectiveSource === format}>
+                      {formatLabels[format]}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
 
-            {usesHydroOptions && (
+            <label>
+              <span>有损转换策略</span>
+              <select value={lossPolicy} onChange={(event) => setLossPolicy(event.target.value as "warn" | "error")} disabled={isRunning}>
+                <option value="warn">warn · 输出结果并列出损失</option>
+                <option value="error">error · 发现字段损失立即失败</option>
+              </select>
+            </label>
+
+            {usesHydroOutputOptions && (
               <>
                 <div className="form-grid">
                   <label>
@@ -260,6 +471,20 @@ export default function App() {
                   <span>tags</span>
                   <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="校赛, 2026" disabled={isRunning} />
                 </label>
+
+                {effectiveSource === "icpc" && (
+                  <div className="format-note">
+                    <strong>PDF 题面</strong>
+                    <span>DOMjudge 的 problem_statement/*.pdf 会写入 additional_file，并通过 @[pdf](file://文件名) 作为 Hydro 题面。</span>
+                  </div>
+                )}
+
+                {effectiveSource === "hoj" && (
+                  <div className="format-note">
+                    <strong>HOJ 原生题包</strong>
+                    <span>读取成对的 problem_x.json 与 problem_x/ 测试数据目录，并保留 OI 分组、文件 IO、SPJ 和交互题配置。</span>
+                  </div>
+                )}
               </>
             )}
 
@@ -285,7 +510,7 @@ export default function App() {
                   </label>
                 </div>
 
-                {target === "domjudge" && (
+                {usesPolygonSource && (
                   <>
                     <label className="checkbox-row">
                       <input
@@ -328,6 +553,70 @@ export default function App() {
                     </label>
                   </>
                 )}
+
+                <label>
+                  <span>ICPC 包规范</span>
+                  <select value={icpcProfile} onChange={(event) => setIcpcProfile(event.target.value as "legacy-icpc" | "2025-09")} disabled={isRunning}>
+                    <option value="legacy-icpc">legacy-icpc · DOMjudge/Kattis 兼容</option>
+                    <option value="2025-09">2025-09 · 新标准（需要 accepted solution）</option>
+                  </select>
+                </label>
+
+                <div className="form-grid">
+                  <label>
+                    <span>题包许可证</span>
+                    <select
+                      value={icpcLicense}
+                      onChange={(event) => {
+                        const value = event.target.value as IcpcLicense;
+                        setIcpcLicense(value);
+                        if (value === "public domain") setIcpcRightsOwner("");
+                      }}
+                      disabled={isRunning}
+                    >
+                      <option value="unknown">unknown · 未声明</option>
+                      <option value="public domain">public domain</option>
+                      <option value="cc0">CC0</option>
+                      <option value="cc by">CC BY 4.0+</option>
+                      <option value="cc by-sa">CC BY-SA 4.0+</option>
+                      <option value="educational">educational</option>
+                      <option value="permission">permission</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>rights owner</span>
+                    <input
+                      value={icpcRightsOwner}
+                      onChange={(event) => setIcpcRightsOwner(event.target.value)}
+                      placeholder="版权方名称"
+                      disabled={isRunning || icpcLicense === "public domain"}
+                    />
+                  </label>
+                </div>
+              </div>
+            )}
+
+            {targetFormat === "hoj" && (
+              <div className="format-note">
+                <strong>HOJ 导入结构</strong>
+                <span>输出 zip 顶层为成对的 problem_x.json 与 problem_x/ 目录，可直接用于 HOJ 后台题目导入。</span>
+              </div>
+            )}
+
+            {targetFormat === "fps" && (
+              <label>
+                <span>FPS 兼容 profile</span>
+                <select value={fpsProfile} onChange={(event) => setFpsProfile(event.target.value as "hustoj-1.6" | "qduoj-1.2")} disabled={isRunning}>
+                  <option value="hustoj-1.6">HUSTOJ / OpenJudger · FPS 1.6</option>
+                  <option value="qduoj-1.2">QDUOJ FPS 兼容 · FPS 1.2</option>
+                </select>
+              </label>
+            )}
+
+            {(targetFormat === "uoj" || targetFormat === "dmoj") && (
+              <div className="format-note">
+                <strong>评测数据包</strong>
+                <span>输出包含可上传的评测数据 zip，以及独立题面和 metadata sidecar；站点题库记录仍需在目标 OJ 中创建。</span>
               </div>
             )}
 
@@ -361,7 +650,7 @@ export default function App() {
               </>
             )}
 
-            {validation && <div className="inline-error">{validation}</div>}
+            {validation && <div className="inline-error" role="alert">{validation}</div>}
 
             <button className="primary-button wide" type="submit" disabled={!canStart || Boolean(validation)}>
               <Shield size={17} aria-hidden="true" />
@@ -397,21 +686,52 @@ export default function App() {
                 <span>结束</span>
                 <strong>{job?.finished_at ? new Date(job.finished_at).toLocaleTimeString() : "-"}</strong>
               </div>
+              <div>
+                <span>格式</span>
+                <strong>{job?.source_format && job?.target_format ? `${job.source_format} → ${job.target_format}` : "-"}</strong>
+              </div>
+              <div>
+                <span>字段损失</span>
+                <strong>{job?.report_counts.loss ?? 0}</strong>
+              </div>
             </div>
 
-            {job?.error && <div className="inline-error">{job.error}</div>}
-            {error && <div className="inline-error">{error}</div>}
+            <div aria-live="polite">
+              {job?.error && <div className="inline-error" role="alert">{job.error}</div>}
+              {error && <div className="inline-error" role="alert">{error}</div>}
+            </div>
 
             <div className="button-row">
-              <a className={`download-button ${job?.download_ready ? "" : "disabled"}`} href={job?.download_ready ? downloadUrl(job.id) : undefined}>
+              <a className={`download-button ${job?.download_ready ? "" : "disabled"}`} href={job?.download_ready ? downloadUrl(job.id) : undefined} aria-disabled={!job?.download_ready} tabIndex={job?.download_ready ? 0 : -1}>
                 <Download size={17} aria-hidden="true" />
                 下载结果
               </a>
-              <button className="ghost-button" type="button" onClick={handleReset} disabled={!inspect}>
+              <button className="ghost-button" type="button" onClick={handleReset} disabled={!inspect || resetting}>
                 <Trash2 size={17} aria-hidden="true" />
                 清理任务
               </button>
             </div>
+
+            {report && (
+              <div className="conversion-report">
+                <div className="report-heading">
+                  <strong>转换报告</strong>
+                  <span>{report.problem_count} 题 · {report.counts.warning} 警告 · {report.counts.loss} 项损失</span>
+                </div>
+                {report.issues.length === 0 ? (
+                  <p>未发现字段损失或兼容性警告。</p>
+                ) : (
+                  <ul>
+                    {report.issues.map((issue, index) => (
+                      <li key={`${issue.code}-${index}`} data-severity={issue.severity}>
+                        <strong>{issue.severity.toUpperCase()} · {issue.problem ? `${issue.problem} · ` : ""}{issue.code}</strong>
+                        <span>{issue.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
           </section>
 
           <LogViewer logs={logs} />

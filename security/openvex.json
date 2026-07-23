@@ -1,0 +1,21 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/LMTINSUZHOU/Polygon-to-Hydro-or-Domujudge-Web-UI/security/openvex/2026-07-23",
+  "author": "https://github.com/LMTINSUZHOU/Polygon-to-Hydro-or-Domujudge-Web-UI",
+  "timestamp": "2026-07-23T00:00:00+08:00",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-15308"
+      },
+      "products": [
+        {
+          "@id": "pkg:generic/python@3.14.6"
+        }
+      ],
+      "status": "fixed",
+      "status_notes": "Both runner images replace Lib/html/parser.py with CPython's official 3.14 backport at commit 07efb08123ba9367a7107325adb9d5626dca1ca9, pinned by SHA-256 5c5ed245889135564e75dfed9a47aeb6b4d3e5a2e9614d918a986767e3747539."
+    }
+  ]
+}

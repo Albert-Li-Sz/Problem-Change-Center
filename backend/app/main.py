@@ -10,7 +10,7 @@ from .schemas import DeleteResponse, InspectResponse, JobRequest, JobResponse
 from .storage import Storage
 
 
-app = FastAPI(title="Polygon Converter Web UI", version="0.2.0")
+app = FastAPI(title="OJ Package Converter", version="0.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,6 +22,12 @@ app.add_middleware(
 
 storage = Storage(settings)
 job_manager = JobManager(settings, storage)
+
+
+@app.middleware("http")
+async def cleanup_expired_jobs(request, call_next):  # type: ignore[no-untyped-def]
+    job_manager.cleanup_expired()
+    return await call_next(request)
 
 
 @app.get("/api/health")
@@ -49,13 +55,24 @@ def get_logs(job_id: str) -> PlainTextResponse:
     return PlainTextResponse(storage.read_logs(job_id))
 
 
+@app.get("/api/jobs/{job_id}/report")
+def get_report(job_id: str) -> dict[str, object]:
+    return storage.read_report(job_id)
+
+
 @app.get("/api/jobs/{job_id}/download")
 def download(job_id: str) -> FileResponse:
     response = job_manager.response(job_id)
     paths = storage.paths_for(job_id)
     if response.status != "success" or not paths.result_path.exists():
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Download is not ready")
-    return FileResponse(paths.result_path, filename=f"polygon-convert-{job_id}.zip", media_type="application/zip")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Download is not ready"
+        )
+    return FileResponse(
+        paths.result_path,
+        filename=f"oj-package-convert-{job_id}.zip",
+        media_type="application/zip",
+    )
 
 
 @app.delete("/api/jobs/{job_id}", response_model=DeleteResponse)

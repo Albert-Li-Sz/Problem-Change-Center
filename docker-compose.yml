@@ -3,7 +3,7 @@ services:
     build:
       context: ./runner
       args:
-        PYTHON_BASE_IMAGE: ${P2H_PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}
+        PYTHON_BASE_IMAGE: ${P2H_PYTHON_BASE_IMAGE:-python:3.14-slim-trixie}
         P2H_REF: 93aca21
         P2D_REF: 8b0919a2a3e0946faaf677ec5cb2cad65fee7e30
         P2H_APT_MIRROR: ${P2H_APT_MIRROR:-}
@@ -25,7 +25,7 @@ services:
       context: ./runner
       dockerfile: Dockerfile.wine
       args:
-        PYTHON_BASE_IMAGE: ${P2H_PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}
+        PYTHON_BASE_IMAGE: ${P2H_PYTHON_BASE_IMAGE:-python:3.14-slim-trixie}
         P2H_REF: 93aca21
         P2D_REF: 8b0919a2a3e0946faaf677ec5cb2cad65fee7e30
         P2H_APT_MIRROR: ${P2H_APT_MIRROR:-}

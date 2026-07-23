@@ -3,13 +3,13 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-DEFAULT_PYTHON_BASE_IMAGE="python:3.12-slim-bookworm"
+DEFAULT_PYTHON_BASE_IMAGE="python:3.14-slim-trixie"
 PYTHON_BASE_IMAGE="${P2H_PYTHON_BASE_IMAGE:-$DEFAULT_PYTHON_BASE_IMAGE}"
 PYTHON_BASE_IMAGE_EXPLICIT=0
 if [[ -n "${P2H_PYTHON_BASE_IMAGE:-}" ]]; then
   PYTHON_BASE_IMAGE_EXPLICIT=1
 fi
-PYTHON_BASE_IMAGE_FALLBACKS="${P2H_PYTHON_BASE_IMAGE_FALLBACKS:-docker.m.daocloud.io/library/python:3.12-slim-bookworm hub.rat.dev/library/python:3.12-slim-bookworm}"
+PYTHON_BASE_IMAGE_FALLBACKS="${P2H_PYTHON_BASE_IMAGE_FALLBACKS:-docker.m.daocloud.io/library/python:3.14-slim-trixie hub.rat.dev/library/python:3.14-slim-trixie}"
 APT_MIRROR="${P2H_APT_MIRROR:-}"
 APT_SECURITY_MIRROR="${P2H_APT_SECURITY_MIRROR:-}"
 OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
@@ -68,7 +68,7 @@ Examples:
   ./install.sh
   ./install.sh --wine
   ./install.sh --skip-runner
-  ./install.sh --base-image registry.example.com/library/python:3.12-slim-bookworm
+  ./install.sh --base-image registry.example.com/library/python:3.14-slim-trixie
   ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
   ./install.sh --build-proxy
   ./install.sh --no-build-proxy
@@ -175,6 +175,23 @@ import sys
 if sys.version_info < (3, 10):
     raise SystemExit("Python 3.10 or newer is required")
 PY
+}
+
+check_node() {
+  require_cmd node
+  require_cmd npm
+  if node -e '
+const [major, minor] = process.versions.node.split(".").map(Number);
+const supported =
+  (major === 20 && minor >= 19) ||
+  (major === 22 && minor >= 12) ||
+  major >= 24;
+process.exit(supported ? 0 : 1);
+'; then
+    return
+  fi
+
+  die "Node.js 20.19+, 22.12+, or 24+ is required by the frontend dependencies (found $(node -p 'process.versions.node' 2>/dev/null || printf unknown))"
 }
 
 compose_command() {
@@ -401,7 +418,7 @@ install_backend() {
 
 install_frontend() {
   log "Installing frontend dependencies"
-  require_cmd npm
+  check_node
 
   (
     cd "$ROOT_DIR/frontend"
@@ -486,7 +503,7 @@ If Debian apt sources are slow or blocked, use an accessible apt mirror:
   ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
 
 If Docker Hub is timing out, use an accessible mirror for the Python base image:
-  ./install.sh --base-image <registry>/library/python:3.12-slim-bookworm
+  ./install.sh --base-image <registry>/library/python:3.14-slim-trixie
 EOF
     exit 1
   fi
@@ -522,7 +539,7 @@ write_env_file() {
     if [[ "$BUILD_WINE" -eq 1 ]] && ! grep -q '^P2H_DOCKER_WINE_PIDS_LIMIT=' "$env_file"; then
       warn "Wine runner works better with P2H_DOCKER_WINE_PIDS_LIMIT=4096, especially on macOS/Apple Silicon."
     fi
-    if [[ "$PYTHON_BASE_IMAGE" != "python:3.12-slim-bookworm" ]] && ! grep -q '^P2H_PYTHON_BASE_IMAGE=' "$env_file"; then
+    if [[ "$PYTHON_BASE_IMAGE" != "$DEFAULT_PYTHON_BASE_IMAGE" ]] && ! grep -q '^P2H_PYTHON_BASE_IMAGE=' "$env_file"; then
       warn "Custom base image was used for this build, but existing .env was not changed. Add P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE if you want future manual builds to reuse it."
     fi
     if [[ -n "$APT_MIRROR" ]] && ! grep -q '^P2H_APT_MIRROR=' "$env_file"; then
@@ -540,6 +557,11 @@ P2H_APT_MIRROR=$APT_MIRROR
 P2H_APT_SECURITY_MIRROR=$APT_SECURITY_MIRROR
 P2H_MAX_UPLOAD_BYTES=536870912
 P2H_JOB_TIMEOUT_SECONDS=600
+P2H_JOB_TTL_SECONDS=86400
+P2H_MAX_CONCURRENT_JOBS=2
+P2H_MAX_STORED_JOBS=100
+P2H_MAX_STORAGE_BYTES=10737418240
+P2H_MAX_LOG_BYTES=10485760
 P2H_DOCKER_MEMORY=1g
 P2H_DOCKER_CPUS=2
 P2H_DOCKER_PIDS_LIMIT=1024
@@ -547,6 +569,7 @@ P2H_DOCKER_WINE_PIDS_LIMIT=4096
 P2H_DOCKER_WINE_HOME_SIZE=4g
 P2H_DOCKER_TMP_SIZE=512m
 P2H_DOCKER_WORK_SIZE=1g
+P2H_DOCKER_OUTPUT_SIZE=1g
 
 P2H_BACKEND_HOST=127.0.0.1
 P2H_BACKEND_PORT=8000

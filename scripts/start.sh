@@ -39,6 +39,11 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+P2H_BACKEND_HOST_OVERRIDE="${P2H_BACKEND_HOST-}"
+P2H_BACKEND_PORT_OVERRIDE="${P2H_BACKEND_PORT-}"
+P2H_FRONTEND_HOST_OVERRIDE="${P2H_FRONTEND_HOST-}"
+P2H_FRONTEND_PORT_OVERRIDE="${P2H_FRONTEND_PORT-}"
+
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
@@ -46,10 +51,10 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
 fi
 
-P2H_BACKEND_HOST="${P2H_BACKEND_HOST:-127.0.0.1}"
-P2H_BACKEND_PORT="${P2H_BACKEND_PORT:-8000}"
-P2H_FRONTEND_HOST="${P2H_FRONTEND_HOST:-127.0.0.1}"
-P2H_FRONTEND_PORT="${P2H_FRONTEND_PORT:-5173}"
+P2H_BACKEND_HOST="${P2H_BACKEND_HOST_OVERRIDE:-${P2H_BACKEND_HOST:-127.0.0.1}}"
+P2H_BACKEND_PORT="${P2H_BACKEND_PORT_OVERRIDE:-${P2H_BACKEND_PORT:-8000}}"
+P2H_FRONTEND_HOST="${P2H_FRONTEND_HOST_OVERRIDE:-${P2H_FRONTEND_HOST:-127.0.0.1}}"
+P2H_FRONTEND_PORT="${P2H_FRONTEND_PORT_OVERRIDE:-${P2H_FRONTEND_PORT:-5173}}"
 
 pids=()
 
@@ -59,6 +64,30 @@ is_macos() {
 
 is_linux() {
   [[ "$OS_NAME" == "Linux" ]]
+}
+
+is_loopback_host() {
+  case "$1" in
+    127.0.0.1|localhost|::1|'[::1]')
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_local_bindings() {
+  if [[ "$RUN_BACKEND" -eq 1 ]] && ! is_loopback_host "$P2H_BACKEND_HOST"; then
+    printf 'error: refusing to expose the unauthenticated backend on non-loopback host %s\n' "$P2H_BACKEND_HOST" >&2
+    printf 'Run it on 127.0.0.1 and use an authenticated reverse proxy for remote access.\n' >&2
+    exit 1
+  fi
+  if [[ "$RUN_FRONTEND" -eq 1 ]] && ! is_loopback_host "$P2H_FRONTEND_HOST"; then
+    printf 'error: refusing to expose the frontend API proxy on non-loopback host %s\n' "$P2H_FRONTEND_HOST" >&2
+    printf 'Run it on 127.0.0.1 and use an authenticated reverse proxy for remote access.\n' >&2
+    exit 1
+  fi
 }
 
 print_missing_docker_help() {
@@ -122,9 +151,27 @@ check_docker_access() {
   fi
 }
 
+check_runner_image() {
+  local runner_image="${P2H_RUNNER_IMAGE:-p2h-runner}"
+  if docker image inspect "$runner_image" >/dev/null 2>&1; then
+    return
+  fi
+
+  printf 'error: configured runner image %s is missing.\n' "$runner_image" >&2
+  if [[ "$runner_image" == "p2h-runner-wine" ]]; then
+    printf 'Build it with: ./install.sh --wine\n' >&2
+  else
+    printf 'Build it with: ./install.sh\n' >&2
+    printf 'Or run: docker compose --profile runner build runner\n' >&2
+  fi
+  printf 'If using a custom image, set P2H_RUNNER_IMAGE to its exact local tag.\n' >&2
+  exit 1
+}
+
 cleanup() {
   local pid
-  for pid in "${pids[@]}"; do
+  for pid in "${pids[@]:-}"; do
+    [[ -n "$pid" ]] || continue
     kill "$pid" >/dev/null 2>&1 || true
   done
 }
@@ -157,8 +204,11 @@ start_frontend() {
   pids+=("$!")
 }
 
+validate_local_bindings
+
 if [[ "$RUN_BACKEND" -eq 1 ]]; then
   check_docker_access
+  check_runner_image
   start_backend
 fi
 

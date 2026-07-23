@@ -5,23 +5,38 @@ import logging
 import os
 import re
 import shlex
+import shutil
+import subprocess  # nosec B404
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from format_bridge import convert_hydro_to_domjudge
+from defusedxml import ElementTree as DefusedET
+
+from format_bridge import (
+    convert_domjudge_to_hydro,
+    convert_hydro_to_domjudge,
+    validate_zip_archive,
+)
+from hoj_bridge import (
+    convert_hoj_to_domjudge,
+    convert_hoj_to_hydro,
+    convert_hydro_to_hoj,
+)
 
 
 EXECUTABLE_SUFFIXES = {".sh", ".bash", ".exe"}
+NATIVE_CPP_SUFFIXES = {".cc", ".cpp", ".cxx"}
+NATIVE_C_SUFFIXES = {".c"}
+WINE_EXE_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])wine[ \t]+"
+    r"(?P<target>[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.exe)"
+)
+MAX_POLYGON_SCRIPT_BYTES = 2 * 1024 * 1024
 
 STRICT_DOALL_BASH_ENV = """\
 read() {
-    if [ "$#" -gt 0 ] && ! { [ "$#" -eq 1 ] && [ "$1" = "-r" ]; }; then
-        builtin read "$@"
-        return "$?"
-    fi
-
     builtin read "$@"
     local status=$?
     if [ "$status" -ne 0 ]; then
@@ -97,7 +112,13 @@ def collect_tools_from_script(script_path: Path, tools: set[str]) -> None:
         return
 
     text = script_path.read_text(encoding="utf-8", errors="ignore")
-    functions = set(re.findall(r"^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?\s*\{", text, flags=re.M))
+    functions = set(
+        re.findall(
+            r"^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?\s*\{",
+            text,
+            flags=re.M,
+        )
+    )
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -111,7 +132,9 @@ def collect_tools_from_script(script_path: Path, tools: set[str]) -> None:
         if re.search(r"(^|[;&|({\s])javac\s", stripped):
             tools.add("javac")
 
-        if re.match(r"^(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\))?\s*\{", stripped):
+        if re.match(
+            r"^(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\))?\s*\{", stripped
+        ):
             continue
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]*\])?\s*=", stripped):
             continue
@@ -120,7 +143,7 @@ def collect_tools_from_script(script_path: Path, tools: set[str]) -> None:
 
         try:
             parts = shlex.split(stripped, posix=True)
-        except Exception:
+        except ValueError:
             continue
         if not parts:
             continue
@@ -130,7 +153,7 @@ def collect_tools_from_script(script_path: Path, tools: set[str]) -> None:
             continue
         if first in {"bash", "sh"}:
             continue
-        if first.startswith(("scripts/", "./", "../", "$")):
+        if first.startswith(("scripts/", "files/", "solutions/", "./", "../", "$")):
             continue
         if "=" in first and first.split("=", 1)[0].isidentifier():
             continue
@@ -168,6 +191,343 @@ def normalize_polygon_testdata_line_endings(root: Path, slugs: list[str]) -> int
             if _normalize_crlf_file(path):
                 normalized += 1
     return normalized
+
+
+def normalize_polygon_doall_inputs(root: Path, slugs: list[str]) -> int:
+    normalized = 0
+    relative_dirs = (
+        Path("tests"),
+        Path("files/tests/validator-tests"),
+        Path("files/tests/checker-tests"),
+    )
+    for slug in slugs:
+        problem_root = root / "problems" / slug
+        for relative_dir in relative_dirs:
+            data_dir = problem_root / relative_dir
+            if not data_dir.is_dir():
+                continue
+            for path in data_dir.rglob("*"):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                if _normalize_crlf_file(path):
+                    normalized += 1
+    return normalized
+
+
+def prepare_native_polygon_doall(
+    work_root: Path, slugs: list[str], *, verbose: bool = False
+) -> int:
+    """Replace source-backed Wine commands with native Linux executables.
+
+    Polygon exports created on Windows commonly contain both PE binaries and the
+    C/C++ source used to build them. Rebuilding those binaries inside the runner
+    avoids Wine entirely and is especially important on Apple Silicon, where an
+    amd64 container plus Wine adds a second emulation layer.
+    """
+
+    rebuilt = 0
+    for slug in slugs:
+        problem_root = work_root / "problems" / slug
+        if not problem_root.is_dir():
+            continue
+
+        scripts = _polygon_shell_scripts(problem_root)
+        wine_targets: set[str] = set()
+        script_text: dict[Path, str] = {}
+        unsupported_wine_syntax = False
+        for script in scripts:
+            text = _read_polygon_script(script)
+            if text is None:
+                unsupported_wine_syntax = True
+                break
+            script_text[script] = text
+            matches = list(WINE_EXE_RE.finditer(text))
+            if re.search(r"(?<![A-Za-z0-9_-])wine(?:64)?[ \t]+", text):
+                matched_starts = {match.start() for match in matches}
+                wine_starts = {
+                    match.start()
+                    for match in re.finditer(r"(?<![A-Za-z0-9_-])wine[ \t]+", text)
+                }
+                if wine_starts != matched_starts:
+                    unsupported_wine_syntax = True
+                    break
+            wine_targets.update(
+                _normalize_wine_target(match.group("target")) for match in matches
+            )
+
+        if unsupported_wine_syntax or not wine_targets:
+            continue
+
+        source_map = _polygon_native_source_map(problem_root)
+        towin_target = "files/towin.exe"
+        compile_targets = wine_targets - {towin_target}
+        if not compile_targets.issubset(source_map):
+            if verbose:
+                missing = ", ".join(sorted(compile_targets - source_map))
+                print(
+                    f"[{slug}] native doall fallback unavailable; "
+                    f"missing supported source for: {missing}"
+                )
+            continue
+
+        with tempfile.TemporaryDirectory(
+            prefix=".p2h-native-build-", dir=work_root
+        ) as build_dir_text:
+            build_dir = Path(build_dir_text)
+            compiled: dict[str, Path] = {}
+            compile_total = len(compile_targets)
+            try:
+                for index, target in enumerate(sorted(compile_targets), start=1):
+                    source, source_type = source_map[target]
+                    output = build_dir / f"{index:04d}.exe"
+                    command = _native_compile_command(source, source_type, output)
+                    print(
+                        f"[{slug}] native compile {index}/{compile_total}: {target}",
+                        flush=True,
+                    )
+                    # Compiler name and flags are runner-controlled; uploaded
+                    # paths are passed as argv and shell execution is disabled.
+                    completed = subprocess.run(  # nosec B603
+                        command,
+                        cwd=problem_root,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=180,
+                    )
+                    if completed.returncode != 0:
+                        detail = (completed.stderr or completed.stdout).strip()
+                        if len(detail) > 2000:
+                            detail = detail[-2000:]
+                        raise RuntimeError(
+                            f"failed to rebuild {target} from "
+                            f"{source.relative_to(problem_root)}"
+                            + (f": {detail}" if detail else "")
+                        )
+                    output.chmod(0o755)
+                    compiled[target] = output
+            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                print(
+                    f"[{slug}] native doall fallback failed: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+
+            for target, built_binary in compiled.items():
+                destination = _safe_problem_path(problem_root, target)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(built_binary, destination)
+                destination.chmod(0o755)
+
+            if towin_target in wine_targets:
+                towin = _safe_problem_path(problem_root, towin_target)
+                towin.parent.mkdir(parents=True, exist_ok=True)
+                towin.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "set -e\n"
+                    'if [ "$#" -ne 1 ]; then exit 2; fi\n'
+                    "sed 's/\\r$//' -- \"$1\"\n",
+                    encoding="utf-8",
+                )
+                towin.chmod(0o755)
+
+            for script, text in script_text.items():
+                rewritten = WINE_EXE_RE.sub(_native_wine_replacement, text)
+                if rewritten != text:
+                    script.write_text(rewritten, encoding="utf-8")
+
+            _make_polygon_doall_fail_fast(problem_root)
+            rebuilt += len(compiled)
+            print(
+                f"[{slug}] native compile complete: {len(compiled)} executable(s)",
+                flush=True,
+            )
+
+    return rebuilt
+
+
+def ensure_polygon_wine_is_usable(work_root: Path, slugs: list[str]) -> None:
+    requires_wine = False
+    for slug in slugs:
+        problem_root = work_root / "problems" / slug
+        for script in _polygon_shell_scripts(problem_root):
+            text = _read_polygon_script(script)
+            if text and re.search(r"(?<![A-Za-z0-9_-])wine(?:64)?[ \t]+", text):
+                requires_wine = True
+                break
+        if requires_wine:
+            break
+
+    wine_path = shutil.which("wine")
+    if not requires_wine or wine_path is None:
+        return
+
+    try:
+        completed = subprocess.run(  # nosec B603
+            [wine_path, "cmd", "/c", "exit"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Wine runtime preflight failed: {exc}") from exc
+    if completed.returncode == 0:
+        return
+
+    detail = (completed.stderr or completed.stdout).strip()
+    if len(detail) > 1000:
+        detail = detail[-1000:]
+    message = (
+        "Wine runtime preflight failed before doall.sh. "
+        "On Apple Silicon, use Docker Desktop's Apple Virtualization framework "
+        "with Rosetta, or provide source-backed executables so the runner can "
+        "rebuild them natively"
+    )
+    if detail:
+        message += f": {detail}"
+    raise RuntimeError(message)
+
+
+def _polygon_shell_scripts(problem_root: Path) -> list[Path]:
+    if not problem_root.is_dir():
+        return []
+    return sorted(
+        path
+        for path in problem_root.rglob("*.sh")
+        if path.is_file() and not path.is_symlink()
+    )
+
+
+def _read_polygon_script(path: Path) -> str | None:
+    try:
+        if path.stat().st_size > MAX_POLYGON_SCRIPT_BYTES:
+            return None
+        return path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError):
+        return None
+
+
+def _normalize_wine_target(target: str) -> str:
+    normalized = str(PurePosixPath(target))
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _native_wine_replacement(match: re.Match[str]) -> str:
+    target = match.group("target")
+    return target if "/" in target else f"./{target}"
+
+
+def _polygon_native_source_map(problem_root: Path) -> dict[str, tuple[Path, str]]:
+    problem_xml = problem_root / "problem.xml"
+    if not problem_xml.is_file():
+        return {}
+    try:
+        root = DefusedET.parse(problem_xml).getroot()
+    except (OSError, DefusedET.ParseError):
+        return {}
+
+    result: dict[str, tuple[Path, str]] = {}
+    for node in root.iter():
+        source_node = None
+        binary_node = None
+        for child in list(node):
+            local_name = child.tag.rsplit("}", 1)[-1]
+            if local_name == "source":
+                source_node = child
+            elif local_name == "binary":
+                binary_node = child
+        if source_node is None or binary_node is None:
+            continue
+
+        source_value = source_node.get("path", "")
+        binary_value = binary_node.get("path", "")
+        source_type = source_node.get("type", "")
+        if not source_value or not binary_value:
+            continue
+
+        try:
+            source = _safe_problem_path(problem_root, source_value)
+            binary = _normalize_relative_problem_path(binary_value)
+        except ValueError:
+            continue
+        if not source.is_file() or binary.suffix.lower() != ".exe":
+            continue
+        if source.suffix.lower() not in NATIVE_CPP_SUFFIXES | NATIVE_C_SUFFIXES:
+            continue
+
+        binary_text = binary.as_posix()
+        existing = result.get(binary_text)
+        candidate = (source, source_type)
+        if existing is not None and existing != candidate:
+            result.pop(binary_text, None)
+            continue
+        result[binary_text] = candidate
+    return result
+
+
+def _normalize_relative_problem_path(value: str) -> PurePosixPath:
+    path = PurePosixPath(value.replace("\\", "/"))
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".."} for part in path.parts)
+    ):
+        raise ValueError(f"unsafe Polygon path: {value}")
+    return path
+
+
+def _safe_problem_path(problem_root: Path, value: str) -> Path:
+    relative = _normalize_relative_problem_path(value)
+    root = problem_root.resolve()
+    target = (root / Path(*relative.parts)).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError(f"Polygon path escapes problem root: {value}")
+    return target
+
+
+def _native_compile_command(source: Path, source_type: str, output: Path) -> list[str]:
+    suffix = source.suffix.lower()
+    if suffix in NATIVE_C_SUFFIXES:
+        standard_match = re.search(r"(?:gcc|c)(\d{2})", source_type)
+        standard = standard_match.group(1) if standard_match else "11"
+        return [
+            "gcc",
+            f"-std=gnu{standard}",
+            "-O2",
+            "-pipe",
+            str(source),
+            "-o",
+            str(output),
+        ]
+
+    standard_match = re.search(r"g\+\+(\d{2})", source_type)
+    standard = standard_match.group(1) if standard_match else "17"
+    return [
+        "g++",
+        f"-std=gnu++{standard}",
+        "-O2",
+        "-pipe",
+        str(source),
+        "-o",
+        str(output),
+    ]
+
+
+def _make_polygon_doall_fail_fast(problem_root: Path) -> None:
+    doall = problem_root / "doall.sh"
+    text = _read_polygon_script(doall)
+    if text is None or "\nset -e\n" in text:
+        return
+    if text.startswith("#!"):
+        first_line, separator, rest = text.partition("\n")
+        text = f"{first_line}{separator}set -e\n{rest}"
+    else:
+        text = f"set -e\n{text}"
+    doall.write_text(text, encoding="utf-8")
 
 
 def _normalize_crlf_file(path: Path, *, chunk_size: int = 1024 * 1024) -> bool:
@@ -301,11 +661,58 @@ def _install_p2h_patches() -> Any:
     p2h_convert = _load_p2h_convert()
     p2h_convert._collect_tools_from_script = collect_tools_from_script
 
-    original = getattr(p2h_convert, "_run_doall_for_all", None)
-    if original is not None and not getattr(original, "_p2h_safe_executable_patch", False):
+    original_detect = getattr(p2h_convert, "_detect_missing_doall_tools", None)
+    if original_detect is not None and not getattr(
+        original_detect, "_p2h_safe_native_patch", False
+    ):
 
-        def run_doall_with_executable_fix(work_root: Path, slugs: list[str], *args: Any, **kwargs: Any) -> Any:
+        def detect_missing_tools_with_native_fallback(
+            work_root: Path, slugs: list[str]
+        ) -> list[str]:
+            prepare_native_polygon_doall(Path(work_root), slugs)
+            ensure_polygon_wine_is_usable(Path(work_root), slugs)
+            return original_detect(work_root, slugs)
+
+        detect_missing_tools_with_native_fallback._p2h_safe_native_patch = True  # type: ignore[attr-defined]
+        p2h_convert._detect_missing_doall_tools = (
+            detect_missing_tools_with_native_fallback
+        )
+
+    original_safe_extract = getattr(p2h_convert, "_safe_extract_contest_zip", None)
+    if original_safe_extract is not None and not getattr(
+        original_safe_extract, "_p2h_safe_archive_limit_patch", False
+    ):
+
+        def extract_contest_with_limits(
+            contest_zip: Path, *args: Any, **kwargs: Any
+        ) -> Any:
+            validate_zip_archive(Path(contest_zip))
+            return original_safe_extract(contest_zip, *args, **kwargs)
+
+        extract_contest_with_limits._p2h_safe_archive_limit_patch = True  # type: ignore[attr-defined]
+        p2h_convert._safe_extract_contest_zip = extract_contest_with_limits
+
+    original = getattr(p2h_convert, "_run_doall_for_all", None)
+    if original is not None and not getattr(
+        original, "_p2h_safe_executable_patch", False
+    ):
+
+        def run_doall_with_executable_fix(
+            work_root: Path, slugs: list[str], *args: Any, **kwargs: Any
+        ) -> Any:
             work_root = Path(work_root)
+            for slug in slugs:
+                _make_polygon_doall_fail_fast(work_root / "problems" / slug)
+            prepare_native_polygon_doall(
+                work_root, slugs, verbose=bool(kwargs.get("verbose"))
+            )
+            ensure_polygon_wine_is_usable(work_root, slugs)
+            normalized_inputs = normalize_polygon_doall_inputs(work_root, slugs)
+            if normalized_inputs and kwargs.get("verbose"):
+                print(
+                    "normalized CRLF to LF in "
+                    f"{normalized_inputs} existing doall input file(s)"
+                )
             fixed = normalize_polygon_executable_bits(work_root)
             if fixed and kwargs.get("verbose"):
                 print(f"fixed executable bit on {fixed} extracted file(s) before doall")
@@ -323,7 +730,9 @@ def _install_p2h_patches() -> Any:
 
             normalized = normalize_polygon_testdata_line_endings(work_root, slugs)
             if normalized and kwargs.get("verbose"):
-                print(f"normalized CRLF to LF in {normalized} generated testdata file(s)")
+                print(
+                    f"normalized CRLF to LF in {normalized} generated testdata file(s)"
+                )
             return result
 
         run_doall_with_executable_fix._p2h_safe_executable_patch = True  # type: ignore[attr-defined]
@@ -375,14 +784,26 @@ def _build_domjudge_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-doall", dest="run_doall", action="store_true")
     parser.add_argument("--no-run-doall", dest="run_doall", action="store_false")
     parser.set_defaults(run_doall=False)
-    parser.add_argument("--auto-validator", dest="auto_validator", action="store_true", default=None)
-    parser.add_argument("--no-auto-validator", dest="auto_validator", action="store_false")
-    parser.add_argument("--default-validator", dest="default_validator", action="store_true")
+    parser.add_argument(
+        "--auto-validator", dest="auto_validator", action="store_true", default=None
+    )
+    parser.add_argument(
+        "--no-auto-validator", dest="auto_validator", action="store_false"
+    )
+    parser.add_argument(
+        "--default-validator", dest="default_validator", action="store_true"
+    )
     parser.add_argument("--with-statement", dest="with_statement", action="store_true")
-    parser.add_argument("--without-statement", dest="with_statement", action="store_false")
+    parser.add_argument(
+        "--without-statement", dest="with_statement", action="store_false"
+    )
     parser.set_defaults(with_statement=False)
-    parser.add_argument("--with-attachments", dest="with_attachments", action="store_true")
-    parser.add_argument("--without-attachments", dest="with_attachments", action="store_false")
+    parser.add_argument(
+        "--with-attachments", dest="with_attachments", action="store_true"
+    )
+    parser.add_argument(
+        "--without-attachments", dest="with_attachments", action="store_false"
+    )
     parser.set_defaults(with_attachments=False)
     parser.add_argument("--hide-sample", dest="hide_sample", action="store_true")
     parser.add_argument("--testset")
@@ -401,6 +822,161 @@ def _build_hydro_to_domjudge_parser() -> argparse.ArgumentParser:
     parser.add_argument("--only", action="append", default=[])
     parser.add_argument("--verbose", action="store_true")
     return parser
+
+
+def _build_domjudge_to_hydro_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="domjudge-to-hydro")
+    parser.add_argument("source_zip", type=Path)
+    parser.add_argument("-o", "--output", required=True, type=Path)
+    parser.add_argument("--pid-start", default="P1000")
+    parser.add_argument("--owner", type=int, default=1)
+    parser.add_argument("--tag", action="append", default=[])
+    parser.add_argument("--only", action="append", default=[])
+    parser.add_argument("--verbose", action="store_true")
+    return parser
+
+
+def _build_hoj_to_hydro_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="hoj-to-hydro")
+    parser.add_argument("source_zip", type=Path)
+    parser.add_argument("-o", "--output", required=True, type=Path)
+    parser.add_argument("--pid-start", default="P1000")
+    parser.add_argument("--owner", type=int, default=1)
+    parser.add_argument("--tag", action="append", default=[])
+    parser.add_argument("--only", action="append", default=[])
+    parser.add_argument("--verbose", action="store_true")
+    return parser
+
+
+def _build_hydro_to_hoj_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="hydro-to-hoj")
+    parser.add_argument("source_zip", type=Path)
+    parser.add_argument("-o", "--output", required=True, type=Path)
+    parser.add_argument("--only", action="append", default=[])
+    parser.add_argument("--verbose", action="store_true")
+    return parser
+
+
+def _build_hoj_to_domjudge_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="hoj-to-domjudge")
+    parser.add_argument("source_zip", type=Path)
+    parser.add_argument("-o", "--output", required=True, type=Path)
+    parser.add_argument("--code-start", default="A")
+    parser.add_argument("--color", default="#000000")
+    parser.add_argument("--only", action="append", default=[])
+    parser.add_argument("--verbose", action="store_true")
+    return parser
+
+
+def _build_package_convert_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="package-convert")
+    parser.add_argument("source_zip", type=Path)
+    parser.add_argument("-o", "--output", required=True, type=Path)
+    parser.add_argument(
+        "--source-format",
+        default="auto",
+        choices=[
+            "auto",
+            "polygon",
+            "hydro",
+            "icpc",
+            "hoj",
+            "fps",
+            "qduoj",
+            "uoj",
+            "dmoj",
+            "generic",
+        ],
+    )
+    parser.add_argument(
+        "--target-format",
+        required=True,
+        choices=["hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj"],
+    )
+    parser.add_argument("--loss-policy", choices=["warn", "error"], default="warn")
+    parser.add_argument("--only", action="append", default=[])
+    parser.add_argument("--pid-start", default="P1000")
+    parser.add_argument("--owner", type=int, default=1)
+    parser.add_argument("--tag", action="append", default=[])
+    parser.add_argument("--code-start", default="A")
+    parser.add_argument("--color", default="#000000")
+    parser.add_argument(
+        "--icpc-profile", choices=["legacy-icpc", "2025-09"], default="legacy-icpc"
+    )
+    parser.add_argument(
+        "--icpc-license",
+        choices=[
+            "unknown",
+            "public domain",
+            "cc0",
+            "cc by",
+            "cc by-sa",
+            "educational",
+            "permission",
+        ],
+        default="unknown",
+    )
+    parser.add_argument("--icpc-rights-owner", default="")
+    parser.add_argument(
+        "--fps-profile", choices=["hustoj-1.6", "qduoj-1.2"], default="hustoj-1.6"
+    )
+    parser.add_argument("--missing-env", choices=["warn", "error"], default="warn")
+    parser.add_argument(
+        "--validator-mode", choices=["auto", "default", "custom"], default="auto"
+    )
+    parser.add_argument("--run-doall", dest="run_doall", action="store_true")
+    parser.add_argument("--no-run-doall", dest="run_doall", action="store_false")
+    parser.set_defaults(run_doall=False)
+    parser.add_argument("--with-statement", action="store_true")
+    parser.add_argument("--with-attachments", action="store_true")
+    return parser
+
+
+def _convert_package(argv: list[str]) -> int:
+    parser = _build_package_convert_parser()
+    args = parser.parse_args(argv)
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", args.color):
+        parser.error("--color must be in #RRGGBB format")
+    options = {
+        "pid_start": args.pid_start,
+        "owner": args.owner,
+        "tags": args.tag,
+        "code_start": args.code_start,
+        "color": args.color,
+        "profile": args.icpc_profile
+        if args.target_format == "icpc"
+        else args.fps_profile,
+        "license": args.icpc_license,
+        "rights_owner": args.icpc_rights_owner,
+        "missing_env": args.missing_env,
+        "validator_mode": args.validator_mode,
+        "run_doall": args.run_doall,
+        "with_statement": args.with_statement,
+        "with_attachments": args.with_attachments,
+    }
+    try:
+        from package_converter import convert_package
+
+        report = convert_package(
+            args.source_zip,
+            args.output,
+            source_format=args.source_format,
+            target_format=args.target_format,
+            loss_policy=args.loss_policy,
+            only=args.only,
+            options=options,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"package-convert failed: {exc}", file=sys.stderr)
+        return 1
+    counts = report.get("counts", {})
+    print(
+        "done: "
+        f"source={report.get('source_format')} target={report.get('target_format')} "
+        f"problems={report.get('problem_count')} warnings={counts.get('warning', 0)} "
+        f"losses={counts.get('loss', 0)}"
+    )
+    return 0
 
 
 def _convert_domjudge(argv: list[str]) -> int:
@@ -543,11 +1119,95 @@ def _convert_hydro_to_domjudge(argv: list[str]) -> int:
         return 1
 
 
+def _convert_domjudge_to_hydro(argv: list[str]) -> int:
+    parser = _build_domjudge_to_hydro_parser()
+    args = parser.parse_args(argv)
+    if args.owner < 1:
+        parser.error("--owner must be positive")
+    try:
+        return convert_domjudge_to_hydro(
+            args.source_zip,
+            args.output,
+            pid_start=args.pid_start,
+            owner=args.owner,
+            tags=args.tag,
+            only=args.only,
+            verbose=args.verbose,
+        )
+    except Exception as exc:
+        print(f"domjudge-to-hydro failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _convert_hoj_to_hydro(argv: list[str]) -> int:
+    parser = _build_hoj_to_hydro_parser()
+    args = parser.parse_args(argv)
+    if args.owner < 1:
+        parser.error("--owner must be positive")
+    try:
+        return convert_hoj_to_hydro(
+            args.source_zip,
+            args.output,
+            pid_start=args.pid_start,
+            owner=args.owner,
+            tags=args.tag,
+            only=args.only,
+            verbose=args.verbose,
+        )
+    except Exception as exc:
+        print(f"hoj-to-hydro failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _convert_hydro_to_hoj(argv: list[str]) -> int:
+    parser = _build_hydro_to_hoj_parser()
+    args = parser.parse_args(argv)
+    try:
+        return convert_hydro_to_hoj(
+            args.source_zip,
+            args.output,
+            only=args.only,
+            verbose=args.verbose,
+        )
+    except Exception as exc:
+        print(f"hydro-to-hoj failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _convert_hoj_to_domjudge(argv: list[str]) -> int:
+    parser = _build_hoj_to_domjudge_parser()
+    args = parser.parse_args(argv)
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", args.color):
+        parser.error("--color must be in #RRGGBB format")
+    try:
+        return convert_hoj_to_domjudge(
+            args.source_zip,
+            args.output,
+            code_start=args.code_start,
+            color=args.color,
+            only=args.only,
+            verbose=args.verbose,
+        )
+    except Exception as exc:
+        print(f"hoj-to-domjudge failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "package-convert":
+        return _convert_package(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "domjudge-convert":
         return _convert_domjudge(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "hydro-to-domjudge":
         return _convert_hydro_to_domjudge(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "domjudge-to-hydro":
+        return _convert_domjudge_to_hydro(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "hoj-to-hydro":
+        return _convert_hoj_to_hydro(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "hydro-to-hoj":
+        return _convert_hydro_to_hoj(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "hoj-to-domjudge":
+        return _convert_hoj_to_domjudge(sys.argv[2:])
 
     _install_p2h_patches()
 

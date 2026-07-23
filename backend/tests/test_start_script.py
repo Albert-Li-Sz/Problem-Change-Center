@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize(
+    ("mode", "variable", "expected"),
+    [
+        ("--backend-only", "P2H_BACKEND_HOST", "unauthenticated backend"),
+        ("--frontend-only", "P2H_FRONTEND_HOST", "frontend API proxy"),
+    ],
+)
+def test_start_script_refuses_non_loopback_bindings(
+    tmp_path: Path, mode: str, variable: str, expected: str
+) -> None:
+    project_root = tmp_path / "project"
+    scripts_dir = project_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    start_script = scripts_dir / "start.sh"
+    shutil.copy2(PROJECT_ROOT / "scripts" / "start.sh", start_script)
+    (project_root / ".env").write_text(
+        "P2H_BACKEND_HOST=127.0.0.1\nP2H_FRONTEND_HOST=127.0.0.1\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment[variable] = "0.0.0.0"
+
+    completed = subprocess.run(
+        ["bash", str(start_script), mode],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert f"refusing to expose the {expected}" in completed.stderr
+    assert "Run it on 127.0.0.1" in completed.stderr
+
+
+def test_start_script_reports_missing_runner_image(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    scripts_dir = project_root / "scripts"
+    fake_bin = tmp_path / "bin"
+    scripts_dir.mkdir(parents=True)
+    fake_bin.mkdir()
+    start_script = scripts_dir / "start.sh"
+    shutil.copy2(PROJECT_ROOT / "scripts" / "start.sh", start_script)
+    (project_root / ".env").write_text(
+        "P2H_RUNNER_IMAGE=missing-runner\n", encoding="utf-8"
+    )
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+if [[ "${1:-}" == "info" ]]; then exit 0; fi
+if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then exit 1; fi
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(fake_docker.stat().st_mode | 0o100)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+
+    completed = subprocess.run(
+        ["bash", str(start_script), "--backend-only"],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "configured runner image missing-runner is missing" in completed.stderr
+    assert "docker compose --profile runner build runner" in completed.stderr
+
+
+def test_installer_rejects_unsupported_node_version(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    scripts_dir = project_root / "scripts"
+    frontend_dir = project_root / "frontend"
+    fake_bin = tmp_path / "bin"
+    scripts_dir.mkdir(parents=True)
+    frontend_dir.mkdir()
+    fake_bin.mkdir()
+    install_script = scripts_dir / "install.sh"
+    shutil.copy2(PROJECT_ROOT / "scripts" / "install.sh", install_script)
+    fake_node = fake_bin / "node"
+    fake_node.write_text(
+        """#!/usr/bin/env bash
+if [[ "${1:-}" == "-p" ]]; then printf '18.20.0\\n'; exit 0; fi
+if [[ "${1:-}" == "-e" ]]; then exit 1; fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_node.chmod(fake_node.stat().st_mode | 0o100)
+    fake_npm = fake_bin / "npm"
+    fake_npm.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_npm.chmod(fake_npm.stat().st_mode | 0o100)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(install_script),
+            "--skip-backend",
+            "--skip-runner",
+            "--no-frontend-build",
+        ],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "Node.js 20.19+, 22.12+, or 24+ is required" in completed.stderr
+    assert "found 18.20.0" in completed.stderr

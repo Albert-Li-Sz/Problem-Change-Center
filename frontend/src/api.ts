@@ -3,10 +3,41 @@ export type InspectResult = {
   filename: string;
   size: number;
   warnings: string[];
+  detected_format: FormatId | null;
+  format_candidates: Array<{ format: FormatId; confidence: number; evidence: string[] }>;
 };
 
 export type JobStatus = "queued" | "running" | "success" | "failed" | "cancelled";
-export type TargetFormat = "hydro" | "domjudge" | "hydro_to_domjudge";
+export type FormatId =
+  | "polygon"
+  | "hydro"
+  | "icpc"
+  | "hoj"
+  | "fps"
+  | "qduoj"
+  | "uoj"
+  | "dmoj"
+  | "generic";
+export type SourceFormat = "auto" | FormatId;
+export type TargetFormat = Exclude<FormatId, "polygon" | "generic">;
+
+export type ConversionIssue = {
+  severity: "warning" | "loss" | "fatal";
+  code: string;
+  message: string;
+  problem: string | null;
+  field: string | null;
+};
+
+export type ConversionReport = {
+  schema_version: number;
+  source_format: string;
+  target_format: string;
+  problem_count: number;
+  counts: { warning: number; loss: number; fatal: number };
+  issues: ConversionIssue[];
+  artifacts: string[];
+};
 
 export type JobResponse = {
   id: string;
@@ -17,35 +48,87 @@ export type JobResponse = {
   exit_code: number | null;
   download_ready: boolean;
   error: string | null;
+  source_format: string | null;
+  target_format: string | null;
+  report_ready: boolean;
+  report_counts: { warning: number; loss: number; fatal: number };
 };
 
 export type JobRequest = {
   job_id: string;
-  target: TargetFormat;
-  pid_start: string;
-  owner: number;
-  tags: string[];
+  source_format: SourceFormat;
+  target_format: TargetFormat;
+  loss_policy: "warn" | "error";
   only: string[];
-  run_doall: boolean;
-  missing_env: "warn" | "error";
-  domjudge_code_start: string;
-  domjudge_color: string;
-  domjudge_with_statement: boolean;
-  domjudge_with_attachments: boolean;
-  domjudge_auto_validator: boolean;
-  domjudge_default_validator: boolean;
+  options: {
+    polygon: {
+      run_doall: boolean;
+      missing_env: "warn" | "error";
+      with_statement: boolean;
+      with_attachments: boolean;
+      validator_mode: "auto" | "default" | "custom";
+    };
+    hydro: { pid_start: string; owner: number; tags: string[] };
+    icpc: {
+      code_start: string;
+      color: string;
+      profile: "legacy-icpc" | "2025-09";
+      license: "unknown" | "public domain" | "cc0" | "cc by" | "cc by-sa" | "educational" | "permission";
+      rights_owner: string;
+    };
+    fps: { profile: "hustoj-1.6" | "qduoj-1.2" };
+  };
 };
 
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("application/json")) {
-      const body = await response.json();
-      throw new Error(body.detail || response.statusText);
-    }
-    throw new Error(await response.text());
+    throw new Error(await responseErrorMessage(response));
   }
   return response.json() as Promise<T>;
+}
+
+function formatErrorDetail(detail: unknown): string | null {
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (!item || typeof item !== "object") return String(item);
+        const record = item as Record<string, unknown>;
+        const location = Array.isArray(record.loc)
+          ? record.loc.map(String).filter((part) => part !== "body").join(".")
+          : "";
+        const message = typeof record.msg === "string" ? record.msg : JSON.stringify(item);
+        return location ? `${location}: ${message}` : message;
+      })
+      .filter(Boolean);
+    return messages.length ? messages.join("；") : null;
+  }
+  if (detail && typeof detail === "object") {
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return null;
+    }
+  }
+  return detail == null ? null : String(detail);
+}
+
+async function responseErrorMessage(response: Response): Promise<string> {
+  const fallback = response.statusText || `HTTP ${response.status}`;
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      return formatErrorDetail(body.detail) || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  try {
+    return (await response.text()).trim() || fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export async function inspectZip(file: File): Promise<InspectResult> {
@@ -75,15 +158,20 @@ export async function getJob(jobId: string): Promise<JobResponse> {
 export async function getLogs(jobId: string): Promise<string> {
   const response = await fetch(`/api/jobs/${jobId}/logs`);
   if (!response.ok) {
-    throw new Error(await response.text());
+    throw new Error(await responseErrorMessage(response));
   }
   return response.text();
+}
+
+export async function getReport(jobId: string): Promise<ConversionReport> {
+  const response = await fetch(`/api/jobs/${jobId}/report`);
+  return parseResponse<ConversionReport>(response);
 }
 
 export async function deleteJob(jobId: string): Promise<void> {
   const response = await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
   if (!response.ok) {
-    throw new Error(await response.text());
+    throw new Error(await responseErrorMessage(response));
   }
 }
 

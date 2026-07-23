@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(id -u)" != "10001" ]]; then
+  printf 'unexpected converter uid: %s\n' "$(id -u)" >&2
+  exit 90
+fi
+
+if grep -Eq '^Cap(Eff|Prm|Bnd):[[:space:]]+0+$' /proc/self/status; then
+  capability_lines="$(grep -Ec '^Cap(Eff|Prm|Bnd):[[:space:]]+0+$' /proc/self/status)"
+else
+  capability_lines=0
+fi
+if [[ "$capability_lines" != "3" ]]; then
+  printf 'converter retained Linux capabilities\n' >&2
+  grep '^Cap' /proc/self/status >&2
+  exit 91
+fi
+
+if touch /result/direct-bypass 2>/output/direct-denied.log; then
+  printf 'converter can write the hidden /result mount\n' >&2
+  exit 92
+fi
+if touch /proc/1/root/result/proc-bypass 2>/output/proc-denied.log; then
+  printf 'converter can reach /result through /proc/1/root\n' >&2
+  exit 93
+fi
+
+# The namespace supervisor must kill this descendant before it can modify the
+# output after the main converter has returned.
+(sleep 1; touch /output/background-survived) &
+
+printf 'isolated uid=10001 capabilities=none\n' > /output/isolation-ok.txt
