@@ -464,17 +464,90 @@ def test_ambiguous_auto_detection_writes_failure_report(tmp_path: Path) -> None:
     assert report["issues"][0]["code"] == "source-detection-error"
 
 
-def test_explicit_source_mismatch_writes_failure_report(tmp_path: Path) -> None:
-    source = tmp_path / "hydro.zip"
+def test_explicit_compatible_source_override_writes_warning_report(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    build_compat_corpus(corpus)
     output = tmp_path / "output"
-    _hydro_package(source)
 
-    with pytest.raises(ValueError, match="source format mismatch"):
-        convert_package(source, output, source_format="dmoj", target_format="fps")
+    report = convert_package(
+        corpus / "probhub-single.zip",
+        output,
+        source_format="icpc",
+        target_format="hydro",
+    )
 
-    report = json.loads((output / REPORT_FILENAME).read_text())
-    assert report["source_format"] == "dmoj"
-    assert report["issues"][0]["code"] == "source-format-mismatch"
+    assert report["source_format"] == "icpc"
+    assert report["target_format"] == "hydro"
+    assert report["problem_count"] == 1
+    assert report["counts"]["fatal"] == 0
+    override = next(
+        issue for issue in report["issues"] if issue["code"] == "source-format-override"
+    )
+    assert override["severity"] == "warning"
+    assert override["context"] == {"requested": "icpc", "detected": "probhub"}
+
+
+@pytest.mark.parametrize("source_format", ["icpc", "probhub"])
+def test_domjudge_compatible_pdf_statement_to_hoj_is_rejected_without_partial_artifacts(
+    tmp_path: Path, source_format: str
+) -> None:
+    source = tmp_path / "domjudge-pdf.zip"
+    output = tmp_path / "output"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("problem.yaml", "name: PDF only\n")
+        archive.writestr("domjudge-problem.ini", "short-name = A\n")
+        archive.writestr("problem.pdf", b"%PDF-1.4\n%%EOF\n")
+        archive.writestr("data/secret/1.in", "1\n")
+        archive.writestr("data/secret/1.ans", "1\n")
+
+    with pytest.raises(ValueError, match="cannot carry PDF statements"):
+        convert_package(
+            source, output, source_format=source_format, target_format="hoj"
+        )
+
+    assert {path.name for path in output.iterdir()} == {REPORT_FILENAME}
+    report = json.loads((output / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert report["artifacts"] == []
+    assert any(
+        issue["code"] == "hoj-pdf-statement-unsupported"
+        and issue["severity"] == "fatal"
+        for issue in report["issues"]
+    )
+
+
+def test_hydro_pdf_statement_to_hoj_uses_importable_placeholder(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "hydro-pdf.zip"
+    output = tmp_path / "output"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("P1000/problem.yaml", "title: PDF only\npid: P1000\n")
+        archive.writestr("P1000/problem_zh.md", "@[pdf](file://statement.pdf)\n")
+        archive.writestr("P1000/additional_file/statement.pdf", b"%PDF-1.4\n%%EOF\n")
+        archive.writestr(
+            "P1000/testdata/config.yaml",
+            "cases:\n  - input: 1.in\n    output: 1.ans\n",
+        )
+        archive.writestr("P1000/testdata/1.in", "1\n")
+        archive.writestr("P1000/testdata/1.ans", "1\n")
+
+    report = convert_package(source, output, source_format="hydro", target_format="hoj")
+
+    assert report["counts"]["fatal"] == 0
+    assert any(issue["code"] == "hoj-pdf-statement" for issue in report["issues"])
+    document_path = next(output.glob("problem_*.json"))
+    document = json.loads(document_path.read_text(encoding="utf-8"))
+    description = document["problem"]["description"]
+    assert "原题面仅提供 PDF" in description
+    assert "file://" not in description
+
+    wrapper = tmp_path / "hoj-wrapper.zip"
+    _zip_directory(output, wrapper)
+    roundtrip = _read_bundle(wrapper, "hoj", tmp_path / "roundtrip")
+    assert len(roundtrip.problems) == 1
+    assert "原题面仅提供 PDF" in (roundtrip.problems[0].statements[0].content or "")
 
 
 def test_root_polygon_problem_is_wrapped_before_optimized_route(
@@ -522,6 +595,120 @@ def test_root_polygon_problem_is_wrapped_before_optimized_route(
         "problems/single-polygon/tests/01",
         "problems/single-polygon/tests/01.a",
     ]
+
+
+def test_root_polygon_linux_export_preserves_full_payload_before_optimized_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "polygon-single-linux.zip"
+    output = tmp_path / "output"
+    test_nodes = "\n".join(
+        f'                <test method="{("manual" if index <= 3 else "generated")}"/>'
+        for index in range(1, 34)
+    )
+    problem_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<problem revision="1" short-name="linux-single">
+    <names>
+        <name language="chinese" value="Linux single problem"/>
+    </names>
+    <statements>
+        <statement charset="UTF-8" language="chinese" path="statements/chinese/problem.tex" type="application/x-tex"/>
+    </statements>
+    <judging>
+        <testset name="tests">
+            <time-limit>2000</time-limit>
+            <memory-limit>268435456</memory-limit>
+            <test-count>33</test-count>
+            <input-path-pattern>tests/%02d</input-path-pattern>
+            <answer-path-pattern>tests/%02d.a</answer-path-pattern>
+            <tests>
+{test_nodes}
+            </tests>
+        </testset>
+    </judging>
+    <files>
+        <resources>
+            <file path="files/testlib.h" type="h.g++"/>
+        </resources>
+    </files>
+    <assets>
+        <checker name="std::wcmp.cpp" type="testlib">
+            <source path="files/check.cpp" type="cpp.g++17"/>
+            <copy path="check.cpp"/>
+        </checker>
+    </assets>
+</problem>
+"""
+    statement = "\\section*{Linux single problem}\nFull statement payload.\n"
+    checker = '#include "testlib.h"\nint main() { return 0; }\n'
+    testlib = "// minimal testlib fixture\n"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("problem.xml", problem_xml)
+        archive.writestr("statements/chinese/problem.tex", statement)
+        archive.writestr("files/check.cpp", checker)
+        archive.writestr("files/testlib.h", testlib)
+        archive.writestr("check.cpp", checker)
+        for index in range(1, 34):
+            stem = f"{index:02d}"
+            archive.writestr(f"tests/{stem}", f"input-{index}\n")
+            archive.writestr(f"tests/{stem}.a", f"answer-{index}\n")
+
+    captured: dict[str, bytes] = {}
+
+    def fake_polygon_route(
+        normalized_source: Path,
+        route_output: Path,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        with zipfile.ZipFile(normalized_source) as archive:
+            captured.update(
+                {
+                    info.filename: archive.read(info)
+                    for info in archive.infolist()
+                    if not info.is_dir()
+                }
+            )
+        route_output.mkdir(parents=True, exist_ok=True)
+        return {
+            "schema_version": 2,
+            "source_format": "polygon",
+            "target_format": "hydro",
+            "problem_count": 1,
+            "counts": {"warning": 0, "loss": 0, "fatal": 0},
+            "issues": [],
+            "artifacts": ["P1000-linux-single.zip"],
+        }
+
+    monkeypatch.setattr(package_converter, "_run_polygon_route", fake_polygon_route)
+
+    report = convert_package(
+        source,
+        output,
+        source_format="auto",
+        target_format="hydro",
+    )
+
+    assert report["problem_count"] == 1
+    root = "problems/polygon-single-linux"
+    assert captured[f"{root}/problem.xml"] == problem_xml.encode()
+    assert captured[f"{root}/statements/chinese/problem.tex"] == statement.encode()
+    assert captured[f"{root}/files/check.cpp"] == checker.encode()
+    assert captured[f"{root}/files/testlib.h"] == testlib.encode()
+    assert captured[f"{root}/check.cpp"] == checker.encode()
+
+    expected_test_members = {
+        f"{root}/tests/{index:02d}{suffix}"
+        for index in range(1, 34)
+        for suffix in ("", ".a")
+    }
+    actual_test_members = {
+        name for name in captured if name.startswith(f"{root}/tests/")
+    }
+    assert actual_test_members == expected_test_members
+    for index in range(1, 34):
+        stem = f"{index:02d}"
+        assert captured[f"{root}/tests/{stem}"] == f"input-{index}\n".encode()
+        assert captured[f"{root}/tests/{stem}.a"] == f"answer-{index}\n".encode()
 
 
 def test_polygon_icpc_2025_reuses_icpc_route_before_ir(
@@ -1341,6 +1528,75 @@ def test_dmoj_writer_maps_python_interactor_language(tmp_path: Path) -> None:
         config = archive.read("init.yml").decode()
         assert "lang: PY3" in config
         assert "interactor.py" in archive.namelist()
+
+
+def test_icpc_interactor_dependencies_are_preserved_in_dmoj_and_roundtrip(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "domjudge-interactive.zip"
+    output = tmp_path / "dmoj"
+    header = b"// exact source header\ninline int sentinel() { return 7; }\n"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "problem.yaml",
+            "name: Interactive\nvalidation: custom interactive\n",
+        )
+        archive.writestr("domjudge-problem.ini", "short-name = I\n")
+        archive.writestr("problem.pdf", b"%PDF-1.4\n%%EOF\n")
+        archive.writestr("data/secret/1.in", "1\n")
+        archive.writestr("data/secret/1.ans", "1\n")
+        archive.writestr(
+            "output_validators/interactor/interactor.cc",
+            '#include "testlib.h"\nint main() { return sentinel() == 7 ? 0 : 1; }\n',
+        )
+        archive.writestr("output_validators/interactor/testlib.h", header)
+
+    report = convert_package(source, output, source_format="icpc", target_format="dmoj")
+
+    assert report["counts"]["fatal"] == 0
+    package = next(output.glob("*.zip"))
+    with zipfile.ZipFile(package) as archive:
+        names = set(archive.namelist())
+        config = archive.read("init.yml").decode("utf-8")
+        assert {"interactor.cc", "testlib.h"} <= names
+        assert archive.read("testlib.h") == header
+        assert "files:\n  - interactor.cc\n  - testlib.h" in config
+        assert "type: testlib" in config
+
+    roundtrip = _read_bundle(package, "dmoj", tmp_path / "roundtrip")
+    assert roundtrip.problems[0].interactor is not None
+    assert roundtrip.problems[0].interactor.mode == "testlib"
+    assert set(roundtrip.problems[0].interactor.auxiliary_files) == {"testlib.h"}
+
+
+def test_dmoj_target_rejects_missing_local_interactor_dependency(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "domjudge-missing-header.zip"
+    output = tmp_path / "dmoj"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "problem.yaml",
+            "name: Interactive\nvalidation: custom interactive\n",
+        )
+        archive.writestr("problem.pdf", b"%PDF-1.4\n%%EOF\n")
+        archive.writestr("data/secret/1.in", "1\n")
+        archive.writestr("data/secret/1.ans", "1\n")
+        archive.writestr(
+            "output_validators/interactor/interactor.cc",
+            '#include "testlib.h"\nint main() { return 0; }\n',
+        )
+
+    with pytest.raises(ValueError, match="missing local files: testlib.h"):
+        convert_package(source, output, source_format="icpc", target_format="dmoj")
+
+    assert {path.name for path in output.iterdir()} == {REPORT_FILENAME}
+    report = json.loads((output / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert any(
+        issue["code"] == "dmoj-missing-program-dependency"
+        and issue["field"] == "interactor"
+        for issue in report["issues"]
+    )
 
 
 def test_dmoj_writer_preserves_named_group_dependencies(tmp_path: Path) -> None:

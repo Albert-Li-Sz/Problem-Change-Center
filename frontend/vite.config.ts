@@ -6,7 +6,7 @@ declare const process: {
 };
 
 const backendHost = process.env.P2H_BACKEND_HOST || "127.0.0.1";
-const backendPort = process.env.P2H_BACKEND_PORT || "8000";
+const backendPort = process.env.P2H_BACKEND_PORT || "11451";
 
 export default defineConfig({
   plugins: [react()],

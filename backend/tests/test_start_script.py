@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -12,14 +13,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize(
-    ("mode", "variable", "expected"),
+    ("mode", "variable", "value"),
     [
-        ("--backend-only", "P2H_BACKEND_HOST", "unauthenticated backend"),
-        ("--frontend-only", "P2H_FRONTEND_HOST", "frontend API proxy"),
+        ("--backend-only", "P2H_BACKEND_PORT", "8000"),
+        ("--frontend-only", "P2H_FRONTEND_PORT", "5173"),
     ],
 )
-def test_start_script_refuses_non_loopback_bindings(
-    tmp_path: Path, mode: str, variable: str, expected: str
+def test_start_script_rejects_nonstandard_deployment_ports(
+    tmp_path: Path, mode: str, variable: str, value: str
 ) -> None:
     project_root = tmp_path / "project"
     scripts_dir = project_root / "scripts"
@@ -31,7 +32,7 @@ def test_start_script_refuses_non_loopback_bindings(
         encoding="utf-8",
     )
     environment = os.environ.copy()
-    environment[variable] = "0.0.0.0"
+    environment[variable] = value
 
     completed = subprocess.run(
         ["bash", str(start_script), mode],
@@ -44,8 +45,7 @@ def test_start_script_refuses_non_loopback_bindings(
     )
 
     assert completed.returncode == 1
-    assert f"refusing to expose the {expected}" in completed.stderr
-    assert "Run it on 127.0.0.1" in completed.stderr
+    assert "ports are fixed at backend 11451 and frontend 11452" in completed.stderr
 
 
 def test_start_script_reports_missing_runner_image(tmp_path: Path) -> None:
@@ -216,3 +216,92 @@ exit 1
     assert f"P2H_RUNNER_IMAGE={image}\n" in (project_root / ".env").read_text(
         encoding="utf-8"
     )
+    assert "P2H_BACKEND_PORT=11451\n" in (project_root / ".env").read_text(
+        encoding="utf-8"
+    )
+    assert "P2H_FRONTEND_PORT=11452\n" in (project_root / ".env").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_installer_hashes_external_access_key_without_persisting_plaintext(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    scripts_dir = project_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    install_script = scripts_dir / "install.sh"
+    shutil.copy2(PROJECT_ROOT / "scripts" / "install.sh", install_script)
+    config_file = project_root / "external.env"
+    access_key = "correct-horse-battery-staple"
+    environment = os.environ.copy()
+    environment["P2H_ACCESS_KEY"] = access_key
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(install_script),
+            "--non-interactive",
+            "--external",
+            "--site-address",
+            "converter.example.com",
+            "--skip-backend",
+            "--skip-frontend",
+            "--skip-runner",
+            "--config",
+            str(config_file),
+        ],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    config = config_file.read_text(encoding="utf-8")
+    assert access_key not in config
+    assert "P2H_DEPLOYMENT_MODE=external" in config
+    assert "P2H_ALLOWED_ORIGINS=http://converter.example.com:11452" in config
+    assert "P2H_BACKEND_PORT=11451" in config
+    assert "P2H_FRONTEND_PORT=11452" in config
+    assert "P2H_ACCESS_KEY_HASH='pbkdf2_sha256$600000$" in config
+    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+
+
+def test_interactive_installer_collects_deployment_wine_and_key_choices(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    scripts_dir = project_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    install_script = scripts_dir / "install.sh"
+    shutil.copy2(PROJECT_ROOT / "scripts" / "install.sh", install_script)
+    config_file = project_root / "interactive.env"
+    access_key = "interactive-access-key"
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(install_script),
+            "--interactive",
+            "--skip-backend",
+            "--skip-frontend",
+            "--config",
+            str(config_file),
+        ],
+        cwd=project_root,
+        input=f"2\ny\n3\nconverter.example.com\n{access_key}\n{access_key}\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    config = config_file.read_text(encoding="utf-8")
+    assert "P2H_DEPLOYMENT_MODE=external" in config
+    assert "P2H_RUNNER_IMAGE=p2h-runner-wine" in config
+    assert "P2H_ACCESS_KEY_HASH='pbkdf2_sha256$600000$" in config
+    assert access_key not in config

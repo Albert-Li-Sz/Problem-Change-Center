@@ -4,6 +4,8 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 DEFAULT_PYTHON_BASE_IMAGE="python:3.14-slim-trixie"
+DEFAULT_PREBUILT_RUNNER_IMAGE="ghcr.io/lmtinsuzhou/p2h-runner:main"
+DEFAULT_PREBUILT_WINE_IMAGE="ghcr.io/lmtinsuzhou/p2h-runner-wine:main"
 PYTHON_BASE_IMAGE="${P2H_PYTHON_BASE_IMAGE:-$DEFAULT_PYTHON_BASE_IMAGE}"
 PYTHON_BASE_IMAGE_EXPLICIT=0
 if [[ -n "${P2H_PYTHON_BASE_IMAGE:-}" ]]; then
@@ -15,14 +17,33 @@ APT_SECURITY_MIRROR="${P2H_APT_SECURITY_MIRROR:-}"
 OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
 ARCH_NAME="$(uname -m 2>/dev/null || printf 'unknown')"
 
-BUILD_RUNNER=1
+RUNNER_SOURCE=build
 BUILD_WINE=0
+WINE_EXPLICIT=0
 RUNNER_IMAGE_OVERRIDE="${P2H_PREBUILT_RUNNER_IMAGE:-}"
+RUNNER_SOURCE_EXPLICIT=0
+if [[ -n "$RUNNER_IMAGE_OVERRIDE" ]]; then
+  RUNNER_SOURCE=prebuilt
+  RUNNER_SOURCE_EXPLICIT=1
+fi
 BUILD_PROXY_MODE=auto
 EFFECTIVE_USE_BUILD_PROXY=1
 INSTALL_BACKEND=1
 INSTALL_FRONTEND=1
 BUILD_FRONTEND=1
+INTERACTIVE_MODE=auto
+INTERACTIVE_ENABLED=0
+DEPLOYMENT_TARGET="${P2H_INSTALL_DEPLOYMENT:-}"
+DEPLOYMENT_EXPLICIT=0
+if [[ -n "$DEPLOYMENT_TARGET" ]]; then
+  DEPLOYMENT_EXPLICIT=1
+fi
+SITE_ADDRESS="${P2H_SITE_ADDRESS:-}"
+SITE_ORIGIN_HOST=""
+ACCESS_KEY="${P2H_ACCESS_KEY:-}"
+ACCESS_KEY_HASH="${P2H_ACCESS_KEY_HASH:-}"
+CONFIG_FILE="${P2H_CONFIG_FILE:-$ROOT_DIR/.env}"
+FORCE_CONFIG=0
 
 log() {
   printf '\033[1;34m==>\033[0m %s\n' "$*"
@@ -49,10 +70,19 @@ usage() {
   cat <<'EOF'
 Usage: ./install.sh [options]
 
-Install backend dependencies, frontend dependencies, and Docker runner images.
+Interactively install an internal or external deployment. When stdin is not a
+terminal, the installer keeps the internal deployment defaults unless options
+or environment variables select another mode.
 
 Options:
-  --wine                 Also build p2h-runner-wine and configure .env to use it.
+  --interactive          Force the interactive installation wizard.
+  --non-interactive      Disable all prompts.
+  --deployment MODE      Select internal or external deployment.
+  --internal             Alias for --deployment internal.
+  --external             Alias for --deployment external.
+  --wine                 Select the Wine-capable runner image.
+  --no-wine              Select the normal runner without prompting.
+  --runner-source MODE   Use prebuilt, build, or skip for the runner image.
   --runner-image IMAGE   Pull a prebuilt runner tag/digest instead of building.
   --skip-runner          Skip Docker runner image build.
   --skip-backend         Skip backend virtualenv and pip install.
@@ -64,10 +94,16 @@ Options:
   --apt-security URL     Debian security mirror used inside runner Docker builds.
   --build-proxy          Force passing host proxy env vars into Docker builds.
   --no-build-proxy       Do not pass host proxy env vars into Docker builds.
+  --site-address HOST    Public DNS name or IP for an external deployment.
+  --config PATH          Output path for the generated deployment configuration.
+  --force-config         Replace an existing generated configuration file.
   -h, --help             Show this help.
 
 Examples:
   ./install.sh
+  ./install.sh --external
+  P2H_ACCESS_KEY='a-long-random-key' ./install.sh --non-interactive \
+    --external --site-address convert.example.com
   ./install.sh --wine
   ./install.sh --runner-image ghcr.io/lmtinsuzhou/p2h-runner:main
   ./install.sh --skip-runner
@@ -79,23 +115,74 @@ Examples:
 If the default Docker Hub base image is unreachable, the installer will retry
 with known mirror base images unless --base-image or P2H_PYTHON_BASE_IMAGE was
 set explicitly. Override the retry list with P2H_PYTHON_BASE_IMAGE_FALLBACKS.
+
+For non-interactive external deployment, provide P2H_ACCESS_KEY or an existing
+P2H_ACCESS_KEY_HASH. The plaintext access key is never written to disk.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --interactive)
+      INTERACTIVE_MODE=on
+      ;;
+    --non-interactive)
+      INTERACTIVE_MODE=off
+      ;;
+    --deployment)
+      [[ $# -ge 2 ]] || die "--deployment requires internal or external"
+      DEPLOYMENT_TARGET="$2"
+      DEPLOYMENT_EXPLICIT=1
+      shift
+      ;;
+    --internal)
+      DEPLOYMENT_TARGET=internal
+      DEPLOYMENT_EXPLICIT=1
+      ;;
+    --external)
+      DEPLOYMENT_TARGET=external
+      DEPLOYMENT_EXPLICIT=1
+      ;;
     --wine)
       BUILD_WINE=1
+      WINE_EXPLICIT=1
+      ;;
+    --no-wine)
+      BUILD_WINE=0
+      WINE_EXPLICIT=1
+      ;;
+    --runner-source)
+      [[ $# -ge 2 ]] || die "--runner-source requires prebuilt, build, or skip"
+      case "$2" in
+        prebuilt)
+          RUNNER_SOURCE=prebuilt
+          ;;
+        build)
+          RUNNER_SOURCE=build
+          RUNNER_IMAGE_OVERRIDE=""
+          ;;
+        skip)
+          RUNNER_SOURCE=skip
+          RUNNER_IMAGE_OVERRIDE=""
+          ;;
+        *)
+          die "--runner-source must be prebuilt, build, or skip"
+          ;;
+      esac
+      RUNNER_SOURCE_EXPLICIT=1
+      shift
       ;;
     --runner-image)
       [[ $# -ge 2 ]] || die "--runner-image requires an image name"
       RUNNER_IMAGE_OVERRIDE="$2"
-      BUILD_RUNNER=0
+      RUNNER_SOURCE=prebuilt
+      RUNNER_SOURCE_EXPLICIT=1
       shift
       ;;
     --skip-runner)
-      BUILD_RUNNER=0
+      RUNNER_SOURCE=skip
       RUNNER_IMAGE_OVERRIDE=""
+      RUNNER_SOURCE_EXPLICIT=1
       ;;
     --skip-backend)
       INSTALL_BACKEND=0
@@ -134,6 +221,19 @@ while [[ $# -gt 0 ]]; do
     --no-build-proxy)
       BUILD_PROXY_MODE=off
       ;;
+    --site-address)
+      [[ $# -ge 2 ]] || die "--site-address requires a hostname"
+      SITE_ADDRESS="$2"
+      shift
+      ;;
+    --config|--production-env)
+      [[ $# -ge 2 ]] || die "$1 requires a path"
+      CONFIG_FILE="$2"
+      shift
+      ;;
+    --force-config)
+      FORCE_CONFIG=1
+      ;;
     -h|--help)
       usage
       exit 0
@@ -145,9 +245,271 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if [[ -n "$RUNNER_IMAGE_OVERRIDE" && "$BUILD_WINE" -eq 1 ]]; then
-  die "--runner-image and --wine cannot be combined; pass the exact Wine image instead"
-fi
+case "$DEPLOYMENT_TARGET" in
+  ""|internal|external)
+    ;;
+  *)
+    die "deployment mode must be internal or external"
+    ;;
+esac
+
+prompt_choice() {
+  local target="$1"
+  local prompt="$2"
+  local default="$3"
+  local answer=""
+
+  while :; do
+    printf '%s [%s]: ' "$prompt" "$default" >&2
+    if ! IFS= read -r answer; then
+      die "interactive input ended before installation choices were complete"
+    fi
+    answer="${answer:-$default}"
+    case "$answer" in
+      1|2|3)
+        printf -v "$target" '%s' "$answer"
+        return
+        ;;
+      *)
+        warn "please enter 1, 2, or 3"
+        ;;
+    esac
+  done
+}
+
+prompt_yes_no() {
+  local target="$1"
+  local prompt="$2"
+  local default="$3"
+  local answer=""
+
+  while :; do
+    printf '%s [%s]: ' "$prompt" "$default" >&2
+    if ! IFS= read -r answer; then
+      die "interactive input ended before installation choices were complete"
+    fi
+    answer="${answer:-$default}"
+    case "$answer" in
+      y|Y|yes|YES|Yes)
+        printf -v "$target" '%s' 1
+        return
+        ;;
+      n|N|no|NO|No)
+        printf -v "$target" '%s' 0
+        return
+        ;;
+      *)
+        warn "please enter y or n"
+        ;;
+    esac
+  done
+}
+
+prompt_secret() {
+  local target="$1"
+  local prompt="$2"
+  local value=""
+
+  printf '%s: ' "$prompt" >&2
+  if [[ -t 0 ]]; then
+    if ! IFS= read -r -s value; then
+      die "interactive input ended before the access key was entered"
+    fi
+    printf '\n' >&2
+  elif ! IFS= read -r value; then
+    die "interactive input ended before the access key was entered"
+  fi
+  printf -v "$target" '%s' "$value"
+}
+
+normalize_site_address() {
+  local values=""
+  values="$($PYTHON_BIN - "$SITE_ADDRESS" <<'PY'
+import ipaddress
+import re
+import sys
+
+value = sys.argv[1].strip().rstrip(".").lower()
+if not value or len(value) > 253 or any(character.isspace() for character in value):
+    raise SystemExit(1)
+if any(marker in value for marker in ("/", "@", "?", "#", "://")):
+    raise SystemExit(1)
+try:
+    address = ipaddress.ip_address(value)
+except ValueError:
+    labels = value.split(".")
+    if any(
+        not label
+        or len(label) > 63
+        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+        for label in labels
+    ):
+        raise SystemExit(1)
+    origin_host = value
+else:
+    value = address.compressed
+    origin_host = f"[{value}]" if address.version == 6 else value
+print(f"{value}|{origin_host}")
+PY
+)" || return 1
+  SITE_ADDRESS="${values%%|*}"
+  SITE_ORIGIN_HOST="${values#*|}"
+}
+
+validate_access_key() {
+  printf '%s' "$ACCESS_KEY" | "$PYTHON_BIN" -c '
+import sys
+
+value = sys.stdin.buffer.read()
+if not 16 <= len(value) <= 256 or any(byte < 33 or byte > 126 for byte in value):
+    raise SystemExit(1)
+'
+}
+
+validate_access_key_hash() {
+  # shellcheck disable=SC2016
+  printf '%s' "$ACCESS_KEY_HASH" | "$PYTHON_BIN" -c '
+import re
+import sys
+
+value = sys.stdin.read()
+match = re.fullmatch(
+    r"pbkdf2_sha256\$([0-9]{6,7})\$([0-9a-f]{32,64})\$([0-9a-f]{64})",
+    value,
+)
+if match is None or int(match.group(1)) < 600_000:
+    raise SystemExit(1)
+'
+}
+
+hash_access_key() {
+  # shellcheck disable=SC2016
+  ACCESS_KEY_HASH="$(printf '%s' "$ACCESS_KEY" | "$PYTHON_BIN" -c '
+import hashlib
+import secrets
+import sys
+
+value = sys.stdin.buffer.read()
+salt = secrets.token_bytes(16)
+iterations = 600_000
+digest = hashlib.pbkdf2_hmac("sha256", value, salt, iterations)
+print(f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}")
+')"
+  ACCESS_KEY=""
+  unset P2H_ACCESS_KEY
+}
+
+configure_install() {
+  local choice=""
+  local confirmed=0
+  local confirmation=""
+
+  case "$INTERACTIVE_MODE" in
+    on)
+      INTERACTIVE_ENABLED=1
+      ;;
+    off)
+      INTERACTIVE_ENABLED=0
+      ;;
+    auto)
+      if [[ -t 0 && -t 1 ]]; then
+        INTERACTIVE_ENABLED=1
+      fi
+      ;;
+    *)
+      die "invalid interactive mode: $INTERACTIVE_MODE"
+      ;;
+  esac
+
+  if [[ "$INTERACTIVE_ENABLED" -eq 1 ]]; then
+    printf '\nDeployment mode:\n  1) Internal network (no access key)\n  2) External network (access key required)\n' >&2
+    if [[ "$DEPLOYMENT_EXPLICIT" -eq 0 ]]; then
+      prompt_choice choice "Choose deployment mode" 1
+      [[ "$choice" == 1 ]] && DEPLOYMENT_TARGET=internal || DEPLOYMENT_TARGET=external
+    fi
+    if [[ "$WINE_EXPLICIT" -eq 0 ]]; then
+      prompt_yes_no BUILD_WINE "Enable Wine runner support" n
+    fi
+    if [[ "$RUNNER_SOURCE_EXPLICIT" -eq 0 ]]; then
+      printf '\nRunner image:\n  1) Pull prebuilt image\n  2) Build locally\n  3) Skip runner setup\n' >&2
+      prompt_choice choice "Choose runner source" 1
+      case "$choice" in
+        1) RUNNER_SOURCE=prebuilt ;;
+        2) RUNNER_SOURCE=build ;;
+        3) RUNNER_SOURCE=skip ;;
+      esac
+    fi
+  fi
+
+  DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET:-internal}"
+  case "$DEPLOYMENT_TARGET" in
+    internal)
+      ACCESS_KEY=""
+      ACCESS_KEY_HASH=""
+      unset P2H_ACCESS_KEY
+      ;;
+    external)
+      check_python
+      while ! normalize_site_address; do
+        if [[ "$INTERACTIVE_ENABLED" -eq 0 ]]; then
+          die "--site-address must be a valid hostname or IP for external deployment"
+        fi
+        printf 'Public hostname or IP: ' >&2
+        IFS= read -r SITE_ADDRESS || die "site address is required"
+      done
+      if [[ -n "$ACCESS_KEY_HASH" ]]; then
+        validate_access_key_hash || die "P2H_ACCESS_KEY_HASH is not a supported PBKDF2 hash"
+      else
+        while [[ "$confirmed" -eq 0 ]]; do
+          if [[ -z "$ACCESS_KEY" ]]; then
+            if [[ "$INTERACTIVE_ENABLED" -eq 0 ]]; then
+              die "P2H_ACCESS_KEY or P2H_ACCESS_KEY_HASH is required for external deployment"
+            fi
+            prompt_secret ACCESS_KEY "Access key (16-256 printable ASCII characters)"
+          fi
+          if ! validate_access_key; then
+            ACCESS_KEY=""
+            if [[ "$INTERACTIVE_ENABLED" -eq 0 ]]; then
+              die "P2H_ACCESS_KEY must contain 16-256 printable ASCII characters without spaces"
+            fi
+            warn "access key must contain 16-256 printable ASCII characters without spaces"
+            continue
+          fi
+          if [[ "$INTERACTIVE_ENABLED" -eq 1 ]]; then
+            prompt_secret confirmation "Confirm access key"
+            if [[ "$confirmation" != "$ACCESS_KEY" ]]; then
+              ACCESS_KEY=""
+              confirmation=""
+              warn "access keys did not match"
+              continue
+            fi
+          fi
+          confirmed=1
+        done
+        hash_access_key
+        confirmation=""
+      fi
+      ;;
+  esac
+
+  if [[ "$RUNNER_SOURCE" == prebuilt && -z "$RUNNER_IMAGE_OVERRIDE" ]]; then
+    if [[ "$BUILD_WINE" -eq 1 ]]; then
+      RUNNER_IMAGE_OVERRIDE="$DEFAULT_PREBUILT_WINE_IMAGE"
+    else
+      RUNNER_IMAGE_OVERRIDE="$DEFAULT_PREBUILT_RUNNER_IMAGE"
+    fi
+  fi
+
+  if [[ -f "$CONFIG_FILE" && "$FORCE_CONFIG" -eq 0 ]]; then
+    if [[ "$INTERACTIVE_ENABLED" -eq 1 ]]; then
+      prompt_yes_no confirmed "Configuration $CONFIG_FILE exists; replace it" n
+      [[ "$confirmed" -eq 1 ]] || die "configuration was not replaced"
+      FORCE_CONFIG=1
+    elif [[ "$DEPLOYMENT_EXPLICIT" -eq 1 ]]; then
+      die "$CONFIG_FILE already exists; pass --force-config to replace it"
+    fi
+  fi
+}
 
 require_cmd() {
   if command -v "$1" >/dev/null 2>&1; then
@@ -547,15 +909,19 @@ pull_runner() {
 }
 
 write_env_file() {
-  local env_file="$ROOT_DIR/.env"
+  local env_file="$CONFIG_FILE"
   local runner_image="p2h-runner"
+  local allowed_hosts="*"
+  local allowed_origins="*"
+  local access_key_hash=""
+  local temp_file=""
   if [[ -n "$RUNNER_IMAGE_OVERRIDE" ]]; then
     runner_image="$RUNNER_IMAGE_OVERRIDE"
   elif [[ "$BUILD_WINE" -eq 1 ]]; then
     runner_image="p2h-runner-wine"
   fi
 
-  if [[ -f "$env_file" ]]; then
+  if [[ -f "$env_file" && "$FORCE_CONFIG" -eq 0 ]]; then
     log "Keeping existing .env"
     if [[ -n "$RUNNER_IMAGE_OVERRIDE" ]] && ! grep -Fxq "P2H_RUNNER_IMAGE=$RUNNER_IMAGE_OVERRIDE" "$env_file"; then
       warn "Prebuilt runner was pulled, but existing .env was not changed. Set P2H_RUNNER_IMAGE=$RUNNER_IMAGE_OVERRIDE manually."
@@ -575,9 +941,18 @@ write_env_file() {
     return
   fi
 
-  log "Writing local .env"
-  cat >"$env_file" <<EOF
-P2H_DEPLOYMENT_MODE=local
+  if [[ "$DEPLOYMENT_TARGET" == external ]]; then
+    allowed_hosts="$SITE_ADDRESS,localhost,127.0.0.1,::1"
+    allowed_origins="http://$SITE_ORIGIN_HOST:11452"
+    access_key_hash="$ACCESS_KEY_HASH"
+  fi
+
+  log "Writing deployment configuration: $env_file"
+  mkdir -p "$(dirname "$env_file")"
+  temp_file="$(mktemp "${env_file}.tmp.XXXXXX")"
+  chmod 600 "$temp_file"
+  cat >"$temp_file" <<EOF
+P2H_DEPLOYMENT_MODE=$DEPLOYMENT_TARGET
 P2H_DATA_DIR=~/.p2h-web-ui/backend_data
 P2H_RUNNER_IMAGE=$runner_image
 P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE
@@ -587,11 +962,11 @@ P2H_MAX_UPLOAD_BYTES=536870912
 P2H_MAX_REQUEST_BODY_BYTES=553648128
 P2H_RATE_LIMIT_REQUESTS_PER_MINUTE=240
 P2H_RATE_LIMIT_UPLOADS_PER_MINUTE=12
+P2H_RATE_LIMIT_AUTH_FAILURES_PER_MINUTE=10
 P2H_READINESS_TIMEOUT_SECONDS=5
-P2H_HSTS_MAX_AGE_SECONDS=31536000
-P2H_ALLOWED_HOSTS=localhost,127.0.0.1,::1,testserver
-P2H_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-P2H_TRUSTED_PROXY_SECRET=
+P2H_ALLOWED_HOSTS=$allowed_hosts
+P2H_ALLOWED_ORIGINS=$allowed_origins
+P2H_ACCESS_KEY_HASH='$access_key_hash'
 P2H_JOB_TIMEOUT_SECONDS=7200
 P2H_JOB_IDLE_TIMEOUT_SECONDS=300
 P2H_JOB_STAGE_TIMEOUT_SECONDS=1800
@@ -610,15 +985,18 @@ P2H_DOCKER_TMP_SIZE=512m
 P2H_DOCKER_WORK_SIZE=1g
 P2H_DOCKER_OUTPUT_SIZE=1g
 
-P2H_BACKEND_HOST=127.0.0.1
-P2H_BACKEND_PORT=8000
-P2H_FRONTEND_HOST=127.0.0.1
-P2H_FRONTEND_PORT=5173
+P2H_BACKEND_HOST=0.0.0.0
+P2H_BACKEND_PORT=11451
+P2H_FRONTEND_HOST=0.0.0.0
+P2H_FRONTEND_PORT=11452
 EOF
+  mv -f "$temp_file" "$env_file"
+  chmod 600 "$env_file"
 }
 
 main() {
   log "Installing Polygon Converter Web UI"
+  configure_install
 
   if [[ "$INSTALL_BACKEND" -eq 1 ]]; then
     install_backend
@@ -628,11 +1006,12 @@ main() {
     install_frontend
   fi
 
-  if [[ -n "$RUNNER_IMAGE_OVERRIDE" ]]; then
-    pull_runner
-  elif [[ "$BUILD_RUNNER" -eq 1 ]]; then
-    build_runner
-  fi
+  case "$RUNNER_SOURCE" in
+    prebuilt) pull_runner ;;
+    build) build_runner ;;
+    skip) log "Skipping runner image setup" ;;
+    *) die "invalid runner source: $RUNNER_SOURCE" ;;
+  esac
 
   write_env_file
 
@@ -644,8 +1023,13 @@ Start the Web UI:
   ./scripts/start.sh
 
 Open:
-  http://127.0.0.1:5173
+  http://${SITE_ORIGIN_HOST:-127.0.0.1}:11452
 EOF
+
+  if [[ "$DEPLOYMENT_TARGET" == external ]]; then
+    warn "External mode uses HTTP. The access key is not encrypted in transit."
+    warn "Use a VPN, SSH tunnel, or your own TLS gateway for untrusted networks."
+  fi
 }
 
 main

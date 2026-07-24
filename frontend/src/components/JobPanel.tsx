@@ -1,6 +1,6 @@
 import { Download, Trash2, XCircle } from "lucide-react";
 
-import { ConversionReport, downloadUrl, InspectResult, JobResponse } from "../api";
+import { ConversionReport, InspectResult, JobResponse } from "../api";
 import { formatElapsed, progressLabels } from "../formatConfig";
 import {
   ConversionReportPanel,
@@ -23,6 +23,7 @@ type JobPanelProps = {
   error: string | null;
   isRunning: boolean;
   onCancel: () => void;
+  onDownload: () => void;
   onReset: () => void;
   onApplyRepairs: () => void;
 };
@@ -41,6 +42,7 @@ export function JobPanel({
   error,
   isRunning,
   onCancel,
+  onDownload,
   onReset,
   onApplyRepairs
 }: JobPanelProps) {
@@ -156,15 +158,15 @@ export function JobPanel({
         </div>
 
         <div className="button-row">
-          <a
+          <button
+            type="button"
             className={`download-button ${job?.download_ready ? "" : "disabled"}`}
-            href={job?.download_ready ? downloadUrl(job.id) : undefined}
-            aria-disabled={!job?.download_ready}
-            tabIndex={job?.download_ready ? 0 : -1}
+            onClick={onDownload}
+            disabled={!job?.download_ready || busy}
           >
             <Download size={17} aria-hidden="true" />
             下载结果
-          </a>
+          </button>
           {isRunning && (
             <button
               className="danger-button"

@@ -66,13 +66,28 @@ def main() -> int:
     artifact = result / "sum" / "problem.yaml"
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text("name: Sum\n", encoding="utf-8")
+    issues = []
+    if source_format == "icpc":
+        issues.append(
+            {
+                "severity": "warning",
+                "code": "source-format-override",
+                "message": (
+                    "source format was manually set to icpc; "
+                    "automatic inspection suggested probhub"
+                ),
+                "problem": None,
+                "field": "source",
+                "context": {"requested": "icpc", "detected": "probhub"},
+            }
+        )
     report = {
         "schema_version": 1,
         "source_format": source_format,
         "target_format": target_format,
         "problem_count": 1,
-        "counts": {"warning": 0, "loss": 0, "fatal": 0},
-        "issues": [],
+        "counts": {"warning": len(issues), "loss": 0, "fatal": 0},
+        "issues": issues,
         "artifacts": ["sum/problem.yaml"],
     }
     (result / ".p2h-report.json").write_text(

@@ -1,224 +1,231 @@
-# 生产部署手册
+# Linux 部署手册
 
-这套部署面向单机 Linux：Caddy 负责 HTTPS、账号认证、静态前端和请求体上限；
-FastAPI 只监听 `127.0.0.1:8000`；转换任务由同一专用用户的 rootless Docker
-执行。不要把 Uvicorn、Docker socket 或根 Docker daemon 暴露到公网。
+本项目使用两个独立服务：Node 提供已构建的前端，FastAPI 提供 API、SSE、下载
+和指标。内部与外部模式使用完全相同的固定端口：
 
-## 安全边界
+| 服务 | 监听地址 | 固定端口 |
+|---|---|---:|
+| 后端 | `0.0.0.0` | `11451` |
+| 前端 | `0.0.0.0` | `11452` |
 
-- Caddy `basic_auth` 是面向用户的第一层认证，只能运行在 HTTPS 上。
-- Caddy 覆盖客户端传入的 `X-P2H-Proxy-Secret`，再向后端注入独立随机密钥。
-- 后端生产模式校验 Host、代理密钥、Origin/Referer、`Sec-Fetch-Site`、请求速率
-  和请求体大小，并为 API 返回 no-store、CSP、HSTS 等安全响应头。
-- runner 继续使用无网络、只读根文件系统、最小 capability、PID/内存/CPU/tmpfs
-  上限和 `no-new-privileges`。
-- 后端固定一个 worker。任务状态和限流器是进程内协调模型，多 worker 会导致重复
-  执行和限流不一致。
+内部模式不校验访问密钥，只能部署在可信 LAN 或 VPN。外部模式要求页面进入密钥，
+并对 API、SSE、下载、就绪探针和 `/metrics` 统一校验
+`X-P2H-Access-Key`。`/api/health/live` 保持免密，供服务存活探测使用。
 
-Docker 官方明确警告 `docker` 组等同 root 级权限；因此模板默认要求 rootless
-Docker。若组织选择 rootful Docker，必须把整台主机视为该 Web 服务的安全边界，
-并在独立 VM 中运行，不要和其他业务混部。
+> [!WARNING]
+> 项目不提供反向代理或内置 TLS。外部模式使用 HTTP，访问密钥、题包和下载内容
+> 在传输中不会加密。不要在不可信网络直接使用；应通过可信 VPN、SSH 隧道或由
+> 管理员自行维护的上游 TLS 网关接入。应用端口仍保持 `11451/11452`。
 
-## 前置条件
+## 1. 系统要求
 
-- 支持 systemd 和 cgroup v2 的 Linux 主机。
-- 一个不与其他业务共享的专用用户 `ojconverter`，固定 UID（示例为 `1001`）；
-  禁止 SSH 密码登录，但保留 home 和 rootless Docker 所需的 systemd 用户会话。
-- Python 3.12+、Node.js 22+、Caddy 2.10+、Docker Engine rootless。
-- 域名已经解析到主机，防火墙仅向公网开放 TCP 80/443；8000 和 Docker socket
-  不开放。
-- `/opt/oj-package-converter` 是经过审核的发布目录，由 root 拥有且服务用户只读。
+- Debian 12+/Ubuntu 22.04+ 或同类 systemd Linux。
+- Python 3.10+ 与 `venv`。
+- Node.js 20.19+、22.12+ 或 24+。
+- 系统 Docker Engine 与 Docker Compose 插件。
+- 建议使用独立主机或 VM，并固定 runner 镜像 digest。
 
-Caddy 2.10 是硬要求，因为 `request_body max_size` 从该版本开始提供。Caddy 的
-`basic_auth` 只接受哈希密码，不能填写明文。
+后端通过系统 Docker daemon 创建隔离 runner。加入 `docker` 组等价于获得主机
+root 权限，因此不要在承载其他敏感业务的共享主机上部署。
 
-## 1. 安装 rootless Docker
-
-以下命令以 `ojconverter` 用户执行：
+Debian/Ubuntu 基础依赖示例：
 
 ```bash
-dockerd-rootless-setuptool.sh install
-systemctl --user enable --now docker.service
-sudo loginctl enable-linger ojconverter
-id -u
+sudo apt-get update
+sudo apt-get install -y git python3 python3-venv docker.io docker-compose-plugin
+sudo systemctl enable --now docker.service
+```
+
+Node.js 版本应通过发行版仓库、NodeSource 或组织内部软件源安装。安装后检查：
+
+```bash
+python3 --version
+node --version
+npm --version
 docker info
+docker compose version
 ```
 
-`docker info` 的 `Security Options` 必须包含 `rootless`，并确认 `Cgroup Driver`
-为 `systemd`，否则容器 CPU、内存和 PID 限制可能不会全部生效。把实际 UID 写入
-`DOCKER_HOST=unix:///run/user/<UID>/docker.sock`。
-
-## 2. 准备发布目录
-
-从一个干净、已验证的提交构建，不要把开发机的 `.env`、任务数据或虚拟环境复制
-进发布包：
+## 2. 创建服务用户与目录
 
 ```bash
+sudo useradd --system --create-home --shell /bin/bash ojconverter
+sudo usermod -aG docker ojconverter
+sudo install -d -o ojconverter -g ojconverter -m 0755 /opt/oj-package-converter
+sudo install -d -o ojconverter -g ojconverter -m 0700 /var/lib/oj-package-converter
+sudo install -d -o root -g ojconverter -m 0750 /etc/oj-package-converter
+```
+
+重新登录或启动新的用户进程后，确认服务用户可以访问 Docker：
+
+```bash
+sudo -u ojconverter -H docker info
+```
+
+## 3. 获取源码并运行交互安装
+
+```bash
+sudo -u ojconverter -H git clone \
+  https://github.com/LMTINSUZHOU/Problem-Change-Center.git \
+  /opt/oj-package-converter
 cd /opt/oj-package-converter
-python3 -m venv backend/.venv
-backend/.venv/bin/pip install --require-hashes --requirement backend/requirements.lock
-npm --prefix frontend ci
-npm --prefix frontend run build
-sudo -u ojconverter env DOCKER_HOST=unix:///run/user/1001/docker.sock \
-  docker compose --profile runner build runner
-sudo chown -R root:root /opt/oj-package-converter
-sudo chmod -R o-w /opt/oj-package-converter
+sudo -u ojconverter -H ./install.sh --interactive \
+  --config /tmp/oj-package-converter.env
 ```
 
-发布前记录源码提交 SHA、runner 镜像 ID 和依赖审计结果。生产升级必须重新运行
-后端测试、前端构建、隔离探针和镜像扫描。
+安装器依次询问：
 
-也可以跳过本机构建，拉取 `main` 或正式版本镜像。生产配置应固定发布 digest：
+1. 内部部署或外部部署。
+2. 是否启用 Wine runner。
+3. 拉取预构建镜像、本地构建或跳过 runner。
+4. 外部部署的访问主机名/IP 与访问密钥。
+
+推荐选择预构建镜像。只有必须运行题包内 binary-only Windows `.exe` 时才选择
+Wine。外部密钥要求 16-256 个无空格可打印 ASCII 字符；安装器只保存
+PBKDF2-SHA256 哈希，不把明文密钥写入配置。
+
+国内网络构建 runner 时可使用清华 Debian 源：
 
 ```bash
-sudo -u ojconverter env DOCKER_HOST=unix:///run/user/1001/docker.sock \
-  docker pull ghcr.io/lmtinsuzhou/p2h-runner:main
+sudo -u ojconverter -H ./install.sh --interactive \
+  --config /tmp/oj-package-converter.env \
+  --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian \
+  --apt-security https://mirrors.tuna.tsinghua.edu.cn/debian-security
 ```
 
-然后在 `production.env` 中设置
-`P2H_RUNNER_IMAGE=ghcr.io/lmtinsuzhou/p2h-runner@sha256:<digest>`。Wine 镜像
-名称为 `ghcr.io/lmtinsuzhou/p2h-runner-wine`，且只提供 `linux/amd64`。
-
-## 3. 生成配置与密钥
+安装完成后，把数据目录改为 systemd 可写的持久目录，再安装配置：
 
 ```bash
-sudo install -d -m 0750 -o root -g ojconverter /etc/oj-package-converter
-sudo install -m 0640 -o root -g ojconverter \
-  deploy/production.env.example \
+sudo sed -i \
+  's|^P2H_DATA_DIR=.*|P2H_DATA_DIR=/var/lib/oj-package-converter|' \
+  /tmp/oj-package-converter.env
+sudo install -o root -g ojconverter -m 0640 \
+  /tmp/oj-package-converter.env \
   /etc/oj-package-converter/production.env
-openssl rand -hex 32
-caddy hash-password
+sudo rm /tmp/oj-package-converter.env
 ```
 
-编辑配置并完成这些替换：
+检查关键配置：
 
-- `P2H_SITE_ADDRESS`、`P2H_ALLOWED_HOSTS` 是实际域名。
-- `P2H_ALLOWED_ORIGINS` 是带 `https://` 的准确 origin，不含路径。
-- `P2H_TRUSTED_PROXY_SECRET` 使用 `openssl rand -hex 32` 的输出。
-- `P2H_ADMIN_PASSWORD_HASH` 使用 `caddy hash-password` 的输出；原始密码不落盘。
-- `DOCKER_HOST` 使用专用用户的实际 UID。
-- `P2H_FRONTEND_ROOT` 指向只读的 `frontend/dist`。
+```text
+P2H_DEPLOYMENT_MODE=internal 或 external
+P2H_BACKEND_HOST=0.0.0.0
+P2H_BACKEND_PORT=11451
+P2H_FRONTEND_HOST=0.0.0.0
+P2H_FRONTEND_PORT=11452
+```
 
-代理密钥与登录密码必须不同。禁止提交 `production.env`、访问日志、上传包或备份
-到 Git。轮换密码或代理密钥后，要先验证配置，再原子替换环境文件并同时重启
-Caddy 与后端，避免两端短暂不一致。
+外部模式还必须满足：
 
-## 4. 安装服务
+```text
+P2H_ALLOWED_HOSTS=<访问主机名或 IP>,localhost,127.0.0.1,::1
+P2H_ALLOWED_ORIGINS=http://<访问主机名或 IP>:11452
+P2H_ACCESS_KEY_HASH='pbkdf2_sha256$...'
+```
+
+## 4. 安装并启动 systemd 服务
 
 ```bash
 sudo install -m 0644 deploy/systemd/oj-package-converter.service \
   /etc/systemd/system/oj-package-converter.service
-sudo install -d -m 0755 /etc/systemd/system/caddy.service.d
-sudo install -m 0644 deploy/systemd/caddy-oj-package-converter.conf \
-  /etc/systemd/system/caddy.service.d/oj-package-converter.conf
-sudo install -m 0644 deploy/Caddyfile /etc/caddy/Caddyfile
+sudo install -m 0644 deploy/systemd/oj-package-converter-frontend.service \
+  /etc/systemd/system/oj-package-converter-frontend.service
+
 sudo systemctl daemon-reload
+sudo systemctl enable --now \
+  oj-package-converter.service \
+  oj-package-converter-frontend.service
 ```
 
-先以服务用户执行预检：
+服务启动前会校验生产配置、数据目录、Docker daemon、runner 镜像和隔离探针。
+后端固定单 worker，以保证内存限流器与任务调度状态一致。
+
+## 5. 防火墙与访问
+
+浏览器需要同时访问前端 `11452` 和后端 `11451`。内部部署应把两个端口限制在
+可信网段；外部部署则按实际入口网络放行这两个 TCP 端口。例如 UFW：
 
 ```bash
-sudo -u ojconverter \
-  /opt/oj-package-converter/scripts/production-check.sh \
-  --backend-only /etc/oj-package-converter/production.env
-sudo env --chdir=/opt/oj-package-converter \
-  /opt/oj-package-converter/scripts/production-check.sh \
-  /etc/oj-package-converter/production.env
+# 内部模式示例，只允许可信网段
+sudo ufw allow from 192.168.0.0/16 to any port 11451 proto tcp
+sudo ufw allow from 192.168.0.0/16 to any port 11452 proto tcp
+
+# 外部模式确需公网直连时
+sudo ufw allow 11451/tcp
+sudo ufw allow 11452/tcp
 ```
 
-第二条命令还验证 Caddy 和前端构建。通过后启用服务：
+打开：
 
-后端预检会实际启动一次隔离探针容器，并要求 rootless Docker 使用 systemd
-cgroup driver；这不是只检查镜像标签。任何 capability、namespace、挂载或资源
-限制不兼容都会在服务启动前失败。
+```text
+http://<服务器地址>:11452
+```
+
+外部模式首次进入会要求密钥。密钥只保存在该浏览器标签页的 `sessionStorage`，
+不会进入 URL 或 `localStorage`；关闭标签页或点击“锁定”后需要重新输入。
+
+## 6. 健康检查与指标
 
 ```bash
-sudo systemctl enable --now oj-package-converter.service
-sudo systemctl enable --now caddy.service
+# 免密存活探针
+curl --fail http://127.0.0.1:11451/api/health/live
+
+# 内部模式
+curl --fail http://127.0.0.1:11451/api/health/ready
+curl --fail http://127.0.0.1:11451/metrics
+
+# 外部模式
+curl --fail -H 'X-P2H-Access-Key: YOUR_ACCESS_KEY' \
+  http://127.0.0.1:11451/api/health/ready
+curl --fail -H 'X-P2H-Access-Key: YOUR_ACCESS_KEY' \
+  http://127.0.0.1:11451/metrics
 ```
 
-## 5. 验证
+外部模式不会开放 `/docs`、`/redoc` 和 OpenAPI JSON。
 
-后端存活探针不需要代理密钥，但只应从本机访问：
+## 7. 日志、停止与重启
 
 ```bash
-curl --fail http://127.0.0.1:8000/api/health/live
+sudo systemctl status oj-package-converter.service
+sudo systemctl status oj-package-converter-frontend.service
+sudo journalctl -u oj-package-converter.service -f
+sudo journalctl -u oj-package-converter-frontend.service -f
+
+sudo systemctl restart \
+  oj-package-converter.service \
+  oj-package-converter-frontend.service
 ```
 
-生产就绪探针必须经过 Caddy 认证，它会检查数据目录、Docker daemon 和 runner
-镜像：
+任务数据库、上传、日志、报告和产物位于
+`/var/lib/oj-package-converter`。不要在服务运行时直接修改 `jobs.sqlite3`。
+
+## 8. 更新
+
+更新前备份生产配置和数据目录，并确认没有运行中的转换：
 
 ```bash
-curl --fail --user admin https://convert.example.com/api/health/ready
+sudo systemctl stop \
+  oj-package-converter-frontend.service \
+  oj-package-converter.service
+sudo -u ojconverter -H git -C /opt/oj-package-converter pull --ff-only
+cd /opt/oj-package-converter
+sudo -u ojconverter -H ./install.sh --non-interactive \
+  --skip-runner --config /opt/oj-package-converter/.env
+sudo systemctl start \
+  oj-package-converter.service \
+  oj-package-converter-frontend.service
 ```
 
-还要验证以下负向场景：
+生产环境推荐检出明确版本标签，并把 `P2H_RUNNER_IMAGE` 固定为镜像 digest。
+更新后重新执行健康检查并完成一次上传、SSE 进度与下载冒烟测试。
 
-```bash
-# 绕过 Caddy 必须为 403
-curl -i -H 'Host: convert.example.com' http://127.0.0.1:8000/api/health
+## 9. 故障排查
 
-# 错误 Host 必须为 400
-curl -i -H 'Host: attacker.example' http://127.0.0.1:8000/api/health/live
-
-# 公网 8000 必须不可达
-nc -vz convert.example.com 8000
-```
-
-最后上传一个最小题包，完成转换、下载、取消和删除测试；检查失败任务没有残留
-容器或半成品：
-
-```bash
-sudo -u ojconverter env DOCKER_HOST=unix:///run/user/1001/docker.sock \
-  docker ps --filter label=app=p2h-web-ui
-```
-
-## 监控与告警
-
-- 每 30 秒检查 `/api/health/live`，每 60 秒通过认证检查 `/api/health/ready`。
-- 通过 Caddy 认证抓取 `/metrics`；不要将指标端点或后端 8000 端口直接暴露公网。
-- 重点监控 HTTP 5xx 与延迟、活跃/完成任务、转换耗时、语义损失数和任务存储
-  占用。指标不包含任务 ID、文件名或其他高基数标签。
-- 告警条件：连续 3 次 not_ready、HTTP 5xx、磁盘可用空间低于上传上限的两倍、
-  任务超时率突增、runner 容器超过配置并发数、服务频繁重启。
-- 后端向 journald 输出单行 JSON 请求/任务日志，可用响应头中的 `X-Request-ID`
-  关联请求：`journalctl -u oj-package-converter -f -o cat`。
-- Caddy JSON 访问日志默认写入 `/var/log/oj-package-converter/access.json`，
-  100 MiB 轮转，保留 10 个或 30 天。
-- 不记录上传内容、代理密钥或登录密码。向外部日志平台发送前，按组织政策处理
-  IP、任务 ID 和文件名。
-
-## 备份、升级与回滚
-
-任务目录包含用户上传的题包，可能涉及隐私或竞赛保密内容。备份必须加密，限制
-访问并设置明确的销毁周期。为了获得一致备份：
-
-```bash
-sudo systemctl stop oj-package-converter
-sudo tar --xattrs --acls -C /var/lib \
-  -czf /secure-backup/oj-package-converter-$(date +%F).tar.gz \
-  oj-package-converter
-sudo systemctl start oj-package-converter
-```
-
-每次升级保留上一版只读发布目录与 runner 镜像 ID。升级顺序是：构建新版本、
-完整测试、停止后端、备份、切换 `/opt/oj-package-converter`、运行生产预检、启动
-后端、验证真实转换。回滚时停止后端，切回上一目录和 runner 镜像，再启动并验证。
-不要在两个版本之间同时运行后端。
-
-## 事件处理
-
-怀疑凭据或主机失陷时：
-
-1. 从负载均衡或防火墙摘除主机并停止 Caddy/后端。
-2. 保留 journald、Caddy 日志、任务元数据和容器事件作为只读证据。
-3. 在干净主机轮换登录密码、代理密钥和 TLS/备份凭据。
-4. 从已验证提交和镜像重建，不在可疑主机上“原地清理”后恢复服务。
-5. 按适用规则通知受影响题包所有者，并复盘上传内容和下载访问范围。
-
-官方参考：
-
-- [Docker Rootless mode](https://docs.docker.com/engine/security/rootless/)
-- [Docker rootless systemd 与资源限制](https://docs.docker.com/engine/security/rootless/tips/)
-- [Caddy basic_auth](https://caddyserver.com/docs/caddyfile/directives/basic_auth)
-- [Caddy request_body](https://caddyserver.com/docs/caddyfile/directives/request_body)
+- `production check failed: Docker daemon is unreachable`：确认 Docker 服务已启动，
+  且 `ojconverter` 已加入 `docker` 组。
+- `runner image is missing`：重新拉取配置中的 `P2H_RUNNER_IMAGE`，或重新运行安装器。
+- 页面能打开但 API 失败：确认浏览器可以访问 `11451`，并检查
+  `P2H_ALLOWED_HOSTS` 与 `P2H_ALLOWED_ORIGINS`。
+- 密钥始终错误：不要把 PBKDF2 哈希当作登录密钥；用户输入的是安装时设置的明文。
+- Wine 在 ARM 主机异常：Wine runner 是 `linux/amd64`，优先使用普通 runner 和
+  题包内源码，只在确有 Windows 二进制需求时启用 Wine。

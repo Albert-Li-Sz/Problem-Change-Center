@@ -5,6 +5,7 @@ import {
   applyRepairs,
   cancelJob,
   deleteJob,
+  downloadJob,
   getJob,
   getLogs,
   inspectZip,
@@ -76,6 +77,11 @@ export default function App() {
   const isRunning = job?.status === "queued" || job?.status === "running";
   const canStart = Boolean(inspect && file && inspectedFile === file) && !isRunning && !busy && !resetting;
   const effectiveSource = sourceFormat === "auto" ? inspect?.detected_format ?? null : sourceFormat;
+  const sourceFormatOverride = Boolean(
+    inspect &&
+      sourceFormat !== "auto" &&
+      (!inspect.detected_format || sourceFormat !== inspect.detected_format)
+  );
   const targetFormats =
     inspect && effectiveSource === inspect.detected_format
       ? inspect.supported_targets
@@ -297,6 +303,19 @@ export default function App() {
     }
   }
 
+  async function handleDownload() {
+    if (!job?.download_ready || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await downloadJob(job.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "下载失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleApplyRepairs() {
     if (!job || !report?.repair_suggestions?.length) return;
     const selections: Array<{ suggestion_id: string; candidate_path?: string; upload_name?: string }> = [];
@@ -513,6 +532,31 @@ export default function App() {
                   ))}
                 </select>
               </label>
+            </div>
+
+            <div
+              className={`source-format-note${sourceFormatOverride ? " is-override" : ""}`}
+              aria-live="polite"
+            >
+              {sourceFormatOverride && <AlertTriangle size={16} aria-hidden="true" />}
+              <span>
+                {sourceFormatOverride && sourceFormat !== "auto" ? (
+                  inspect?.detected_format ? (
+                    <>
+                      自动检查建议 <strong>{formatLabels[inspect.detected_format]}</strong>，
+                      当前将按 <strong>{formatLabels[sourceFormat]}</strong> 解析。若结构不兼容，
+                      读取阶段会给出具体错误，不代表 ZIP 损坏。
+                    </>
+                  ) : (
+                    <>
+                      该题包存在多个识别候选，当前将按 <strong>{formatLabels[sourceFormat]}</strong>
+                      解析。若结构不兼容，读取阶段会给出具体错误，不代表 ZIP 损坏。
+                    </>
+                  )
+                ) : (
+                  "自动识别仅作建议；手动选择输入格式会按所选解析器尝试。"
+                )}
+              </span>
             </div>
 
             <label>
@@ -814,6 +858,7 @@ export default function App() {
             error={error}
             isRunning={isRunning}
             onCancel={handleCancel}
+            onDownload={handleDownload}
             onReset={handleReset}
             onApplyRepairs={handleApplyRepairs}
           />

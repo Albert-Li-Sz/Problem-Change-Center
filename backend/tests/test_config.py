@@ -5,7 +5,7 @@ import pytest
 from app.config import Settings
 
 
-PROXY_SECRET = "test-only-" * 4
+ACCESS_KEY_HASH = f"pbkdf2_sha256$600000${'ab' * 16}${'cd' * 32}"
 
 
 @pytest.mark.parametrize(
@@ -23,6 +23,7 @@ PROXY_SECRET = "test-only-" * 4
         ("P2H_DOCKER_PIDS_LIMIT", "0"),
         ("P2H_RATE_LIMIT_REQUESTS_PER_MINUTE", "0"),
         ("P2H_RATE_LIMIT_UPLOADS_PER_MINUTE", "-1"),
+        ("P2H_RATE_LIMIT_AUTH_FAILURES_PER_MINUTE", "0"),
         ("P2H_MAX_REQUEST_BODY_BYTES", "0"),
         ("P2H_READINESS_TIMEOUT_SECONDS", "0"),
     ],
@@ -91,13 +92,13 @@ def test_empty_data_directory_fails_at_startup(monkeypatch: pytest.MonkeyPatch) 
         Settings.from_env()
 
 
-def test_production_requires_explicit_security_boundary(
+def test_external_mode_requires_explicit_security_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("P2H_DEPLOYMENT_MODE", "production")
+    monkeypatch.setenv("P2H_DEPLOYMENT_MODE", "external")
     monkeypatch.delenv("P2H_ALLOWED_HOSTS", raising=False)
     monkeypatch.delenv("P2H_ALLOWED_ORIGINS", raising=False)
-    monkeypatch.delenv("P2H_TRUSTED_PROXY_SECRET", raising=False)
+    monkeypatch.delenv("P2H_ACCESS_KEY_HASH", raising=False)
 
     with pytest.raises(ValueError, match="P2H_ALLOWED_HOSTS"):
         Settings.from_env()
@@ -106,8 +107,8 @@ def test_production_requires_explicit_security_boundary(
     with pytest.raises(ValueError, match="P2H_ALLOWED_ORIGINS"):
         Settings.from_env()
 
-    monkeypatch.setenv("P2H_ALLOWED_ORIGINS", "https://converter.example.com")
-    with pytest.raises(ValueError, match="P2H_TRUSTED_PROXY_SECRET"):
+    monkeypatch.setenv("P2H_ALLOWED_ORIGINS", "http://converter.example.com:11452")
+    with pytest.raises(ValueError, match="P2H_ACCESS_KEY_HASH"):
         Settings.from_env()
 
 
@@ -118,27 +119,27 @@ def test_production_requires_explicit_security_boundary(
         ("P2H_ALLOWED_ORIGINS", "*", "must not contain"),
         (
             "P2H_ALLOWED_ORIGINS",
-            "http://converter.example.com",
-            "must use HTTPS",
+            "https://converter.example.com:11452",
+            "http://HOST:11452",
         ),
         (
             "P2H_ALLOWED_ORIGINS",
-            "https://converter.example.com:not-a-port",
+            "http://converter.example.com:not-a-port",
             "valid port",
         ),
-        ("P2H_TRUSTED_PROXY_SECRET", "too-short", "at least 32"),
+        ("P2H_ACCESS_KEY_HASH", "too-short", "supported PBKDF2"),
     ],
 )
-def test_production_rejects_weak_boundary_values(
+def test_external_mode_rejects_invalid_boundary_values(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     value: str,
     message: str,
 ) -> None:
-    monkeypatch.setenv("P2H_DEPLOYMENT_MODE", "production")
+    monkeypatch.setenv("P2H_DEPLOYMENT_MODE", "external")
     monkeypatch.setenv("P2H_ALLOWED_HOSTS", "converter.example.com")
-    monkeypatch.setenv("P2H_ALLOWED_ORIGINS", "https://converter.example.com")
-    monkeypatch.setenv("P2H_TRUSTED_PROXY_SECRET", PROXY_SECRET)
+    monkeypatch.setenv("P2H_ALLOWED_ORIGINS", "http://converter.example.com:11452")
+    monkeypatch.setenv("P2H_ACCESS_KEY_HASH", ACCESS_KEY_HASH)
     monkeypatch.setenv(name, value)
 
     with pytest.raises(ValueError, match=message):
@@ -155,19 +156,20 @@ def test_request_body_limit_must_cover_upload_limit(
         Settings.from_env()
 
 
-def test_valid_production_settings_are_normalized(
+def test_valid_external_settings_are_normalized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("P2H_DEPLOYMENT_MODE", "production")
+    monkeypatch.setenv("P2H_DEPLOYMENT_MODE", "external")
     monkeypatch.setenv("P2H_ALLOWED_HOSTS", " converter.example.com,admin.example.com ")
-    monkeypatch.setenv("P2H_ALLOWED_ORIGINS", " https://converter.example.com ")
-    monkeypatch.setenv("P2H_TRUSTED_PROXY_SECRET", PROXY_SECRET)
+    monkeypatch.setenv("P2H_ALLOWED_ORIGINS", " http://converter.example.com:11452 ")
+    monkeypatch.setenv("P2H_ACCESS_KEY_HASH", ACCESS_KEY_HASH)
 
     settings = Settings.from_env()
 
-    assert settings.is_production is True
+    assert settings.is_external is True
     assert settings.allowed_hosts == (
         "converter.example.com",
         "admin.example.com",
     )
-    assert settings.allowed_origins == ("https://converter.example.com",)
+    assert settings.allowed_origins == ("http://converter.example.com:11452",)
+    assert settings.access_key_hash == ACCESS_KEY_HASH

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tempfile
@@ -194,41 +195,103 @@ def convert_hoj_to_domjudge(
 
 def _find_hoj_problems(root: Path) -> list[HojProblem]:
     result: list[HojProblem] = []
-    for json_path in sorted(root.rglob("*.json")):
+    by_problem_id: dict[str, HojProblem] = {}
+    json_paths = sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.casefold() == ".json"
+    )
+    for json_path in json_paths:
         data_dir = json_path.with_suffix("")
         if not data_dir.is_dir():
             continue
         value = load_json_file(json_path)
         if not isinstance(value, dict) or not isinstance(value.get("problem"), dict):
             continue
-        result.append(HojProblem(json_path.stem, json_path, data_dir, value))
+        item = HojProblem(json_path.stem, json_path, data_dir, value)
+        problem_id = _hoj_logical_problem_id(item)
+        if problem_id is None:
+            result.append(item)
+            continue
+        previous = by_problem_id.get(problem_id)
+        if previous is None:
+            by_problem_id[problem_id] = item
+            result.append(item)
+            continue
+        display_id = str(item.problem.get("problemId", "")).strip()
+        if previous.document != item.document:
+            raise ValueError(
+                f"conflicting HOJ metadata for problemId {display_id}: "
+                f"{previous.json_path} and {item.json_path}"
+            )
+        if _hoj_data_manifest(previous.data_dir) != _hoj_data_manifest(item.data_dir):
+            raise ValueError(
+                f"conflicting HOJ problem data for problemId {display_id}: "
+                f"{previous.data_dir} and {item.data_dir}"
+            )
     return result
+
+
+def _hoj_logical_problem_id(item: HojProblem) -> str | None:
+    value = item.problem.get("problemId")
+    if isinstance(value, (str, int, float)):
+        normalized = str(value).strip().casefold()
+        return normalized or None
+    return None
+
+
+def _hoj_data_manifest(data_dir: Path) -> tuple[tuple[str, str], ...]:
+    manifest: list[tuple[str, str]] = []
+    for path in sorted(data_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        manifest.append((path.relative_to(data_dir).as_posix(), digest.hexdigest()))
+    return tuple(manifest)
 
 
 def _filter_hoj_problems(
     problems: list[HojProblem], only: Iterable[str]
 ) -> list[HojProblem]:
-    wanted = [bridge._safe_name(item) for item in only if item]
+    wanted = [
+        bridge._safe_name(str(item).strip()) for item in only if str(item).strip()
+    ]
     if not wanted:
         return problems
 
-    by_key: dict[str, HojProblem] = {}
+    by_key: dict[str, list[HojProblem]] = {}
     for item in problems:
         pdoc = item.problem
-        keys = {
-            bridge._safe_name(item.key),
+        values = (
+            item.key,
             _hoj_slug(item),
-            bridge._safe_name(str(pdoc.get("problemId", ""))),
-            bridge._safe_name(str(pdoc.get("display_id", ""))),
-            bridge._safe_name(str(pdoc.get("title", ""))),
-        }
-        for key in keys:
-            if key:
-                by_key[key] = item
+            pdoc.get("problemId"),
+            pdoc.get("display_id"),
+            pdoc.get("title"),
+        )
+        for value in values:
+            text = str(value).strip() if value is not None else ""
+            if not text:
+                continue
+            key = bridge._safe_name(text)
+            matches = by_key.setdefault(key, [])
+            if not any(match is item for match in matches):
+                matches.append(item)
     missing = [item for item in wanted if item not in by_key]
     if missing:
         raise ValueError(f"unknown problem(s): {', '.join(missing)}")
-    return [by_key[item] for item in wanted]
+    ambiguous = [item for item in wanted if len(by_key[item]) > 1]
+    if ambiguous:
+        raise ValueError(f"ambiguous problem selector(s): {', '.join(ambiguous)}")
+    selected: list[HojProblem] = []
+    for key in wanted:
+        item = by_key[key][0]
+        if not any(match is item for match in selected):
+            selected.append(item)
+    return selected
 
 
 def _hoj_slug(item: HojProblem) -> str:

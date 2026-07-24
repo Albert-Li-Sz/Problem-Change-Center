@@ -652,10 +652,12 @@ def test_domjudge_to_hydro_validation_rejects_invalid_pid() -> None:
         assert bad_hoj_color.value.status_code == 422
 
 
-def test_matrix_request_rejects_detected_source_mismatch() -> None:
+def test_matrix_request_allows_explicit_source_override() -> None:
     with TemporaryDirectory() as td:
         root = Path(td)
-        settings = _settings(root, root / "fake-docker")
+        fake_docker = root / "fake-docker"
+        _write_fake_docker(fake_docker, "#!/usr/bin/env bash\nexit 0\n")
+        settings = _settings(root, fake_docker)
         storage = Storage(settings)
         job_id = "1" * 32
         _prepare_job(storage, job_id)
@@ -664,13 +666,15 @@ def test_matrix_request_rejects_detected_source_mismatch() -> None:
         storage.write_metadata(metadata)
         manager = JobManager(settings, storage)
 
-        with pytest.raises(HTTPException) as mismatch:
-            manager.start(
-                JobRequest(job_id=job_id, source_format="fps", target_format="hydro")
-            )
+        response = manager.start(
+            JobRequest(job_id=job_id, source_format="fps", target_format="hydro")
+        )
 
-        assert mismatch.value.status_code == 422
-        assert "does not match" in str(mismatch.value.detail)
+        assert response.source_format == "fps"
+        assert response.target_format == "hydro"
+        assert storage.read_metadata(job_id).source_format == "fps"
+        assert storage.read_request(job_id)["source_format"] == "fps"
+        manager._runtime[job_id].thread.join(timeout=5)  # type: ignore[union-attr]
 
 
 def test_structured_progress_is_persisted_without_polluting_logs() -> None:

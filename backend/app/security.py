@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
-import ipaddress
 import re
 import shutil
 
@@ -26,7 +26,7 @@ from .config import Settings
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _RATE_LIMIT_EXEMPT_PATHS = {"/api/health/live"}
-_PROXY_EXEMPT_PATHS = {"/api/health/live"}
+_AUTH_EXEMPT_PATHS = {"/api/health/live"}
 
 
 class RequestBodyTooLarge(Exception):
@@ -200,19 +200,38 @@ async def enforce_request_security(
         )
 
     if (
-        settings.is_production
-        and request.url.path not in _PROXY_EXEMPT_PATHS
-        and not _trusted_proxy(request, settings)
+        settings.is_external
+        and request.method != "OPTIONS"
+        and request.url.path not in _AUTH_EXEMPT_PATHS
+        and not _valid_access_key(request, settings)
     ):
-        return _secured_error(
+        limiter = _request_rate_limiter(request)
+        allowed, retry_after = limiter.check(
+            _client_identity(request),
+            "auth_failure",
+            settings.rate_limit_auth_failures_per_minute,
+        )
+        if not allowed:
+            response = _secured_error(
+                settings,
+                request_id,
+                request.url.path,
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Too many invalid access key attempts",
+            )
+            response.headers["Retry-After"] = str(retry_after)
+            return response
+        response = _secured_error(
             settings,
             request_id,
             request.url.path,
-            status.HTTP_403_FORBIDDEN,
-            "Request did not pass through the trusted reverse proxy",
+            status.HTTP_401_UNAUTHORIZED,
+            "Invalid or missing access key",
         )
+        response.headers["WWW-Authenticate"] = "P2HAccessKey"
+        return response
 
-    if settings.is_production and request.method in _UNSAFE_METHODS:
+    if settings.is_external and request.method in _UNSAFE_METHODS:
         origin_error = _unsafe_origin_error(request, settings)
         if origin_error is not None:
             return _secured_error(
@@ -223,11 +242,8 @@ async def enforce_request_security(
                 origin_error,
             )
 
-    if settings.is_production and request.url.path not in _RATE_LIMIT_EXEMPT_PATHS:
-        limiter = getattr(request.app.state, "rate_limiter", None)
-        if not isinstance(limiter, InMemoryRateLimiter):
-            limiter = InMemoryRateLimiter()
-            request.app.state.rate_limiter = limiter
+    if settings.is_external and request.url.path not in _RATE_LIMIT_EXEMPT_PATHS:
+        limiter = _request_rate_limiter(request)
         identity = _client_identity(request)
         category = (
             "upload"
@@ -365,10 +381,24 @@ def _host_allowed(host: str, allowed_hosts: tuple[str, ...]) -> bool:
     )
 
 
-def _trusted_proxy(request: Request, settings: Settings) -> bool:
-    supplied = request.headers.get("x-p2h-proxy-secret", "")
-    expected = settings.trusted_proxy_secret or ""
-    return bool(expected) and hmac.compare_digest(supplied, expected)
+def _valid_access_key(request: Request, settings: Settings) -> bool:
+    encoded = settings.access_key_hash
+    if not encoded:
+        return False
+    try:
+        algorithm, iterations_text, salt_hex, expected_hex = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        supplied = request.headers.get("x-p2h-access-key", "")
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            supplied.encode("utf-8"),
+            bytes.fromhex(salt_hex),
+            int(iterations_text),
+        ).hex()
+    except (UnicodeError, ValueError):
+        return False
+    return hmac.compare_digest(digest, expected_hex)
 
 
 def _unsafe_origin_error(request: Request, settings: Settings) -> str | None:
@@ -401,15 +431,17 @@ def _unsafe_origin_error(request: Request, settings: Settings) -> str | None:
 
 
 def _client_identity(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-    if forwarded:
-        try:
-            return str(ipaddress.ip_address(forwarded))
-        except ValueError:
-            pass
     if request.client is not None:
         return request.client.host
     return "unknown"
+
+
+def _request_rate_limiter(request: Request) -> InMemoryRateLimiter:
+    limiter = getattr(request.app.state, "rate_limiter", None)
+    if not isinstance(limiter, InMemoryRateLimiter):
+        limiter = InMemoryRateLimiter()
+        request.app.state.rate_limiter = limiter
+    return limiter
 
 
 def _secured_error(
@@ -437,18 +469,14 @@ def _apply_security_headers(
     response.headers["Permissions-Policy"] = (
         "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
     )
-    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-site"
     if path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
-    if settings.is_production:
+    if settings.is_external:
         response.headers["Content-Security-Policy"] = (
             "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
             "form-action 'none'"
         )
-        if settings.hsts_max_age_seconds > 0:
-            response.headers["Strict-Transport-Security"] = (
-                f"max-age={settings.hsts_max_age_seconds}; includeSubDomains"
-            )
 
 
 async def _json_asgi_response(

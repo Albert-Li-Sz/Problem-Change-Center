@@ -110,27 +110,39 @@ def test_readiness_fails_closed_when_docker_is_missing(tmp_path: Path) -> None:
     assert checks["runner_image"] == "unchecked"
 
 
-def test_production_templates_keep_backend_private_and_single_worker() -> None:
+def test_deployment_templates_use_fixed_ports_and_system_docker() -> None:
     project_root = Path(__file__).resolve().parents[2]
     service = (project_root / "deploy/systemd/oj-package-converter.service").read_text(
         encoding="utf-8"
     )
-    caddy = (project_root / "deploy/Caddyfile").read_text(encoding="utf-8")
+    frontend_service = (
+        project_root / "deploy/systemd/oj-package-converter-frontend.service"
+    ).read_text(encoding="utf-8")
+    production_env = (project_root / "deploy/production.env.example").read_text(
+        encoding="utf-8"
+    )
+    frontend_server = (project_root / "scripts/serve-frontend.mjs").read_text(
+        encoding="utf-8"
+    )
     gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
 
-    assert "--host 127.0.0.1" in service
+    assert "After=network-online.target docker.service" in service
+    assert "Requires=docker.service" in service
+    assert "SupplementaryGroups=docker" in service
+    assert "--host 0.0.0.0 --port 11451" in service
     assert "--workers 1" in service
     assert "--no-proxy-headers" in service
     assert "--limit-concurrency 128" in service
     assert "NoNewPrivileges=true" in service
     assert "ProtectSystem=strict" in service
-    assert "IPAddressDeny=any" in service
-    assert "IPAddressAllow=localhost" in service
     assert "CapabilityBoundingSet=" in service
-    assert "basic_auth" in caddy
-    assert caddy.index("basic_auth") < caddy.index("request_body")
-    assert "header_up X-P2H-Proxy-Secret" in caddy
-    assert "max_header_size 64KB" in caddy
-    assert "max_size {$P2H_MAX_REQUEST_BODY_BYTES}" in caddy
-    assert "max-age={$P2H_HSTS_MAX_AGE_SECONDS}" in caddy
+    assert "serve-frontend.mjs" in frontend_service
+    assert "NoNewPrivileges=true" in frontend_service
+    assert "P2H_BACKEND_PORT=11451" in production_env
+    assert "P2H_FRONTEND_PORT=11452" in production_env
+    assert "P2H_ACCESS_KEY_HASH=" in production_env
+    assert "DOCKER_HOST" not in production_env
+    assert "rootless" not in production_env.lower()
+    assert 'response.setHeader("Content-Security-Policy"' in frontend_server
+    assert "frontendRootReal" in frontend_server
     assert "production.env" in gitignore.splitlines()

@@ -20,7 +20,13 @@ from progress import ProgressReporter
 
 REPORT_FILENAME = ".p2h-report.json"
 MAX_NESTED_PACKAGES = 1000
-EXPECTED_CONVERSION_ERRORS = (OSError, UnicodeError, ValueError, zipfile.BadZipFile)
+EXPECTED_CONVERSION_ERRORS = (
+    OSError,
+    RuntimeError,
+    UnicodeError,
+    ValueError,
+    zipfile.BadZipFile,
+)
 
 
 def _copy_output(
@@ -113,19 +119,34 @@ def _validate_writer_output(
 
 
 def _expand_nested_packages_for_detection(
-    extracted: Path, budget: bridge.ArchiveExtractionBudget
+    extracted: Path,
+    budget: bridge.ArchiveExtractionBudget,
+    *,
+    requested_format: str = "auto",
 ) -> list[Any]:
     candidates = detect_extracted(extracted)
-    if any(candidate.confidence >= 0.8 for candidate in candidates):
+    strong_formats = {
+        candidate.format for candidate in candidates if candidate.confidence >= 0.8
+    }
+    if requested_format == "hoj" or strong_formats == {"hoj"}:
+        nested_archives = _nested_zip_archives(extracted)
+        nested_root = extracted / ".p2h-nested"
+        extracted_any = False
+        for index, archive in enumerate(nested_archives, start=1):
+            if not _is_hoj_nested_archive(archive):
+                continue
+            if nested_root.exists() and not extracted_any:
+                raise ValueError("source package uses reserved path: .p2h-nested")
+            destination = nested_root / f"{index:04d}"
+            bridge._safe_extract_zip(archive, destination, budget=budget)
+            extracted_any = True
+        return detect_extracted(extracted) if extracted_any else candidates
+    if strong_formats:
         return candidates
-    nested_archives = [
-        path
-        for path in sorted(extracted.rglob("*.zip"))
-        if path.is_file() and zipfile.is_zipfile(path)
-    ]
-    if len(nested_archives) > MAX_NESTED_PACKAGES:
-        raise ValueError(f"nested package count exceeds {MAX_NESTED_PACKAGES}")
+    nested_archives = _nested_zip_archives(extracted)
     nested_root = extracted / ".p2h-nested"
+    if nested_archives and nested_root.exists():
+        raise ValueError("source package uses reserved path: .p2h-nested")
     for index, archive in enumerate(nested_archives, start=1):
         destination = nested_root / f"{index:04d}"
         bridge._safe_extract_zip(archive, destination, budget=budget)
@@ -139,6 +160,47 @@ def _expand_nested_packages_for_detection(
             if sidecar.is_file():
                 bridge._copy_file(sidecar, destination / suffix)
     return detect_extracted(extracted)
+
+
+def _nested_zip_archives(extracted: Path) -> list[Path]:
+    candidates = [
+        path
+        for path in sorted(extracted.rglob("*"))
+        if path.is_file() and path.suffix.casefold() == ".zip"
+    ]
+    if len(candidates) > MAX_NESTED_PACKAGES:
+        raise ValueError(f"nested package count exceeds {MAX_NESTED_PACKAGES}")
+    invalid = next((path for path in candidates if not zipfile.is_zipfile(path)), None)
+    if invalid is not None:
+        raise ValueError(
+            f"invalid nested ZIP archive: {invalid.relative_to(extracted).as_posix()}"
+        )
+    return candidates
+
+
+def _is_hoj_nested_archive(archive_path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            members = [
+                info.filename.replace("\\", "/").rstrip("/")
+                for info in archive.infolist()
+                if info.filename and not info.is_dir()
+            ]
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+    member_set = set(members)
+    for member in members:
+        name = member.rsplit("/", 1)[-1]
+        normalized_name = name.casefold()
+        if not (
+            normalized_name.startswith("problem_") and normalized_name.endswith(".json")
+        ):
+            continue
+        data_prefix = f"{member[:-5]}/"
+        if any(candidate.startswith(data_prefix) for candidate in member_set):
+            return True
+    return False
 
 
 def _normalize_single_polygon_package(
@@ -434,7 +496,9 @@ def convert_package(
             progress.complete(detail="source package extracted")
             progress.phase("detect", detail="detecting source package format")
             candidates = _expand_nested_packages_for_detection(
-                extracted, extraction_budget
+                extracted,
+                extraction_budget,
+                requested_format=source_format,
             )
             progress.complete(detail="source package format candidates collected")
         except EXPECTED_CONVERSION_ERRORS as exc:
@@ -460,25 +524,15 @@ def convert_package(
                 raise
         else:
             detected = source_format
+        source_override_candidates: tuple[str, ...] = ()
         if source_format != "auto":
-            strong = {
+            strong_formats = {
                 candidate.format
                 for candidate in candidates
                 if candidate.confidence >= 0.8
             }
-            if strong and source_format not in strong and source_format != "generic":
-                message = (
-                    f"source format mismatch: requested {source_format}, "
-                    f"detected {', '.join(sorted(strong))}"
-                )
-                _write_fatal_report_if_missing(
-                    output,
-                    source_format=source_format,
-                    target_format=target_format,
-                    code="source-format-mismatch",
-                    message=message,
-                )
-                raise ValueError(message)
+            if source_format not in strong_formats:
+                source_override_candidates = tuple(sorted(strong_formats))
         if detected == target_format:
             message = "source and target formats must differ"
             _write_fatal_report_if_missing(
@@ -538,6 +592,21 @@ def convert_package(
             )
             raise
         bundle.applied_repairs = applied_repairs
+        if source_override_candidates:
+            bundle.add_issue(
+                "warning",
+                "source-format-override",
+                (
+                    f"source format was manually set to {source_format}; "
+                    "automatic inspection suggested "
+                    f"{', '.join(source_override_candidates)}"
+                ),
+                field="source",
+                context={
+                    "requested": source_format,
+                    "detected": ",".join(source_override_candidates),
+                },
+            )
         progress.complete(
             detail=f"read {len(bundle.problems)} problems from {detected}"
         )

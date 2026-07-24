@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import stat
@@ -18,7 +19,13 @@ from app.security import InMemoryRateLimiter
 from app.storage import JobMetadata, Storage
 
 
-PROXY_SECRET = "test-only-" * 4
+ACCESS_KEY = "test-only-external-access-key"
+ACCESS_SALT = bytes.fromhex("ab" * 16)
+ACCESS_KEY_HASH = (
+    "pbkdf2_sha256$600000$"
+    f"{ACCESS_SALT.hex()}$"
+    f"{hashlib.pbkdf2_hmac('sha256', ACCESS_KEY.encode(), ACCESS_SALT, 600_000).hex()}"
+)
 
 
 def _make_zip() -> bytes:
@@ -127,6 +134,24 @@ def _make_nested_icpc_zip() -> bytes:
     return _make_archive({"A.zip": problem("A"), "B.zip": problem("B")})
 
 
+def _hoj_document(problem_id: str, title: str) -> str:
+    return json.dumps(
+        {"problem": {"problemId": problem_id, "title": title}},
+        ensure_ascii=False,
+    )
+
+
+def _make_hoj_problem_zip(problem_id: str, title: str, value: str) -> bytes:
+    stem = f"problem_{problem_id}"
+    return _make_archive(
+        {
+            f"{stem}.json": _hoj_document(problem_id, title),
+            f"{stem}/1.in": f"{value}\n",
+            f"{stem}/1.out": f"{value}\n",
+        }
+    )
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
@@ -154,12 +179,12 @@ def _client(settings: Settings) -> TestClient:
     return TestClient(app)
 
 
-def _production_settings(tmp_path: Path, **changes: object) -> Settings:
+def _external_settings(tmp_path: Path, **changes: object) -> Settings:
     values: dict[str, object] = {
-        "deployment_mode": "production",
+        "deployment_mode": "external",
         "allowed_hosts": ("converter.example.com",),
-        "allowed_origins": ("https://converter.example.com",),
-        "trusted_proxy_secret": PROXY_SECRET,
+        "allowed_origins": ("http://converter.example.com:11452",),
+        "access_key_hash": ACCESS_KEY_HASH,
         "rate_limit_requests_per_minute": 20,
         "rate_limit_uploads_per_minute": 5,
     }
@@ -167,10 +192,10 @@ def _production_settings(tmp_path: Path, **changes: object) -> Settings:
     return replace(_settings(tmp_path), **values)
 
 
-def _proxy_headers(**extra: str) -> dict[str, str]:
+def _access_headers(**extra: str) -> dict[str, str]:
     return {
         "host": "converter.example.com",
-        "x-p2h-proxy-secret": PROXY_SECRET,
+        "x-p2h-access-key": ACCESS_KEY,
         **extra,
     }
 
@@ -243,16 +268,6 @@ def test_polygon_problem_xml_is_not_misdetected_as_fps(tmp_path: Path) -> None:
             [".probhub/workspace.yaml", "probhub.yaml"],
         ),
         (
-            "single.zip",
-            _make_probhub_export_zip(),
-            [
-                "problem.yaml",
-                "domjudge-problem.ini",
-                "problem.pdf",
-                "data/sample and data/secret",
-            ],
-        ),
-        (
             "legacy.zip",
             _make_probhub_legacy_zip(),
             [
@@ -263,7 +278,7 @@ def test_polygon_problem_xml_is_not_misdetected_as_fps(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_inspect_detects_probhub_workspace_and_export(
+def test_inspect_detects_probhub_workspace_and_legacy(
     tmp_path: Path, filename: str, archive: bytes, evidence: list[str]
 ) -> None:
     client = _client(_settings(tmp_path))
@@ -280,10 +295,61 @@ def test_inspect_detects_probhub_workspace_and_export(
         "format": "probhub",
         "confidence": {
             "workspace.zip": 0.995,
-            "single.zip": 0.98,
             "legacy.zip": 0.97,
         }[filename],
         "evidence": evidence,
+    }
+
+
+@pytest.mark.parametrize("with_samples", [True, False])
+def test_inspect_keeps_root_pdf_icpc_and_probhub_candidates(
+    tmp_path: Path,
+    with_samples: bool,
+) -> None:
+    client = _client(_settings(tmp_path))
+    files: dict[str, str | bytes] = {
+        "problem.yaml": "name: Sum\n",
+        "domjudge-problem.ini": "timelimit='1'\n",
+        "problem.pdf": b"%PDF-1.4\n%%EOF\n",
+        "data/secret/1.in": "1\n",
+        "data/secret/1.ans": "1\n",
+    }
+    if with_samples:
+        files.update(
+            {
+                "data/sample/1.in": "1\n",
+                "data/sample/1.ans": "1\n",
+            }
+        )
+
+    response = client.post(
+        "/api/inspect",
+        files={"file": ("root-pdf.zip", _make_archive(files), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["detected_format"] is None
+    assert [candidate["format"] for candidate in payload["format_candidates"][:2]] == [
+        "icpc",
+        "probhub",
+    ]
+    assert all(
+        candidate["confidence"] == 0.98
+        for candidate in payload["format_candidates"][:2]
+    )
+    assert payload["package_scope"] == "single"
+    assert payload["package_layout"] == "directory"
+    assert payload["problem_count"] == 1
+    assert payload["problems"] == [{"id": "root-pdf", "path": "."}]
+    assert set(payload["supported_targets"]) == {
+        "hydro",
+        "icpc",
+        "hoj",
+        "fps",
+        "qduoj",
+        "uoj",
+        "dmoj",
     }
 
 
@@ -380,10 +446,10 @@ def test_inspect_detects_probhub_workspace_and_export(
             "hoj.zip",
             _make_archive(
                 {
-                    "problem_1.json": '{"problemId": 1001}',
+                    "problem_1.json": '{"problem": {"problemId": 1001}}',
                     "problem_1/1.in": "1\n",
                     "problem_1/1.out": "1\n",
-                    "problem_2.json": '{"problemId": 1002}',
+                    "problem_2.json": '{"problem": {"problemId": 1002}}',
                     "problem_2/1.in": "2\n",
                     "problem_2/1.out": "2\n",
                 }
@@ -512,36 +578,158 @@ def test_inspect_classifies_platform_package_scope_and_layout(
     assert set(payload["supported_targets"]) == expected_targets
 
 
-def test_production_requires_trusted_proxy_and_valid_host(tmp_path: Path) -> None:
-    client = _client(_production_settings(tmp_path))
+def test_inspect_merges_expanded_and_nested_hoj_problems(tmp_path: Path) -> None:
+    client = _client(_settings(tmp_path))
+    first_document = _hoj_document("P1001", "First")
+    archive = _make_archive(
+        {
+            "export/A/problem_P1001.json": first_document,
+            "export/A/problem_P1001/1.in": "1\n",
+            "export/A/problem_P1001/1.out": "1\n",
+            "export/A.zip": _make_hoj_problem_zip("P1001", "First", "1"),
+            "export/B.zip": _make_hoj_problem_zip("P1002", "Second", "2"),
+        }
+    )
+
+    response = client.post(
+        "/api/inspect",
+        files={"file": ("hoj-contest.zip", archive, "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["detected_format"] == "hoj"
+    assert payload["package_scope"] == "multi"
+    assert payload["package_layout"] == "nested"
+    assert payload["problem_count"] == 2
+    assert payload["problems"] == [
+        {"id": "P1001", "path": "export/A/problem_P1001"},
+        {"id": "P1002", "path": "export/B.zip!/problem_P1002"},
+    ]
+
+
+def test_inspect_does_not_merge_conflicting_hoj_problem_ids(tmp_path: Path) -> None:
+    client = _client(_settings(tmp_path))
+    archive = _make_archive(
+        {
+            "export/A/problem_P1001.json": _hoj_document("P1001", "Original"),
+            "export/A/problem_P1001/1.in": "1\n",
+            "export/A/problem_P1001/1.out": "1\n",
+            "export/A.zip": _make_hoj_problem_zip("P1001", "Conflicting", "1"),
+            "export/B.zip": _make_hoj_problem_zip("P1002", "Second", "2"),
+        }
+    )
+
+    response = client.post(
+        "/api/inspect",
+        files={"file": ("conflicting-hoj.zip", archive, "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["detected_format"] == "hoj"
+    assert payload["package_scope"] == "single"
+    assert payload["package_layout"] == "directory"
+    assert payload["problem_count"] == 1
+    assert payload["problems"] == [{"id": "P1001", "path": "export/A/problem_P1001"}]
+
+
+def test_external_mode_requires_access_key_and_valid_host(tmp_path: Path) -> None:
+    client = _client(_external_settings(tmp_path))
 
     live = client.get("/api/health/live", headers={"host": "converter.example.com"})
-    bypass = client.get("/api/health", headers={"host": "converter.example.com"})
+    missing = client.get("/api/health", headers={"host": "converter.example.com"})
+    wrong = client.get(
+        "/api/health",
+        headers={
+            "host": "converter.example.com",
+            "x-p2h-access-key": "wrong-key",
+        },
+    )
     bad_host = client.get(
         "/api/health",
         headers={
             "host": "attacker.example",
-            "x-p2h-proxy-secret": PROXY_SECRET,
+            "x-p2h-access-key": ACCESS_KEY,
         },
     )
-    trusted = client.get("/api/health", headers=_proxy_headers())
+    authenticated = client.get("/api/health", headers=_access_headers())
 
     assert live.status_code == 200
-    assert bypass.status_code == 403
+    assert missing.status_code == 401
+    assert wrong.status_code == 401
+    assert wrong.json()["detail"] == "Invalid or missing access key"
     assert bad_host.status_code == 400
-    assert trusted.status_code == 200
-    assert trusted.headers["cache-control"] == "no-store"
-    assert trusted.headers["x-content-type-options"] == "nosniff"
-    assert trusted.headers["x-frame-options"] == "DENY"
-    assert trusted.headers["strict-transport-security"].startswith("max-age=")
-    assert trusted.headers["content-security-policy"].startswith("default-src 'none'")
-    assert len(trusted.headers["x-request-id"]) == 32
+    assert authenticated.status_code == 200
+    assert authenticated.headers["cache-control"] == "no-store"
+    assert authenticated.headers["x-content-type-options"] == "nosniff"
+    assert authenticated.headers["x-frame-options"] == "DENY"
+    assert "strict-transport-security" not in authenticated.headers
+    assert authenticated.headers["cross-origin-resource-policy"] == "same-site"
+    assert authenticated.headers["content-security-policy"].startswith(
+        "default-src 'none'"
+    )
+    assert len(authenticated.headers["x-request-id"]) == 32
 
 
-def test_production_blocks_cross_site_mutations(tmp_path: Path) -> None:
-    client = _client(_production_settings(tmp_path))
-    headers = _proxy_headers(
-        origin="https://evil.example",
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/health/ready",
+        "/metrics",
+        f"/api/jobs/{'a' * 32}/events",
+        f"/api/jobs/{'a' * 32}/download",
+    ],
+)
+def test_external_mode_protects_non_live_endpoints(tmp_path: Path, path: str) -> None:
+    client = _client(_external_settings(tmp_path))
+
+    assert (
+        client.get(path, headers={"host": "converter.example.com"}).status_code == 401
+    )
+
+
+def test_external_mode_allows_authenticated_cors_preflight(tmp_path: Path) -> None:
+    # The module-level CORS middleware is initialized with the test process's
+    # default origin; app.state settings can still exercise external auth here.
+    origin = "http://localhost:11452"
+    client = _client(_external_settings(tmp_path, allowed_origins=(origin,)))
+
+    response = client.options(
+        "/api/inspect",
+        headers={
+            "host": "converter.example.com",
+            "origin": origin,
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "x-p2h-access-key",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+    assert "X-P2H-Access-Key" in response.headers["access-control-allow-headers"]
+
+
+def test_external_mode_exposes_authentication_errors_to_allowed_origins(
+    tmp_path: Path,
+) -> None:
+    origin = "http://localhost:11452"
+    client = _client(_external_settings(tmp_path, allowed_origins=(origin,)))
+
+    response = client.get(
+        "/api/health",
+        headers={"host": "converter.example.com", "origin": origin},
+    )
+
+    assert response.status_code == 401
+    assert response.headers["access-control-allow-origin"] == origin
+    assert response.json() == {"detail": "Invalid or missing access key"}
+
+
+def test_external_mode_blocks_cross_site_mutations(tmp_path: Path) -> None:
+    client = _client(_external_settings(tmp_path))
+    headers = _access_headers(
+        origin="http://evil.example:11452",
         **{"sec-fetch-site": "cross-site"},
     )
 
@@ -559,14 +747,14 @@ def test_production_blocks_cross_site_mutations(tmp_path: Path) -> None:
     assert "Cross-site" in response.json()["detail"]
 
 
-def test_production_rejects_malformed_referer_without_server_error(
+def test_external_mode_rejects_malformed_referer_without_server_error(
     tmp_path: Path,
 ) -> None:
-    client = _client(_production_settings(tmp_path))
+    client = _client(_external_settings(tmp_path))
 
     response = client.post(
         "/api/jobs",
-        headers=_proxy_headers(referer="https://[invalid"),
+        headers=_access_headers(referer="http://[invalid"),
         json={
             "job_id": "a" * 32,
             "source_format": "hydro",
@@ -578,10 +766,10 @@ def test_production_rejects_malformed_referer_without_server_error(
     assert response.json()["detail"] == "Referer origin is not allowed"
 
 
-def test_production_rate_limit_is_enforced(tmp_path: Path) -> None:
-    settings = _production_settings(tmp_path, rate_limit_requests_per_minute=2)
+def test_external_mode_rate_limit_is_enforced(tmp_path: Path) -> None:
+    settings = _external_settings(tmp_path, rate_limit_requests_per_minute=2)
     client = _client(settings)
-    headers = _proxy_headers(**{"x-forwarded-for": "203.0.113.8"})
+    headers = _access_headers()
 
     first = client.get("/api/jobs/not-a-job", headers=headers)
     second = client.get("/api/jobs/not-a-job", headers=headers)
@@ -593,13 +781,32 @@ def test_production_rate_limit_is_enforced(tmp_path: Path) -> None:
     assert int(limited.headers["retry-after"]) >= 1
 
 
+def test_external_mode_limits_auth_failures_without_locking_out_valid_key(
+    tmp_path: Path,
+) -> None:
+    settings = _external_settings(tmp_path, rate_limit_auth_failures_per_minute=2)
+    client = _client(settings)
+    invalid_headers = {
+        "host": "converter.example.com",
+        "x-p2h-access-key": "wrong-key",
+    }
+
+    assert client.get("/api/health", headers=invalid_headers).status_code == 401
+    assert client.get("/api/health", headers=invalid_headers).status_code == 401
+    limited = client.get("/api/health", headers=invalid_headers)
+
+    assert limited.status_code == 429
+    assert int(limited.headers["retry-after"]) >= 1
+    assert client.get("/api/health", headers=_access_headers()).status_code == 200
+
+
 def test_request_body_limit_rejects_before_upload_parsing(tmp_path: Path) -> None:
-    settings = _production_settings(tmp_path, max_request_body_bytes=64)
+    settings = _external_settings(tmp_path, max_request_body_bytes=64)
     client = _client(settings)
 
     response = client.post(
         "/api/inspect",
-        headers=_proxy_headers(origin="https://converter.example.com"),
+        headers=_access_headers(origin="http://converter.example.com:11452"),
         files={"file": ("large.zip", b"x" * 128, "application/zip")},
     )
 

@@ -305,6 +305,8 @@ def _bundle_file_roles(
         ):
             if program is not None:
                 register(program.path, program.kind)
+                for path in program.auxiliary_files.values():
+                    register(path, f"{program.kind}-auxiliary")
         for statement in problem.statements:
             if statement.format == "pdf":
                 register(statement.path, "statement-pdf")

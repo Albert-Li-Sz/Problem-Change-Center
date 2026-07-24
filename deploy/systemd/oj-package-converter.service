@@ -1,13 +1,15 @@
 [Unit]
 Description=OJ Package Converter backend
 Documentation=file:/opt/oj-package-converter/deploy/README.md
-After=network-online.target
+After=network-online.target docker.service
 Wants=network-online.target
+Requires=docker.service
 
 [Service]
 Type=simple
 User=ojconverter
 Group=ojconverter
+SupplementaryGroups=docker
 WorkingDirectory=/opt/oj-package-converter/backend
 EnvironmentFile=/etc/oj-package-converter/production.env
 Environment=PYTHONUNBUFFERED=1
@@ -15,7 +17,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 StateDirectory=oj-package-converter
 StateDirectoryMode=0700
 ExecStartPre=/opt/oj-package-converter/scripts/production-check.sh --backend-only /etc/oj-package-converter/production.env
-ExecStart=/opt/oj-package-converter/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers --limit-concurrency 128 --timeout-keep-alive 5 --h11-max-incomplete-event-size 65536
+ExecStart=/opt/oj-package-converter/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 11451 --workers 1 --no-proxy-headers --limit-concurrency 128 --timeout-keep-alive 5 --h11-max-incomplete-event-size 65536
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=120s
@@ -27,8 +29,6 @@ UMask=0077
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true
-IPAddressDeny=any
-IPAddressAllow=localhost
 ProtectClock=true
 ProtectControlGroups=true
 ProtectHome=true

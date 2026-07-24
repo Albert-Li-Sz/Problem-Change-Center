@@ -126,20 +126,11 @@ async def lifespan(application: FastAPI):  # type: ignore[no-untyped-def]
 app = FastAPI(
     title="OJ Package Converter",
     version="0.6.0",
-    docs_url=None if settings.is_production else "/docs",
-    redoc_url=None if settings.is_production else "/redoc",
-    openapi_url=None if settings.is_production else "/openapi.json",
+    docs_url=None if settings.is_external else "/docs",
+    redoc_url=None if settings.is_external else "/redoc",
+    openapi_url=None if settings.is_external else "/openapi.json",
     lifespan=lifespan,
 )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(settings.allowed_origins),
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Accept", "Content-Type", "X-Request-ID"],
-)
-app.add_middleware(RequestBodyLimitMiddleware)
 
 storage = Storage(settings)
 metrics = Metrics()
@@ -193,14 +184,33 @@ async def request_security(request, call_next):  # type: ignore[no-untyped-def]
     return await enforce_request_security(request, call_next)
 
 
+app.add_middleware(RequestBodyLimitMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.allowed_origins),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Accept",
+        "Content-Type",
+        "Last-Event-ID",
+        "X-P2H-Access-Key",
+        "X-Request-ID",
+    ],
+)
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/api/health/live")
-def health_live() -> dict[str, str]:
-    return {"status": "ok"}
+def health_live() -> dict[str, str | bool]:
+    return {
+        "status": "ok",
+        "access_key_required": app.state.settings.is_external,
+    }
 
 
 @app.get("/api/health/ready", response_model=None)

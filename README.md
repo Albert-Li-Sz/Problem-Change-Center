@@ -10,9 +10,10 @@ checker、interactor、附件和标程，并对无法无损映射的内容生成
 当前版本：`0.6.0`
 
 > [!IMPORTANT]
-> 默认启动方式只监听 `127.0.0.1`，适合本机使用。不要把 Vite 或 Uvicorn
-> 开发服务直接暴露到公网。服务器部署请使用仓库提供的 Caddy、systemd 和
-> production 配置，详见 [生产部署](#生产部署)。
+> 内部和外部部署都监听后端 `11451`、前端 `11452`。内部模式不要求密钥，
+> 只能用于可信网络；外部模式会在进入工作台及访问 API 时校验访问密钥。
+> 项目不提供反向代理或 TLS，公网明文传输会暴露密钥，详见
+> [生产部署](#生产部署)。
 
 ## 功能概览
 
@@ -101,8 +102,9 @@ cd Polygon-to-Hydro-or-Domujudge-Web-UI
 1. 检查 Python、Node.js、npm、Docker 和 Docker Compose。
 2. 创建 `backend/.venv` 并安装后端依赖。
 3. 使用 `npm ci` 安装前端依赖并执行生产构建。
-4. 构建本机架构的 `p2h-runner` 镜像。
-5. 首次运行时创建本地 `.env`。
+4. 引导选择内部/外部部署、普通/Wine runner，以及预构建镜像或本地构建。
+5. 外部部署时采集访问地址与密钥，仅把 PBKDF2 哈希写入 `.env`。
+6. 创建权限为 `0600` 的本地 `.env`。
 
 后端使用带 SHA256 哈希的 `backend/requirements.lock` 安装。该锁文件覆盖项目支持
 的 Python 3.10+ 与 Linux、macOS、Windows 平台标记，安装时会拒绝内容与哈希
@@ -116,8 +118,8 @@ cd Polygon-to-Hydro-or-Domujudge-Web-UI
 
 打开：
 
-- Web UI：[http://127.0.0.1:5173](http://127.0.0.1:5173)
-- API 文档：[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- Web UI：[http://127.0.0.1:11452](http://127.0.0.1:11452)
+- API 文档：[http://127.0.0.1:11451/docs](http://127.0.0.1:11451/docs)
 
 按 `Ctrl+C` 同时停止前后端。
 
@@ -208,7 +210,7 @@ GitHub Actions 还会生成 `sha-<commit>` 和版本标签，并附带 provenanc
 2. 安装 Docker Desktop，并启用 WSL Integration。
 3. 在 WSL 终端内克隆仓库。
 4. 在 WSL 内执行 `docker info`、`./install.sh` 和 `./scripts/start.sh`。
-5. 在 Windows 浏览器打开 `http://127.0.0.1:5173`。
+5. 在 Windows 浏览器打开 `http://127.0.0.1:11452`。
 
 不要把仓库放在 `/mnt/c` 后运行大量转换任务；Linux 文件系统中的 home 目录通常
 有更好的小文件和权限性能。
@@ -228,8 +230,9 @@ Polygon 的 Windows 导出包可能同时包含 `.exe` 和 C/C++ 源码。普通
 7. 检查转换报告。
 8. 下载成功产物，并在目标 OJ 的测试实例中复核。
 
-格式自动识别只有在唯一候选置信度达到 `0.8` 时才会采用。出现格式冲突或结构
-不足时，系统会展示候选证据，不会静默猜测。
+格式自动识别只有在唯一候选置信度达到 `0.8` 时才会采用。识别结果是默认建议；
+用户显式选择输入格式后，转换器会按所选解析器尝试，并在转换报告中记录与高置信
+检测结果的差异。手动覆盖不会绕过 ZIP 安全校验或输入、输出格式不同的约束。
 
 界面中的“格式能力矩阵”使用独立弹窗展示，移动端可在弹窗内部横向滚动。
 
@@ -251,7 +254,7 @@ Polygon 的 Windows 导出包可能同时包含 `.exe` 和 C/C++ 源码。普通
 - 源码可位于题目根目录或 `code/`。
 - 自动排除 `.exe`、`tmp/` 等构建产物和临时目录。
 
-### ProbHub Core / DOMjudge ZIP
+### ProbHub Core（DOMjudge 兼容 ZIP）
 
 - 支持根目录 `problem.pdf`。
 - 支持 `data/sample`、`data/secret`。
@@ -345,8 +348,10 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
   `testdata/config.yaml`、数据和 `additional_file/`。
 - 支持 ACM/OI、文件 IO、子任务依赖、checker、interactor、模板、附件和标程。
 
-### ICPC / DOMjudge / Kattis
+### ICPC 题包（DOMjudge / Kattis 兼容）
 
+- ICPC Problem Package 是跨评测系统的通用题包规范；DOMjudge 和 Kattis 是可导入
+  此类题包的平台与工具链。
 - 支持 legacy 和 `2025-09` profile。
 - 默认输出 `legacy-icpc`，兼容当前 DOMjudge/Kattis 工具链。
 - `2025-09` 要求至少一个 accepted solution。
@@ -372,6 +377,7 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
 
 | 变量 | 默认值 | 用途 |
 |---|---:|---|
+| `P2H_DEPLOYMENT_MODE` | `internal` | `internal` 或 `external` |
 | `P2H_DATA_DIR` | `~/.p2h-web-ui/backend_data` | 任务、SQLite、日志和产物 |
 | `P2H_RUNNER_IMAGE` | `p2h-runner` | runner 镜像 |
 | `P2H_MAX_UPLOAD_BYTES` | `536870912` | 上传上限 |
@@ -387,11 +393,13 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
 | `P2H_DOCKER_CPUS` | `2` | runner CPU |
 | `P2H_DOCKER_WORK_SIZE` | `1g` | 工作区 tmpfs |
 | `P2H_DOCKER_OUTPUT_SIZE` | `1g` | 输出 tmpfs |
-| `P2H_DEPLOYMENT_MODE` | `local` | `local` 或 `production` |
-| `P2H_BACKEND_HOST` | `127.0.0.1` | 后端监听地址 |
-| `P2H_BACKEND_PORT` | `8000` | 后端端口 |
-| `P2H_FRONTEND_HOST` | `127.0.0.1` | 前端监听地址 |
-| `P2H_FRONTEND_PORT` | `5173` | 前端端口 |
+| `P2H_ALLOWED_HOSTS` | `*` | 外部模式允许访问后端的主机名/IP |
+| `P2H_ALLOWED_ORIGINS` | `*` | 外部模式固定为 `http://HOST:11452` |
+| `P2H_ACCESS_KEY_HASH` | 空 | 外部模式必填，由安装器生成 |
+| `P2H_BACKEND_HOST` | `0.0.0.0` | 后端监听地址 |
+| `P2H_BACKEND_PORT` | `11451` | 固定后端端口 |
+| `P2H_FRONTEND_HOST` | `0.0.0.0` | 前端监听地址 |
+| `P2H_FRONTEND_PORT` | `11452` | 固定前端端口 |
 
 任务索引位于 `P2H_DATA_DIR/jobs.sqlite3`，SQLite 使用 WAL 模式。每个任务仍保留
 独立元数据和产物目录，启动时会自动回填或清理索引。
@@ -458,7 +466,7 @@ docker run --rm p2h-runner package-convert --help
 
 ```bash
 curl -F 'file=@contest.zip;type=application/zip' \
-  http://127.0.0.1:8000/api/inspect
+  http://127.0.0.1:11451/api/inspect
 ```
 
 完整请求模型和交互式调试使用 `/docs`。
@@ -475,7 +483,7 @@ curl -F 'file=@contest.zip;type=application/zip' \
 不写入任务 ID 或文件名，避免高基数和题目信息泄露。
 
 ```bash
-curl http://127.0.0.1:8000/metrics
+curl http://127.0.0.1:11451/metrics
 ```
 
 后端请求和任务完成日志以单行 JSON 输出到 stderr。请求日志包含 `request_id`、
@@ -510,39 +518,38 @@ VM、gVisor、Kata Containers 或更强隔离。
 
 ## 生产部署
 
-仓库提供：
+仓库提供交互式安装器、独立 Node 静态前端服务和两个 systemd 服务：
 
 - [deploy/production.env.example](deploy/production.env.example)
-- [deploy/Caddyfile](deploy/Caddyfile)
 - [deploy/systemd/oj-package-converter.service](deploy/systemd/oj-package-converter.service)
+- [deploy/systemd/oj-package-converter-frontend.service](deploy/systemd/oj-package-converter-frontend.service)
 - [scripts/production-check.sh](scripts/production-check.sh)
 - [完整生产部署手册](deploy/README.md)
 
 推荐拓扑：
 
 ```text
-Internet
-   |
- Caddy :443
-   |  HTTPS + Basic Auth + request limits
+Browser :11452
+   |  X-P2H-Access-Key (external mode)
    v
- FastAPI 127.0.0.1:8000
+FastAPI :11451
    |
- rootless Docker
+system Docker
    |
- isolated runner
+isolated runner
 ```
 
 生产环境要求：
 
-- 专用 Linux 主机或 VM。
-- Caddy 2.10+。
-- rootless Docker 和 cgroup v2。
-- FastAPI 固定单 worker。
-- 仅开放 80/443。
-- 使用随机代理密钥并固定 runner digest。
+- 专用 Linux 主机或 VM，安装系统 Docker Engine。
+- 服务用户加入 `docker` 组；该权限等价于主机 root，应隔离部署主机。
+- FastAPI 固定单 worker，后端/前端固定监听 `0.0.0.0:11451/11452`。
+- 内部模式只允许可信 LAN/VPN 访问；外部模式必须设置高强度访问密钥。
+- 固定源码版本与 runner 镜像 digest。
 
-不要直接使用 `./scripts/start.sh` 提供公网服务。
+项目不再包含反向代理或内置 TLS。外部模式的密钥保护应用入口，但
+`http://` 上的密钥和题包仍是明文；不可信网络应通过 VPN、SSH 隧道或用户自行
+管理的上游 TLS 网关访问。应用本身始终保持 `11451/11452` 端口。
 
 推送 `v*` 标签会创建确定性的源码 `tar.gz`、SHA256 校验文件和 GitHub build
 provenance，并自动生成 GitHub Release Notes。部署时同时固定源码版本和 runner
@@ -646,7 +653,7 @@ frontend/                    React 19、Vite、TypeScript、Vitest、Playwright
 runner/                      中间模型、安全转换入口和格式兼容逻辑
 runner/adapters/             各格式读写适配器、协议、工厂与唯一注册表
 compat/                      平台版本锁和原创兼容语料
-deploy/                      Caddy、systemd、生产配置和运维手册
+deploy/                      systemd、生产配置和运维手册
 scripts/                     安装、启动、扫描、预检和隔离测试
 security/                    隔离探针与安全说明
 docker-compose.yml           普通和 Wine runner 构建

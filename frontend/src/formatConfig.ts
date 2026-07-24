@@ -3,9 +3,9 @@ import { FormatId, InspectResult, JobResponse, TargetFormat } from "./api";
 
 export const formatLabels: Record<FormatId, string> = {
   polygon: "Polygon / Codeforces",
-  probhub: "ProbHub Workspace / Legacy / DOMjudge",
+  probhub: "ProbHub（Workspace / Legacy / Core）",
   hydro: "HydroOJ",
-  icpc: "ICPC / DOMjudge / Kattis",
+  icpc: "ICPC 题包（DOMjudge / Kattis 兼容）",
   hoj: "HOJ",
   fps: "FPS / HUSTOJ",
   qduoj: "QDUOJ",
@@ -27,7 +27,7 @@ export const writableFormats: TargetFormat[] = [
 
 export const packageKinds: Record<FormatId, string> = {
   polygon: "单题源包或比赛包",
-  probhub: "单题目录或多题工作区",
+  probhub: "单题 Core/Legacy 或多题 Workspace",
   hydro: "单题或多题完整包",
   icpc: "单题目录或嵌套多题包",
   hoj: "单题或多题完整包",

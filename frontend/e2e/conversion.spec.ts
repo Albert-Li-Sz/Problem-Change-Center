@@ -17,10 +17,15 @@ test("opens and closes the capability matrix dialog", async ({ page }) => {
   const dimensions = await matrixScroller.evaluate((element) => ({
     clientWidth: element.clientWidth,
     scrollWidth: element.scrollWidth,
-    parentWidth: element.parentElement?.clientWidth ?? 0
+    parentWidth: element.parentElement?.clientWidth ?? 0,
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    parentHeight: element.parentElement?.clientHeight ?? 0
   }));
   expect(dimensions.clientWidth).toBeLessThanOrEqual(dimensions.parentWidth);
   expect(dimensions.scrollWidth).toBeGreaterThanOrEqual(dimensions.clientWidth);
+  expect(dimensions.clientHeight).toBeLessThan(dimensions.parentHeight);
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
 
   await page.keyboard.press("Escape");
   await expect(dialog).not.toBeVisible();
@@ -57,7 +62,7 @@ test("uploads, converts over SSE, downloads the report result, and cleans up", a
   expect(requests.some((url) => url.endsWith("/logs"))).toBe(false);
 
   const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("link", { name: "下载结果" }).click();
+  await page.getByRole("button", { name: "下载结果" }).click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toMatch(
     /^oj-package-convert-[0-9a-f]{32}\.zip$/
@@ -115,7 +120,7 @@ test("resolves an auto-detected ProbHub workspace before conversion", async ({
   );
   await page.getByRole("button", { name: "上传并检查" }).click();
   await expect(
-    page.getByText("识别为 ProbHub Workspace / Legacy / DOMjudge")
+    page.getByText("识别为 ProbHub（Workspace / Legacy / Core）")
   ).toBeVisible();
   await expect(page.getByText("多题包 · 2 题 · 工作区结构")).toBeVisible();
   await page.getByRole("combobox", { name: "转换范围" }).selectOption("selected");
@@ -143,13 +148,59 @@ test("imports an auto-detected ProbHub legacy problem directory", async ({
   );
   await page.getByRole("button", { name: "上传并检查" }).click();
   await expect(
-    page.getByText("识别为 ProbHub Workspace / Legacy / DOMjudge")
+    page.getByText("识别为 ProbHub（Workspace / Legacy / Core）")
   ).toBeVisible();
   await page.getByRole("button", { name: "启动容器转换" }).click();
 
   await expect(page.locator(".status")).toHaveText("成功");
   await expect(page.getByText("probhub → hydro")).toBeVisible();
   await expect(page.getByText("转换报告")).toBeVisible();
+
+  await page.getByRole("button", { name: "清理任务" }).click();
+  await expect(page.locator(".status")).toHaveCount(0);
+});
+
+test("uses an explicit ICPC parser for an ambiguous ProbHub Core export", async ({
+  page
+}) => {
+  let submittedSource: string | undefined;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/api/jobs")) {
+      submittedSource = request.postDataJSON().source_format;
+    }
+  });
+
+  await page.goto("/");
+  await page.locator('input[type="file"]').setInputFiles(
+    path.resolve(corpusRoot, "probhub-single.zip")
+  );
+  await page.getByRole("button", { name: "上传并检查" }).click();
+  await expect(page.getByText("未唯一识别，请手动选择输入格式")).toBeVisible();
+  await expect(page.getByText("识别候选")).toBeVisible();
+  const candidates = page.locator(".inspection-details");
+  await expect(
+    candidates.getByRole("listitem").filter({
+      hasText: "ICPC 题包（DOMjudge / Kattis 兼容）"
+    })
+  ).toBeVisible();
+  await expect(
+    candidates.getByRole("listitem").filter({
+      hasText: "ProbHub（Workspace / Legacy / Core）"
+    })
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "启动容器转换" })).toBeDisabled();
+
+  await page.getByRole("combobox", { name: "输入格式" }).selectOption("icpc");
+  const overrideNote = page.locator(".source-format-note.is-override");
+  await expect(overrideNote).toContainText("当前将按 ICPC 题包");
+  await expect(overrideNote).toContainText("不代表 ZIP 损坏");
+  await page.getByRole("button", { name: "启动容器转换" }).click();
+
+  await expect(page.locator(".status")).toHaveText("成功");
+  expect(submittedSource).toBe("icpc");
+  await expect(page.getByText("icpc → hydro")).toBeVisible();
+  await expect(page.getByText("1 题 · 1 警告 · 0 项损失")).toBeVisible();
+  await expect(page.getByText(/WARNING · source-format-override/)).toBeVisible();
 
   await page.getByRole("button", { name: "清理任务" }).click();
   await expect(page.locator(".status")).toHaveCount(0);

@@ -13,7 +13,8 @@ import zipfile
 # The standard library implementation is used only to create XML, never to parse it.
 import xml.etree.ElementTree as ElementTree  # nosec B405
 from contextlib import contextmanager
-from pathlib import Path
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from urllib.parse import unquote
 
@@ -56,6 +57,7 @@ LANG_SUFFIXES = {
     ".rs": "Rust",
     ".pas": "Pascal",
 }
+LOCAL_INCLUDE_PATTERN = re.compile(r'^\s*#\s*include\s*"([^"\r\n]+)"', re.MULTILINE)
 
 
 def _detection_xml_root_name(path: Path) -> str | None:
@@ -246,9 +248,55 @@ def _language_from_source(path: Path) -> str | None:
     return LANG_SUFFIXES.get(path.suffix.lower())
 
 
+def _local_include_names(text: str) -> tuple[str, ...]:
+    return tuple(match.group(1) for match in LOCAL_INCLUDE_PATTERN.finditer(text))
+
+
+def _collect_program_auxiliary_files(path: Path) -> dict[str, Path]:
+    root = path.parent.resolve()
+    queued = [path]
+    visited: set[Path] = {path.resolve()}
+    auxiliary: dict[str, Path] = {}
+    while queued:
+        source = queued.pop()
+        try:
+            text = read_limited_text(source)
+        except (OSError, UnicodeError, ValueError):
+            continue
+        for include in _local_include_names(text):
+            include_path = Path(include.replace("\\", "/"))
+            candidate = (source.parent / include_path).resolve()
+            try:
+                relative = candidate.relative_to(root)
+            except ValueError:
+                continue
+            if not candidate.is_file() or candidate in visited:
+                continue
+            auxiliary[relative.as_posix()] = candidate
+            visited.add(candidate)
+            queued.append(candidate)
+    return auxiliary
+
+
+def _program_uses_testlib(path: Path) -> bool:
+    try:
+        return any(
+            PurePosixPath(name.replace("\\", "/")).name.casefold() == "testlib.h"
+            for name in _local_include_names(read_limited_text(path))
+        )
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
 def _program_from_path(kind: str, path: Path, *, mode: str | None = None) -> Program:
+    if mode is None and kind in {"checker", "interactor", "validator"}:
+        mode = "testlib" if _program_uses_testlib(path) else None
     return Program(
-        kind=kind, language=_language_from_source(path), mode=mode, path=path
+        kind=kind,
+        language=_language_from_source(path),
+        mode=mode,
+        path=path,
+        auxiliary_files=_collect_program_auxiliary_files(path),
     )  # type: ignore[arg-type]
 
 
@@ -2543,6 +2591,91 @@ def _dmoj_cases_from_regex(
     return cases, groups
 
 
+def _dmoj_program_from_files(
+    bundle: ProblemBundle,
+    *,
+    problem_root: Path,
+    slug: str,
+    kind: str,
+    files: list[str],
+    language: str | None,
+    mode: str | None,
+) -> Program | None:
+    resolved: list[tuple[str, Path]] = []
+    for name in files:
+        try:
+            path = bridge._safe_join(problem_root, name)
+        except ValueError:
+            path = problem_root / "__invalid__"
+        if not path.is_file():
+            bundle.add_issue(
+                "fatal",
+                f"dmoj-missing-{kind}",
+                f"DMOJ {kind} references no existing source file: {name}",
+                problem=slug,
+                field=kind,
+            )
+            return None
+        resolved.append((name, path))
+
+    sources = [
+        (name, path)
+        for name, path in resolved
+        if path.suffix.lower() in bridge.SOURCE_SUFFIXES
+    ]
+    if len(sources) != 1:
+        subject = (
+            "multi-file DMOJ bridged checker"
+            if kind == "checker"
+            else "multi-file DMOJ interactor"
+        )
+        bundle.add_issue(
+            "fatal",
+            f"dmoj-multifile-{kind}",
+            f"{subject} must contain exactly one compilable source file; found {len(sources)}",
+            problem=slug,
+            field=kind,
+        )
+        return None
+
+    source_name, source_path = sources[0]
+    source_parent = PurePosixPath(source_name.replace("\\", "/")).parent
+    auxiliary: dict[str, Path] = {}
+    for name, path in resolved:
+        if path == source_path:
+            continue
+        normalized = PurePosixPath(name.replace("\\", "/"))
+        try:
+            relative = normalized.relative_to(source_parent)
+        except ValueError:
+            bundle.add_issue(
+                "fatal",
+                f"dmoj-unsafe-{kind}-layout",
+                f"DMOJ {kind} auxiliary file is outside the source directory: {name}",
+                problem=slug,
+                field=kind,
+            )
+            return None
+        if not relative.parts or ".." in relative.parts:
+            bundle.add_issue(
+                "fatal",
+                f"dmoj-unsafe-{kind}-layout",
+                f"DMOJ {kind} auxiliary file has an unsafe path: {name}",
+                problem=slug,
+                field=kind,
+            )
+            return None
+        auxiliary[relative.as_posix()] = path
+
+    return Program(
+        kind=kind,  # type: ignore[arg-type]
+        language=language or _language_from_source(source_path),
+        mode=mode,
+        path=source_path,
+        auxiliary_files=auxiliary,
+    )
+
+
 def read_dmoj(
     root: Path,
     workspace: Path,
@@ -2701,32 +2834,16 @@ def read_dmoj(
                     problem=slug,
                     field="checker",
                 )
-            elif len(files) != 1:
-                bundle.add_issue(
-                    "fatal",
-                    "dmoj-multifile-checker",
-                    "multi-file DMOJ bridged checkers cannot be represented safely by the current intermediate model",
-                    problem=slug,
-                    field="checker",
-                )
             else:
-                source = bridge._safe_join(problem_root, files[0])
-                if source.is_file():
-                    checker = Program(
-                        "checker",
-                        language=str(args.get("lang") or "")
-                        or _language_from_source(source),
-                        mode=str(args.get("type") or "bridged"),
-                        path=source,
-                    )
-                else:
-                    bundle.add_issue(
-                        "fatal",
-                        "dmoj-missing-checker",
-                        "DMOJ bridged checker references no existing source file",
-                        problem=slug,
-                        field="checker",
-                    )
+                checker = _dmoj_program_from_files(
+                    bundle,
+                    problem_root=problem_root,
+                    slug=slug,
+                    kind="checker",
+                    files=files,
+                    language=str(args.get("lang") or "") or None,
+                    mode=str(args.get("type") or "bridged"),
+                )
         elif isinstance(checker_conf, dict):
             checker_name = checker_conf.get("name")
             checker_args = checker_conf.get("args")
@@ -2767,9 +2884,7 @@ def read_dmoj(
                 problem=slug,
                 field="checker",
             )
-        interactor_path = None
-        interactor_mode = None
-        interactor_language = None
+        interactor = None
         interactive = config.get("interactive")
         if interactive is not None:
             if not isinstance(interactive, dict):
@@ -2795,30 +2910,16 @@ def read_dmoj(
                         problem=slug,
                         field="interactor",
                     )
-                elif len(files) != 1:
-                    bundle.add_issue(
-                        "fatal",
-                        "dmoj-multifile-interactor",
-                        "multi-file DMOJ interactors cannot be represented safely by the current intermediate model",
-                        problem=slug,
-                        field="interactor",
-                    )
                 else:
-                    candidate = bridge._safe_join(problem_root, files[0])
-                    if candidate.is_file():
-                        interactor_path = candidate
-                        interactor_mode = str(interactive.get("type") or "default")
-                        interactor_language = str(
-                            interactive.get("lang") or ""
-                        ) or _language_from_source(candidate)
-                    else:
-                        bundle.add_issue(
-                            "fatal",
-                            "dmoj-missing-interactor",
-                            f"DMOJ interactor file is missing: {candidate.name}",
-                            problem=slug,
-                            field="interactor",
-                        )
+                    interactor = _dmoj_program_from_files(
+                        bundle,
+                        problem_root=problem_root,
+                        slug=slug,
+                        kind="interactor",
+                        files=files,
+                        language=str(interactive.get("lang") or "") or None,
+                        mode=str(interactive.get("type") or "default"),
+                    )
         custom_judge = config.get("custom_judge")
         if custom_judge is not None:
             bundle.add_issue(
@@ -2869,16 +2970,9 @@ def read_dmoj(
                 if isinstance(metadata.get("tags"), list)
                 else [],
                 source=str(metadata.get("source")) if metadata.get("source") else None,
-                problem_type="interactive" if interactor_path else "default",
+                problem_type="interactive" if interactor is not None else "default",
                 checker=checker,
-                interactor=Program(
-                    "interactor",
-                    language=interactor_language,
-                    mode=interactor_mode,
-                    path=interactor_path,
-                )
-                if interactor_path
-                else None,
+                interactor=interactor,
                 attachments=attachments,
                 extra={"dmoj_config": config},
             )
@@ -3091,7 +3185,57 @@ def _dmoj_program_language(program: Program) -> str | None:
     return None
 
 
-def _write_program(program: Program, target: Path) -> Path:
+def _program_text_for_dependencies(program: Program) -> str:
+    if program.content is not None:
+        return program.content
+    if program.path is not None:
+        try:
+            return read_limited_text(program.path)
+        except (OSError, UnicodeError, ValueError):
+            return ""
+    return ""
+
+
+def _missing_program_dependencies(program: Program) -> tuple[str, ...]:
+    available = {
+        PurePosixPath(name.replace("\\", "/")).as_posix()
+        for name in program.auxiliary_files
+    }
+    sources: list[tuple[PurePosixPath, str]] = [
+        (PurePosixPath("."), _program_text_for_dependencies(program))
+    ]
+    for name, path in program.auxiliary_files.items():
+        if path.suffix.lower() not in {
+            *bridge.SOURCE_SUFFIXES,
+            *bridge.HEADER_SUFFIXES,
+        }:
+            continue
+        try:
+            sources.append(
+                (
+                    PurePosixPath(name.replace("\\", "/")).parent,
+                    read_limited_text(path),
+                )
+            )
+        except (OSError, UnicodeError, ValueError):
+            continue
+
+    missing: set[str] = set()
+    for directory, text in sources:
+        for include in _local_include_names(text):
+            relative = PurePosixPath(include.replace("\\", "/"))
+            if relative.is_absolute() or ".." in relative.parts:
+                missing.add(include)
+                continue
+            candidate = (directory / relative).as_posix()
+            if candidate.startswith("./"):
+                candidate = candidate[2:]
+            if candidate not in available:
+                missing.add(include)
+    return tuple(sorted(missing))
+
+
+def _write_program(program: Program, target: Path) -> list[Path]:
     target.parent.mkdir(parents=True, exist_ok=True)
     if program.path is not None:
         bridge._copy_file(program.path, target)
@@ -3099,7 +3243,20 @@ def _write_program(program: Program, target: Path) -> Path:
         target.write_text(program.content, encoding="utf-8")
     else:
         raise ValueError(f"{program.kind} has neither a source path nor inline content")
-    return target
+    written = [target]
+    for name, source in sorted(program.auxiliary_files.items()):
+        auxiliary_target = bridge._safe_join(target.parent, name)
+        if auxiliary_target.resolve() == target.resolve():
+            raise ValueError(
+                f"{program.kind} auxiliary file collides with its main source: {name}"
+            )
+        if auxiliary_target.exists():
+            if not _files_have_equal_contents(auxiliary_target, source):
+                raise ValueError(f"conflicting {program.kind} auxiliary file: {name}")
+        else:
+            bridge._copy_file(source, auxiliary_target)
+        written.append(auxiliary_target)
+    return written
 
 
 def _uoj_builtin_checker_source(name: str) -> str | None:
@@ -3153,6 +3310,15 @@ def _normalized_checker(bundle: ProblemBundle, problem: Problem) -> Program | No
         )
         return None
     return checker
+
+
+def _normalized_dmoj_checker(bundle: ProblemBundle, problem: Problem) -> Program | None:
+    checker = problem.checker
+    if checker is not None and (checker.mode or "").casefold() == "uoj-builtin:wcmp":
+        # UOJ wcmp and DMOJ's default checker both compare whitespace-delimited
+        # tokens. Leaving checker unset selects the native DMOJ implementation.
+        return None
+    return _normalized_checker(bundle, problem)
 
 
 def _unique_case_names(cases: list[TestCase]) -> list[tuple[TestCase, str]]:
@@ -3599,9 +3765,29 @@ def write_hoj(
                 options, index - 1, len(bundle.problems), problem.slug, "writing HOJ"
             )
             hydro_dir = root / f"H{index}"
+            text_statements = [
+                statement
+                for statement in problem.statements
+                if statement.format in {"markdown", "html"}
+            ]
+            hoj_problem = problem
+            if any(statement.format == "pdf" for statement in problem.statements):
+                if not text_statements:
+                    text_statements = [
+                        Statement(
+                            "und",
+                            "markdown",
+                            content=(
+                                f"# {problem.title}\n\n"
+                                "> 原题面仅提供 PDF，HOJ 导入格式无法携带该文件，"
+                                "请在导入后补充题面。\n"
+                            ),
+                        )
+                    ]
+                hoj_problem = replace(problem, statements=text_statements)
             _write_hydro_problem_dir(
                 bundle,
-                problem,
+                hoj_problem,
                 hydro_dir,
                 pid=problem.id or f"H{index}",
                 owner=1,
@@ -4146,7 +4332,7 @@ def write_dmoj(
                 if case.score is not None:
                     entry["points"] = case.score
                 config["test_cases"].append(entry)
-            checker = _normalized_checker(bundle, problem)
+            checker = _normalized_dmoj_checker(bundle, problem)
             if checker is not None:
                 checker_language = _dmoj_program_language(checker)
                 if checker_language is None:
@@ -4154,11 +4340,13 @@ def write_dmoj(
                         f"unsupported DMOJ checker language: {checker.language or _program_suffix(checker)}"
                     )
                 checker_name = f"checker{_program_suffix(checker)}"
-                _write_program(checker, root / checker_name)
+                checker_files = _write_program(checker, root / checker_name)
                 config["checker"] = {
                     "name": "bridged",
                     "args": {
-                        "files": [checker_name],
+                        "files": [
+                            path.relative_to(root).as_posix() for path in checker_files
+                        ],
                         "lang": checker_language,
                         "type": checker.mode or "testlib",
                     },
@@ -4171,9 +4359,13 @@ def write_dmoj(
                         f"{problem.interactor.language or _program_suffix(problem.interactor)}"
                     )
                 interactor_name = f"interactor{_program_suffix(problem.interactor)}"
-                _write_program(problem.interactor, root / interactor_name)
+                interactor_files = _write_program(
+                    problem.interactor, root / interactor_name
+                )
                 config["interactive"] = {
-                    "files": [interactor_name],
+                    "files": [
+                        path.relative_to(root).as_posix() for path in interactor_files
+                    ],
                     "lang": interactor_language,
                     "type": problem.interactor.mode or "default",
                     "unbuffered": True,
@@ -4270,6 +4462,26 @@ def _validate_icpc_target(bundle: ProblemBundle, options: dict[str, Any]) -> Non
 
 def _validate_hoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     for problem in bundle.problems:
+        has_pdf = any(statement.format == "pdf" for statement in problem.statements)
+        has_text = any(
+            statement.format in {"markdown", "html"} for statement in problem.statements
+        )
+        if has_pdf:
+            _loss(
+                bundle,
+                problem,
+                "hoj-pdf-statement",
+                "HOJ output cannot preserve PDF statement files",
+                "statements",
+            )
+        if bundle.source_format in {"icpc", "probhub"} and has_pdf and not has_text:
+            bundle.add_issue(
+                "fatal",
+                "hoj-pdf-statement-unsupported",
+                "HOJ export cannot carry PDF statements from a PDF-only DOMjudge-compatible package without leaving a broken file reference",
+                problem=problem.slug,
+                field="statements",
+            )
         if any(case.sample for case in problem.cases):
             _loss(
                 bundle,
@@ -4477,6 +4689,21 @@ def _validate_uoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None
 
 def _validate_dmoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     for problem in bundle.problems:
+        for program in (_normalized_dmoj_checker(bundle, problem), problem.interactor):
+            if program is None:
+                continue
+            missing_dependencies = _missing_program_dependencies(program)
+            if missing_dependencies:
+                bundle.add_issue(
+                    "fatal",
+                    "dmoj-missing-program-dependency",
+                    (
+                        f"DMOJ {program.kind} source references missing local files: "
+                        + ", ".join(missing_dependencies)
+                    ),
+                    problem=problem.slug,
+                    field=program.kind,
+                )
         group_positions = {
             group.name: index for index, group in enumerate(problem.groups, start=1)
         }

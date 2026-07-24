@@ -146,6 +146,7 @@ class Program:
     mode: str | None = None
     path: Path | None = None
     content: str | None = None
+    auxiliary_files: dict[str, Path] = dataclass_field(default_factory=dict)
 
 
 @dataclass
@@ -451,6 +452,28 @@ class ProblemBundle:
                         problem=problem.slug,
                         field=program.kind,
                     )
+                for name, path in program.auxiliary_files.items():
+                    relative = Path(name.replace("\\", "/"))
+                    if relative.is_absolute() or ".." in relative.parts or not name:
+                        self.add_issue(
+                            "fatal",
+                            f"invalid-{program.kind}-auxiliary-path",
+                            f"referenced {program.kind} auxiliary file has an unsafe path: {name}",
+                            problem=problem.slug,
+                            field=program.kind,
+                        )
+                    elif not path.is_file():
+                        self.add_issue(
+                            "fatal",
+                            f"missing-{program.kind}-auxiliary-file",
+                            f"referenced {program.kind} auxiliary file is missing: {name}",
+                            problem=problem.slug,
+                            field=program.kind,
+                            context={
+                                "expected_path": _report_path(path),
+                                "role": f"{program.kind}-auxiliary",
+                            },
+                        )
             for statement in problem.statements:
                 if statement.format == "pdf" and (
                     statement.path is None or not statement.path.is_file()
@@ -570,6 +593,10 @@ def _program_semantic_snapshot(program: Program | None) -> dict[str, Any] | None
         "mode": program.mode,
         "suffix": program.path.suffix.lower() if program.path is not None else None,
         "sha256": _path_or_content_digest(program.path, program.content),
+        "auxiliary_files": {
+            name: _hash_file(path) if path.is_file() else None
+            for name, path in sorted(program.auxiliary_files.items())
+        },
     }
 
 

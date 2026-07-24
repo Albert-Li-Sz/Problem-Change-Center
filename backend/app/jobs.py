@@ -99,17 +99,6 @@ class JobManager:
             and metadata.detected_format
         ):
             request.source_format = metadata.detected_format  # type: ignore[assignment]
-        elif (
-            not request.is_legacy_request
-            and request.source_format != "auto"
-            and metadata.detected_format
-            and request.source_format != metadata.detected_format
-            and request.source_format != "generic"
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"source_format does not match inspected package ({metadata.detected_format})",
-            )
         if (
             not request.is_legacy_request
             and request.source_format != "auto"

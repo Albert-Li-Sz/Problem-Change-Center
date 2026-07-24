@@ -12,10 +12,20 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNNER_DIR = ROOT / "runner"
 sys.path.insert(0, str(RUNNER_DIR))
 
+import package_converter  # noqa: E402
+from format_bridge import ArchiveExtractionBudget  # noqa: E402
 from hoj_bridge import (  # noqa: E402
+    HojProblem,
+    _find_hoj_problems,
+    _filter_hoj_problems,
     convert_hoj_to_domjudge,
     convert_hoj_to_hydro,
     convert_hydro_to_hoj,
+)
+from package_converter import (  # noqa: E402
+    REPORT_FILENAME,
+    _expand_nested_packages_for_detection,
+    convert_package,
 )
 
 
@@ -71,6 +81,248 @@ def _write_hoj_zip(path: Path) -> None:
         archive.writestr("problem_1000/case1.out", "3\n")
         archive.writestr("problem_1000/case2.in", "2 3\n")
         archive.writestr("problem_1000/case2.out", "5\n")
+
+
+def _minimal_hoj_document(problem_id: str, title: str) -> dict:
+    return {
+        "samples": [{"input": "1.in", "output": "1.out"}],
+        "problem": {
+            "problemId": problem_id,
+            "title": title,
+            "description": f"Statement for {title}.",
+            "timeLimit": 1000,
+            "memoryLimit": 256,
+        },
+    }
+
+
+def _write_minimal_hoj_tree(
+    root: Path,
+    problem_id: str,
+    title: str,
+    *,
+    output: str = "1\n",
+) -> None:
+    key = f"problem_{problem_id.casefold()}"
+    (root / key).mkdir(parents=True, exist_ok=True)
+    (root / f"{key}.json").write_text(
+        json.dumps(_minimal_hoj_document(problem_id, title), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (root / key / "1.in").write_text("1\n", encoding="utf-8")
+    (root / key / "1.out").write_text(output, encoding="utf-8")
+
+
+def _write_minimal_hoj_zip(
+    path: Path,
+    problem_id: str,
+    title: str,
+    *,
+    prefix: str = "",
+    metadata_suffix: str = ".json",
+) -> None:
+    key = f"problem_{problem_id.casefold()}"
+    base = f"{prefix.rstrip('/')}/" if prefix else ""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            f"{base}{key}{metadata_suffix}",
+            json.dumps(_minimal_hoj_document(problem_id, title), ensure_ascii=False),
+        )
+        archive.writestr(f"{base}{key}/1.in", "1\n")
+        archive.writestr(f"{base}{key}/1.out", "1\n")
+
+
+def test_mixed_expanded_and_nested_hoj_export_keeps_all_unique_problems(
+    tmp_path: Path,
+) -> None:
+    direct = tmp_path / "direct"
+    _write_minimal_hoj_tree(direct / "contest" / "A", "P1000", "Alpha")
+    nested_a = tmp_path / "A.zip"
+    nested_b = tmp_path / "B.zip"
+    attachment = tmp_path / "attachment.zip"
+    _write_minimal_hoj_zip(nested_a, "P1000", "Alpha", prefix="A")
+    _write_minimal_hoj_zip(nested_b, "P1001", "Beta")
+    with zipfile.ZipFile(attachment, "w") as archive:
+        archive.writestr("readme.txt", "not a problem package\n")
+
+    source = tmp_path / "mixed-hoj.zip"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(direct.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(direct).as_posix())
+        archive.write(nested_a, "contest/A.zip")
+        archive.write(nested_b, "contest/B.zip")
+        archive.write(attachment, "contest/attachment.zip")
+
+    output = tmp_path / "output"
+    report = convert_package(
+        source, output, source_format="auto", target_format="hydro"
+    )
+
+    assert report["source_format"] == "hoj"
+    assert report["problem_count"] == 2
+    assert len(list(output.glob("*.zip"))) == 2
+
+
+def test_explicit_hoj_expands_nested_packages_despite_other_strong_marker(
+    tmp_path: Path,
+) -> None:
+    direct = tmp_path / "direct"
+    _write_minimal_hoj_tree(direct, "P1000", "Alpha")
+    (direct / "init.yml").write_text("test_cases: []\n", encoding="utf-8")
+    nested = tmp_path / "B.zip"
+    _write_minimal_hoj_zip(nested, "P1001", "Beta")
+    source = tmp_path / "explicit-hoj.zip"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(direct.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(direct).as_posix())
+        archive.write(nested, "B.zip")
+
+    output = tmp_path / "output"
+    report = convert_package(source, output, source_format="hoj", target_format="hydro")
+
+    assert report["problem_count"] == 2
+    assert len(list(output.glob("*.zip"))) == 2
+
+
+def test_nested_hoj_metadata_extension_is_case_insensitive(tmp_path: Path) -> None:
+    direct = tmp_path / "direct"
+    _write_minimal_hoj_tree(direct, "P1000", "Alpha")
+    nested = tmp_path / "B.zip"
+    _write_minimal_hoj_zip(nested, "P1001", "Beta", metadata_suffix=".JSON")
+    source = tmp_path / "uppercase-json.zip"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(direct.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(direct).as_posix())
+        archive.write(nested, "B.zip")
+
+    output = tmp_path / "output"
+    report = convert_package(
+        source, output, source_format="auto", target_format="hydro"
+    )
+
+    assert report["problem_count"] == 2
+    assert len(list(output.glob("*.zip"))) == 2
+
+
+def test_corrupt_nested_zip_fails_with_structured_extraction_report(
+    tmp_path: Path,
+) -> None:
+    direct = tmp_path / "direct"
+    _write_minimal_hoj_tree(direct, "P1000", "Alpha")
+    (direct / "B.zip").write_bytes(b"not a zip archive")
+    source = tmp_path / "corrupt-nested.zip"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(direct.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(direct).as_posix())
+
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="invalid nested ZIP archive: B.zip"):
+        convert_package(source, output, source_format="auto", target_format="hydro")
+
+    report = json.loads((output / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert report["issues"][0]["code"] == "source-extraction-error"
+
+
+def test_nested_hoj_packages_share_existing_extraction_budget(tmp_path: Path) -> None:
+    _write_minimal_hoj_tree(tmp_path / "expanded", "P1000", "Alpha")
+    _write_minimal_hoj_zip(tmp_path / "A.zip", "P1000", "Alpha")
+    _write_minimal_hoj_zip(tmp_path / "B.zip", "P1001", "Beta")
+    budget = ArchiveExtractionBudget(
+        max_entries=5,
+        max_uncompressed_bytes=1024 * 1024,
+        max_member_bytes=1024 * 1024,
+        max_compression_ratio=200,
+        min_compression_ratio_bytes=1024 * 1024,
+        used_entries=3,
+    )
+
+    with pytest.raises(ValueError, match="zip archives exceed entry limit"):
+        _expand_nested_packages_for_detection(tmp_path, budget)
+
+    assert budget.used_entries == 5
+
+
+def test_find_hoj_problems_deduplicates_identical_problem_id(tmp_path: Path) -> None:
+    _write_minimal_hoj_tree(tmp_path / "expanded", "P1000", "Alpha")
+    _write_minimal_hoj_tree(tmp_path / "nested", "P1000", "Alpha")
+
+    problems = _find_hoj_problems(tmp_path)
+
+    assert [problem.problem["problemId"] for problem in problems] == ["P1000"]
+
+
+@pytest.mark.parametrize(
+    ("conflict", "message"),
+    [
+        ("metadata", "conflicting HOJ metadata"),
+        ("data", "conflicting HOJ problem data"),
+    ],
+)
+def test_find_hoj_problems_rejects_conflicting_duplicate_problem_id(
+    tmp_path: Path, conflict: str, message: str
+) -> None:
+    _write_minimal_hoj_tree(tmp_path / "expanded", "P1000", "Alpha")
+    _write_minimal_hoj_tree(
+        tmp_path / "nested",
+        "P1000",
+        "Changed" if conflict == "metadata" else "Alpha",
+        output="2\n" if conflict == "data" else "1\n",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        _find_hoj_problems(tmp_path)
+
+
+def test_filter_hoj_problems_deduplicates_repeated_selectors(tmp_path: Path) -> None:
+    _write_minimal_hoj_tree(tmp_path, "P1000", "Alpha")
+    problem = _find_hoj_problems(tmp_path)[0]
+
+    assert _filter_hoj_problems([problem], ["P1000", "p1000"]) == [problem]
+
+
+def test_filter_hoj_problems_rejects_ambiguous_normalized_selector(
+    tmp_path: Path,
+) -> None:
+    first = HojProblem(
+        "problem_p1000",
+        tmp_path / "problem_p1000.json",
+        tmp_path / "problem_p1000",
+        _minimal_hoj_document("P1000", "A+B"),
+    )
+    second = HojProblem(
+        "problem_p1001",
+        tmp_path / "problem_p1001.json",
+        tmp_path / "problem_p1001",
+        _minimal_hoj_document("P1001", "A B"),
+    )
+
+    with pytest.raises(ValueError, match="ambiguous problem selector.*a-b"):
+        _filter_hoj_problems([first, second], ["a-b"])
+
+
+def test_zip_runtime_error_produces_structured_extraction_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.zip"
+    output = tmp_path / "output"
+    _write_minimal_hoj_zip(source, "P1000", "Alpha")
+
+    def fail_detection(*_args: object, **_kwargs: object) -> list[object]:
+        raise RuntimeError("encrypted ZIP")
+
+    monkeypatch.setattr(
+        package_converter, "_expand_nested_packages_for_detection", fail_detection
+    )
+
+    with pytest.raises(RuntimeError, match="encrypted ZIP"):
+        convert_package(source, output, source_format="auto", target_format="hydro")
+
+    report = json.loads((output / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert report["issues"][0]["code"] == "source-extraction-error"
 
 
 def _write_hydro_zip(path: Path) -> None:

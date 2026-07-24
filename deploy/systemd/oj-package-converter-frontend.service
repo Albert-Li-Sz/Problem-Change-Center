@@ -1,0 +1,42 @@
+[Unit]
+Description=OJ Package Converter frontend
+Documentation=file:/opt/oj-package-converter/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ojconverter
+Group=ojconverter
+WorkingDirectory=/opt/oj-package-converter
+EnvironmentFile=/etc/oj-package-converter/production.env
+Environment=NODE_ENV=production
+ExecStartPre=/usr/bin/test -f /opt/oj-package-converter/frontend/dist/index.html
+ExecStart=/usr/bin/node /opt/oj-package-converter/scripts/serve-frontend.mjs
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RemoveIPC=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

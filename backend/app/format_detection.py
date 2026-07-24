@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
 import tempfile
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -62,11 +63,20 @@ class _ArchiveBudget:
 
 
 @dataclass(frozen=True)
+class _ProblemIdentity:
+    identifier: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
 class _ContentInspection:
     candidates: tuple[FormatDetection, ...]
     layouts: dict[str, str]
     problems: dict[str, tuple[DetectedProblem, ...]]
     problem_counts: dict[str, int]
+    problem_identities: dict[str, tuple[_ProblemIdentity | None, ...]] = field(
+        default_factory=dict
+    )
 
 
 class _LimitedSafeLoader(yaml.SafeLoader):
@@ -132,12 +142,20 @@ def inspect_zip_package(
             nested = _inspect_nested_archives(archive, infos, budget=budget)
             if nested is not None:
                 content = nested
+        elif len(strong) == 1 and strong[0].format == "hoj":
+            nested = _inspect_nested_archives(archive, infos, budget=budget)
+            if nested is not None:
+                merged = _merge_expanded_hoj_content(content, nested)
+                if merged is not None:
+                    content = merged
 
     candidates = list(content.candidates)
     detected = detected_format(candidates)
     profile_format = detected
     if profile_format is None and len(candidates) == 1:
         profile_format = candidates[0].format
+    if profile_format is None:
+        profile_format = _shared_strong_profile(content)
     problem_count = (
         content.problem_counts.get(profile_format)
         if profile_format is not None
@@ -186,6 +204,33 @@ def detect_zip_format(path: Path) -> list[FormatDetection]:
     return list(inspect_zip_package(path).candidates)
 
 
+def _shared_strong_profile(content: _ContentInspection) -> str | None:
+    formats = [
+        candidate.format
+        for candidate in content.candidates
+        if candidate.confidence >= 0.8
+    ]
+    if len(formats) < 2:
+        return None
+    reference_format = formats[0]
+    reference = (
+        content.layouts.get(reference_format),
+        content.problem_counts.get(reference_format),
+        content.problems.get(reference_format),
+    )
+    if any(value is None for value in reference):
+        return None
+    for format_id in formats[1:]:
+        profile = (
+            content.layouts.get(format_id),
+            content.problem_counts.get(format_id),
+            content.problems.get(format_id),
+        )
+        if profile != reference:
+            return None
+    return reference_format
+
+
 def _inspect_archive_content(
     archive: zipfile.ZipFile,
     infos: list[zipfile.ZipInfo],
@@ -207,6 +252,7 @@ def _inspect_archive_content(
     layouts: dict[str, str] = {}
     problems: dict[str, tuple[DetectedProblem, ...]] = {}
     problem_counts: dict[str, int] = {}
+    problem_identities: dict[str, tuple[_ProblemIdentity | None, ...]] = {}
 
     def add(format_id: str, confidence: float, *evidence: str) -> None:
         result.append(FormatDetection(format_id, confidence, tuple(evidence)))
@@ -222,12 +268,11 @@ def _inspect_archive_content(
         name.casefold().endswith(".probhub/workspace.yaml") for name in names
     ) and any(name.casefold().endswith("probhub.yaml") for name in names)
     probhub_workspace_roots = _roots_for_suffix(names, "probhub.yaml")
-    probhub_export_roots = {
+    root_pdf_problem_roots = {
         root
         for root in problem_yaml_roots
         if f"{root}domjudge-problem.ini".casefold() in lowered_set
         and f"{root}problem.pdf".casefold() in lowered_set
-        and root in probhub_sample_roots
         and root in probhub_secret_roots
         and root not in probhub_statement_roots
     }
@@ -281,19 +326,35 @@ def _inspect_archive_content(
                 problems,
                 problem_counts,
             )
-    elif probhub_export_roots:
-        add(
-            "probhub",
-            0.98,
+    elif root_pdf_problem_roots:
+        root_pdf_evidence = (
             "problem.yaml",
             "domjudge-problem.ini",
             "problem.pdf",
-            "data/sample and data/secret",
+            "data/secret",
+        )
+        add(
+            "probhub",
+            0.98,
+            *root_pdf_evidence,
         )
         _set_profile(
             "probhub",
             "directory",
-            probhub_export_roots,
+            root_pdf_problem_roots,
+            fallback_id,
+            layouts,
+            problems,
+            problem_counts,
+        )
+        # ProbHub Core exports and legacy ICPC/DOMjudge packages can have the
+        # same root-level PDF layout. Keep both parsers available for an
+        # explicit user choice instead of guessing from indistinguishable files.
+        add("icpc", 0.98, *root_pdf_evidence)
+        _set_profile(
+            "icpc",
+            "directory",
+            root_pdf_problem_roots,
             fallback_id,
             layouts,
             problems,
@@ -418,22 +479,21 @@ def _inspect_archive_content(
     if hoj_roots:
         add("hoj", 0.96, "problem_*.json", "paired data directory")
         hoj_directories = {f"{root}/" for root in hoj_roots}
+        hoj_entries, hoj_identities = _hoj_problems(
+            archive,
+            info_by_name,
+            hoj_directories,
+            fallback_id,
+        )
         _set_entries(
             "hoj",
             "directory",
-            _metadata_problems(
-                archive,
-                info_by_name,
-                hoj_directories,
-                "",
-                ("problemId",),
-                fallback_id=fallback_id,
-                metadata_name_for_root=lambda root: f"{root.rstrip('/')}.json",
-            ),
+            hoj_entries,
             layouts,
             problems,
             problem_counts,
         )
+        problem_identities["hoj"] = hoj_identities
 
     fps_entries = _fps_problems(archive, names, info_by_name, fallback_id)
     if fps_entries is not None:
@@ -514,6 +574,7 @@ def _inspect_archive_content(
         layouts=layouts,
         problems=problems,
         problem_counts=problem_counts,
+        problem_identities=problem_identities,
     )
 
 
@@ -600,6 +661,19 @@ def _archive_mapping(
     return value if isinstance(value, dict) else {}
 
 
+def _mapping_fingerprint(document: dict[str, Any]) -> str | None:
+    try:
+        payload = json.dumps(
+            document,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _nested_mapping_value(
     document: dict[str, Any],
     path: tuple[str, ...],
@@ -613,6 +687,35 @@ def _nested_mapping_value(
         return None
     text = str(value).strip()
     return text if text and len(text) <= 256 else None
+
+
+def _hoj_problems(
+    archive: zipfile.ZipFile,
+    info_by_name: dict[str, zipfile.ZipInfo],
+    roots: set[str],
+    fallback_id: str,
+) -> tuple[
+    tuple[DetectedProblem, ...],
+    tuple[_ProblemIdentity | None, ...],
+]:
+    entries: list[DetectedProblem] = []
+    identities: list[_ProblemIdentity | None] = []
+    for root in sorted(roots, key=lambda value: value.casefold()):
+        document = _archive_mapping(
+            archive,
+            info_by_name,
+            f"{root.rstrip('/')}.json",
+        )
+        identifier = _nested_mapping_value(document, ("problem", "problemId"))
+        base = _problem_from_root(root, fallback_id)
+        entries.append(DetectedProblem(identifier or base.id, base.path))
+        fingerprint = _mapping_fingerprint(document) if identifier is not None else None
+        identities.append(
+            _ProblemIdentity(identifier, fingerprint)
+            if identifier is not None and fingerprint is not None
+            else None
+        )
+    return tuple(entries), tuple(identities)
 
 
 def _metadata_problems(
@@ -904,11 +1007,13 @@ def _inspect_nested_archives(
 
     format_id = next(iter(formats))
     entries: list[DetectedProblem] = []
+    identities: list[_ProblemIdentity | None] = []
     count = 0
     confidence = 1.0
     for info, content, fallback_id, candidate in selected:
         confidence = min(confidence, candidate.confidence)
         inner_entries = content.problems.get(format_id, ())
+        inner_identities = content.problem_identities.get(format_id, ())
         inner_count = content.problem_counts.get(format_id)
         count += inner_count if inner_count is not None else 1
         if inner_entries:
@@ -920,6 +1025,11 @@ def _inspect_nested_archives(
                 )
                 for entry in inner_entries
             )
+            identities.extend(
+                inner_identities
+                if len(inner_identities) == len(inner_entries)
+                else (None,) * len(inner_entries)
+            )
         else:
             entries.append(
                 DetectedProblem(
@@ -927,6 +1037,7 @@ def _inspect_nested_archives(
                     PurePosixPath(info.filename).as_posix(),
                 )
             )
+            identities.append(None)
     candidate = FormatDetection(
         format_id,
         confidence,
@@ -937,6 +1048,67 @@ def _inspect_nested_archives(
         layouts={format_id: "nested"},
         problems={format_id: tuple(entries)},
         problem_counts={format_id: count},
+        problem_identities={format_id: tuple(identities)},
+    )
+
+
+def _merge_expanded_hoj_content(
+    expanded: _ContentInspection,
+    nested: _ContentInspection,
+) -> _ContentInspection | None:
+    nested_strong = [
+        candidate for candidate in nested.candidates if candidate.confidence >= 0.8
+    ]
+    if len(nested_strong) != 1 or nested_strong[0].format != "hoj":
+        return None
+
+    expanded_entries = expanded.problems.get("hoj", ())
+    nested_entries = nested.problems.get("hoj", ())
+    expanded_identities = expanded.problem_identities.get("hoj", ())
+    nested_identities = nested.problem_identities.get("hoj", ())
+    if (
+        not expanded_entries
+        or not nested_entries
+        or len(expanded_entries) != len(expanded_identities)
+        or len(nested_entries) != len(nested_identities)
+        or any(identity is None for identity in expanded_identities)
+        or any(identity is None for identity in nested_identities)
+    ):
+        return None
+
+    merged_entries: list[DetectedProblem] = []
+    merged_identities: list[_ProblemIdentity] = []
+    fingerprints: dict[str, str] = {}
+    for entry, identity in zip(
+        (*expanded_entries, *nested_entries),
+        (*expanded_identities, *nested_identities),
+        strict=True,
+    ):
+        if identity is None:
+            return None
+        existing = fingerprints.get(identity.identifier)
+        if existing is not None:
+            if existing != identity.fingerprint:
+                return None
+            continue
+        fingerprints[identity.identifier] = identity.fingerprint
+        merged_entries.append(entry)
+        merged_identities.append(identity)
+
+    layouts = dict(expanded.layouts)
+    problems = dict(expanded.problems)
+    problem_counts = dict(expanded.problem_counts)
+    problem_identities = dict(expanded.problem_identities)
+    layouts["hoj"] = "nested"
+    problems["hoj"] = tuple(merged_entries)
+    problem_counts["hoj"] = len(merged_entries)
+    problem_identities["hoj"] = tuple(merged_identities)
+    return _ContentInspection(
+        candidates=expanded.candidates,
+        layouts=layouts,
+        problems=problems,
+        problem_counts=problem_counts,
+        problem_identities=problem_identities,
     )
 
 

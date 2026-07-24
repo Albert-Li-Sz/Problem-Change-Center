@@ -81,21 +81,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
           shellcheck install.sh scripts/*.sh runner/entrypoint.sh
-      - name: Validate production Caddy configuration
+      - name: Validate external deployment configuration
         run: |
-          CADDY_HASH="$(docker run --rm caddy:2.10-alpine caddy hash-password --plaintext ci-password)"
-          docker run --rm \
-            -e P2H_SITE_ADDRESS=localhost \
-            -e P2H_MAX_REQUEST_BODY_BYTES=553648128 \
-            -e P2H_ADMIN_USER=ci \
-            -e P2H_ADMIN_PASSWORD_HASH="$CADDY_HASH" \
-            -e P2H_TRUSTED_PROXY_SECRET=test-only-test-only-test-only-test-only \
-            -e P2H_HSTS_MAX_AGE_SECONDS=31536000 \
-            -e P2H_FRONTEND_ROOT=/srv \
-            -e P2H_ACCESS_LOG=/tmp/access.json \
-            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            caddy:2.10-alpine \
-            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          config_file="$(mktemp)"
+          P2H_ACCESS_KEY=ci-external-access-key \
+            ./install.sh --non-interactive --external \
+              --site-address localhost --skip-backend --skip-frontend \
+              --skip-runner --config "$config_file" --force-config
+          grep -Fx 'P2H_DEPLOYMENT_MODE=external' "$config_file"
+          grep -Fx 'P2H_ALLOWED_ORIGINS=http://localhost:11452' "$config_file"
+          grep -Fx 'P2H_BACKEND_PORT=11451' "$config_file"
+          grep -Fx 'P2H_FRONTEND_PORT=11452' "$config_file"
+          grep -E '^P2H_ACCESS_KEY_HASH=' "$config_file"
+          ! grep -F 'ci-external-access-key' "$config_file"
 
   runner-isolation:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

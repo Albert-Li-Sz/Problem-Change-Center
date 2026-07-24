@@ -20,7 +20,7 @@ vi.mock("./api", () => ({
   applyRepairs: vi.fn(),
   cancelJob: vi.fn(),
   deleteJob: vi.fn(),
-  downloadUrl: vi.fn((jobId: string) => `/api/jobs/${jobId}/download`),
+  downloadJob: vi.fn(),
   getJob: vi.fn(),
   getLogs: vi.fn(),
   getReport: vi.fn(),
@@ -131,6 +131,16 @@ describe("App archive selection", () => {
     await user.click(trigger);
 
     expect(screen.getByRole("dialog", { name: "格式能力矩阵" })).not.toBeNull();
+    for (const name of [
+      "ProbHub Workspace",
+      "ProbHub Legacy",
+      "ProbHub Core",
+      "ICPC Problem Package",
+      "DOMjudge / Kattis"
+    ]) {
+      expect(screen.getByText(name)).not.toBeNull();
+    }
+    expect(screen.getByText(/跨评测系统的通用题包规范/)).not.toBeNull();
     await user.click(screen.getByRole("button", { name: "关闭格式能力矩阵" }));
     expect(screen.queryByRole("dialog", { name: "格式能力矩阵" })).toBeNull();
   });
@@ -184,7 +194,71 @@ describe("App archive selection", () => {
 
     await user.selectOptions(screen.getByRole("combobox", { name: "输入格式" }), "generic");
     expect(screen.queryByText("自动识别未达到置信阈值，请手动选择输入格式。")).toBeNull();
+    expect(screen.getByText(/当前将按/).textContent).toContain("通用测试数据目录");
+    expect(screen.getByText(/不代表 ZIP 损坏/)).not.toBeNull();
     expect((startButton as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("lets an explicit source format override the inspected suggestion", async () => {
+    const user = userEvent.setup();
+    const jobId = "9".repeat(32);
+    mockedInspectZip.mockResolvedValue(inspectResult({
+      job_id: jobId,
+      filename: "probhub-core.zip",
+      detected_format: "probhub",
+      format_candidates: [
+        {
+          format: "probhub",
+          confidence: 0.99,
+          evidence: ["found ProbHub Core export structure"]
+        }
+      ],
+      supported_targets: ["hydro", "icpc", "hoj", "fps", "qduoj", "uoj", "dmoj"]
+    }));
+    mockedStartJob.mockResolvedValue({
+      id: jobId,
+      status: "queued",
+      created_at: "2026-07-24T00:00:00Z",
+      started_at: null,
+      finished_at: null,
+      exit_code: null,
+      download_ready: false,
+      error: null,
+      source_format: "icpc",
+      target_format: "hydro",
+      report_ready: false,
+      report_counts: { warning: 0, loss: 0, fatal: 0 }
+    });
+    render(<App />);
+
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]');
+    await user.upload(
+      fileInput!,
+      new File(["zip"], "probhub-core.zip", { type: "application/zip" })
+    );
+    await user.click(screen.getByRole("button", { name: "上传并检查" }));
+    await screen.findByText("识别为 ProbHub（Workspace / Legacy / Core）");
+
+    const sourceSelect = screen.getByRole("combobox", { name: "输入格式" });
+    await user.selectOptions(sourceSelect, "icpc");
+    expect(screen.getByText(/当前将按/).textContent).toContain(
+      "ICPC 题包（DOMjudge / Kattis 兼容）"
+    );
+    expect(screen.getByText(/不代表 ZIP 损坏/)).not.toBeNull();
+
+    await user.selectOptions(sourceSelect, "auto");
+    expect(screen.queryByText(/当前将按/)).toBeNull();
+    expect(screen.getByText("自动识别仅作建议；手动选择输入格式会按所选解析器尝试。")).not.toBeNull();
+
+    await user.selectOptions(sourceSelect, "icpc");
+    await user.click(screen.getByRole("button", { name: "启动容器转换" }));
+
+    await waitFor(() => expect(mockedStartJob).toHaveBeenCalledOnce());
+    expect(mockedStartJob.mock.calls[0][0]).toMatchObject({
+      job_id: jobId,
+      source_format: "icpc",
+      target_format: "hydro"
+    });
   });
 
   it("supports selecting problems from a detected multi-problem package", async () => {

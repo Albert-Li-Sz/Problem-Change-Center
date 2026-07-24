@@ -10,11 +10,11 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/start.sh [options]
 
-Start the local backend and frontend development servers.
+Start the backend and built frontend servers on ports 11451 and 11452.
 
 Options:
   --backend-only     Start only FastAPI.
-  --frontend-only    Start only Vite.
+  --frontend-only    Start only the built frontend server.
   -h, --help         Show this help.
 EOF
 }
@@ -51,10 +51,10 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
 fi
 
-P2H_BACKEND_HOST="${P2H_BACKEND_HOST_OVERRIDE:-${P2H_BACKEND_HOST:-127.0.0.1}}"
-P2H_BACKEND_PORT="${P2H_BACKEND_PORT_OVERRIDE:-${P2H_BACKEND_PORT:-8000}}"
-P2H_FRONTEND_HOST="${P2H_FRONTEND_HOST_OVERRIDE:-${P2H_FRONTEND_HOST:-127.0.0.1}}"
-P2H_FRONTEND_PORT="${P2H_FRONTEND_PORT_OVERRIDE:-${P2H_FRONTEND_PORT:-5173}}"
+P2H_BACKEND_HOST="${P2H_BACKEND_HOST_OVERRIDE:-${P2H_BACKEND_HOST:-0.0.0.0}}"
+P2H_BACKEND_PORT="${P2H_BACKEND_PORT_OVERRIDE:-${P2H_BACKEND_PORT:-11451}}"
+P2H_FRONTEND_HOST="${P2H_FRONTEND_HOST_OVERRIDE:-${P2H_FRONTEND_HOST:-0.0.0.0}}"
+P2H_FRONTEND_PORT="${P2H_FRONTEND_PORT_OVERRIDE:-${P2H_FRONTEND_PORT:-11452}}"
 
 pids=()
 
@@ -66,28 +66,18 @@ is_linux() {
   [[ "$OS_NAME" == "Linux" ]]
 }
 
-is_loopback_host() {
-  case "$1" in
-    127.0.0.1|localhost|::1|'[::1]')
-      return 0
-      ;;
+validate_bindings() {
+  if [[ "$P2H_BACKEND_PORT" != 11451 || "$P2H_FRONTEND_PORT" != 11452 ]]; then
+    printf 'error: deployment ports are fixed at backend 11451 and frontend 11452.\n' >&2
+    exit 1
+  fi
+  case "${P2H_DEPLOYMENT_MODE:-internal}" in
+    internal|external|local|production) ;;
     *)
-      return 1
+      printf 'error: P2H_DEPLOYMENT_MODE must be internal or external.\n' >&2
+      exit 1
       ;;
   esac
-}
-
-validate_local_bindings() {
-  if [[ "$RUN_BACKEND" -eq 1 ]] && ! is_loopback_host "$P2H_BACKEND_HOST"; then
-    printf 'error: refusing to expose the unauthenticated backend on non-loopback host %s\n' "$P2H_BACKEND_HOST" >&2
-    printf 'Run it on 127.0.0.1 and use an authenticated reverse proxy for remote access.\n' >&2
-    exit 1
-  fi
-  if [[ "$RUN_FRONTEND" -eq 1 ]] && ! is_loopback_host "$P2H_FRONTEND_HOST"; then
-    printf 'error: refusing to expose the frontend API proxy on non-loopback host %s\n' "$P2H_FRONTEND_HOST" >&2
-    printf 'Run it on 127.0.0.1 and use an authenticated reverse proxy for remote access.\n' >&2
-    exit 1
-  fi
 }
 
 print_missing_docker_help() {
@@ -197,19 +187,20 @@ start_backend() {
 }
 
 start_frontend() {
-  [[ -d "$ROOT_DIR/frontend/node_modules" ]] || {
-    printf 'error: frontend/node_modules is missing. Run ./install.sh first.\n' >&2
+  [[ -f "$ROOT_DIR/frontend/dist/index.html" ]] || {
+    printf 'error: frontend/dist is missing. Run ./install.sh first.\n' >&2
+    exit 1
+  }
+  command -v node >/dev/null 2>&1 || {
+    printf 'error: node is missing. Install Node.js 20.19 or newer.\n' >&2
     exit 1
   }
 
-  (
-    cd "$ROOT_DIR/frontend"
-    exec npm run dev -- --host "$P2H_FRONTEND_HOST" --port "$P2H_FRONTEND_PORT"
-  ) &
+  node "$ROOT_DIR/scripts/serve-frontend.mjs" &
   pids+=("$!")
 }
 
-validate_local_bindings
+validate_bindings
 
 if [[ "$RUN_BACKEND" -eq 1 ]]; then
   check_docker_access
