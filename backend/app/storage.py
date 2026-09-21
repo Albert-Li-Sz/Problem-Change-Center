@@ -124,11 +124,13 @@ class Storage:
         parent_job_id: str,
         repair_request: RepairRequest,
         uploads: list[UploadFile],
+        *,
+        reserved_job_id: str | None = None,
     ) -> tuple[str, dict[str, object]]:
         try:
             async with self._upload_lock:
                 return await self._create_repair_job_locked(
-                    parent_job_id, repair_request, uploads
+                    parent_job_id, repair_request, uploads, reserved_job_id
                 )
         finally:
             for upload in uploads:
@@ -139,6 +141,7 @@ class Storage:
         parent_job_id: str,
         repair_request: RepairRequest,
         uploads: list[UploadFile],
+        reserved_job_id: str | None = None,
     ) -> tuple[str, dict[str, object]]:
         parent = self.read_metadata(parent_job_id)
         if parent.status != "failed":
@@ -206,8 +209,10 @@ class Storage:
                 detail="Repair uploads do not match the confirmed repair plan",
             )
 
-        job_id = uuid.uuid4().hex
+        job_id = reserved_job_id or uuid.uuid4().hex
         paths = self.paths_for(job_id)
+        if paths.root.exists():
+            raise HTTPException(status_code=409, detail="Repair job already exists")
         try:
             paths.input_dir.mkdir(parents=True, exist_ok=False)
             paths.work_dir.mkdir()

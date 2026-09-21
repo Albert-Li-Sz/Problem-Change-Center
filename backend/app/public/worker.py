@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -43,11 +44,18 @@ def container_name(row):
     return f"p2h-public-{row['id']}-{row['lease_token'][:8]}"
 
 
+def instance_label(config: PublicConfig):
+    return (
+        "p2h.instance=" + hashlib.sha256(str(config.data_dir).encode()).hexdigest()[:16]
+    )
+
+
 def command(config: PublicConfig, row, storage: Storage) -> list[str]:
     paths = storage.paths_for(row["id"])
     wine = row["wine"]
     image = config.wine_image if wine else config.runner_image
     memory = "4g" if wine else "2g"
+    home_size = "2g" if wine else "1g"
     cmd = [
         "docker",
         "run",
@@ -57,6 +65,8 @@ def command(config: PublicConfig, row, storage: Storage) -> list[str]:
         "runc",
         "--label",
         "app=p2h-public",
+        "--label",
+        instance_label(config),
         "--network",
         "none",
         "--read-only",
@@ -87,7 +97,7 @@ def command(config: PublicConfig, row, storage: Storage) -> list[str]:
         "--tmpfs",
         "/output:rw,noexec,nosuid,nodev,size=1g,uid=10001,gid=10001,mode=700",
         "--tmpfs",
-        "/home/app:rw,exec,nosuid,nodev,size=1g,uid=10001,gid=10001,mode=700",
+        f"/home/app:rw,exec,nosuid,nodev,size={home_size},uid=10001,gid=10001,mode=700",
         "--mount",
         f"type=bind,src={paths.input_dir},dst=/input,readonly",
         "-e",
@@ -104,7 +114,18 @@ def command(config: PublicConfig, row, storage: Storage) -> list[str]:
         "P2H_MAX_ARCHIVE_MEMBER_BYTES=268435456",
     ]
     if wine:
-        cmd += ["--platform", "linux/amd64"]
+        # Debian Wine 10 frees TMPDIR's environment pointer if this directory
+        # is absent (Debian #1110936). A private runtime mount avoids that path.
+        cmd += [
+            "--platform",
+            "linux/amd64",
+            "--tmpfs",
+            "/run/user/10001:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=700",
+            "-e",
+            "XDG_RUNTIME_DIR=/run/user/10001",
+            "-e",
+            "WINEDEBUG=-all,err+all",
+        ]
     cmd += ["--entrypoint", "python", image, "-u", "/opt/public_runner.py"]
     if row["kind"] == "inspect":
         return cmd + ["inspect"]
@@ -415,7 +436,43 @@ class Worker:
                 shutil.rmtree(paths.output_dir, ignore_errors=True)
                 paths.output_dir.mkdir(mode=0o700)
 
+    def reap_finished_containers(self):
+        # A temporary daemon outage may have prevented run_job's final rm.
+        # Recheck each named lease before removal, so a freshly claimed task
+        # cannot be mistaken for an orphan by a stale snapshot.
+        containers = docker(
+            "ps",
+            "-a",
+            "--filter",
+            "label=app=p2h-public",
+            "--filter",
+            "label=" + instance_label(self.config),
+            "--format",
+            "{{.Names}}",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        for name in containers.stdout.decode().splitlines():
+            match = re.fullmatch(r"p2h-public-([0-9a-f]{32})-([0-9a-f]{8})", name)
+            if not match:
+                continue
+            if not self.db.one(
+                "SELECT id FROM jobs WHERE id=%s AND status='running' AND left(lease_token,8)=%s",
+                match.groups(),
+            ):
+                docker(
+                    "rm",
+                    "-f",
+                    name,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
     def maintenance(self):
+        try:
+            self.reap_finished_containers()
+        except (subprocess.SubprocessError, OSError):
+            LOGGER.warning("orphan_container_scan_unavailable")
         for row in self.db.all(
             "SELECT * FROM jobs WHERE status='running' AND lease_until<now()"
         ):
