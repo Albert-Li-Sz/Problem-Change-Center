@@ -384,6 +384,27 @@ def test_recover_expired_lease_with_missing_container(site, monkeypatch):
     assert app.state.queue.quota(user["id"])["reserved"] == 0
 
 
+def test_finished_container_is_reaped_without_stopping_active_lease(site, monkeypatch):
+    _, app, config = site
+    owner = register(site)
+    make_job(site, owner["id"])
+    finished = app.state.queue.claim()
+    app.state.queue.finish(finished["id"], finished["lease_token"], "failed")
+    make_job(site, owner["id"])
+    active = app.state.queue.claim()
+    names = [container_name(finished), container_name(active), "unrelated-container"]
+    calls = []
+
+    def fake_docker(*args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="\n".join(names).encode())
+
+    monkeypatch.setattr("app.public.worker.docker", fake_docker)
+    Worker(config, app.state.db).reap_finished_containers()
+    assert any(str(arg).startswith("label=p2h.instance=") for arg in calls[0])
+    assert calls[1:] == [("rm", "-f", container_name(finished))]
+
+
 def test_expired_files_and_metadata_are_removed(site):
     _, app, config = site
     user = register(site)
@@ -513,6 +534,39 @@ def test_repair_inherits_owner_and_immutable_input(site):
     assert app.state.storage.read_metadata(derived).parent_job_id == job_id
 
 
+def test_failed_repair_files_stay_attached_to_cleanup_job(site, monkeypatch):
+    client, app, config = site
+    owner = register(site)
+    job_id = make_job(site, owner["id"], kind="convert")
+    created = []
+
+    async def fail_after_copy(parent_id, plan, files, *, reserved_job_id):
+        paths = app.state.storage.paths_for(reserved_job_id)
+        paths.input_dir.mkdir(parents=True)
+        paths.upload_path.write_bytes(b"partial-copy")
+        created.append(reserved_job_id)
+        raise RuntimeError("simulated interrupted repair")
+
+    monkeypatch.setattr(app.state.storage, "create_repair_job", fail_after_copy)
+    with pytest.raises(RuntimeError, match="simulated interrupted repair"):
+        client.post(
+            f"/api/jobs/{job_id}/repairs",
+            data={
+                "plan": json.dumps(
+                    {
+                        "selections": [
+                            {"suggestion_id": "a" * 24, "candidate_path": "test/1.out"}
+                        ]
+                    }
+                )
+            },
+        )
+    row = app.state.db.one("SELECT * FROM jobs WHERE id=%s", (created[0],))
+    assert row["delete_requested"] and row["status"] == "cancelled"
+    Worker(config, app.state.db).maintenance()
+    assert not app.state.storage.paths_for(created[0]).root.exists()
+
+
 def test_one_hundred_users_and_global_claim_limits(site):
     client, app, _ = site
     users = [uuid.uuid4().hex for _ in range(100)]
@@ -623,7 +677,7 @@ def test_native_wine_under_public_restrictions(site):
     argv = argv[: image_index + 1] + ["cmd", "/c", "echo", "public-wine-ok"]
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=90)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, result.stderr[:4096] + result.stderr[-4096:]
         assert "public-wine-ok" in result.stdout
     finally:
         subprocess.run(

@@ -61,6 +61,8 @@ docker compose --env-file .env.public -f docker-compose.public.yml run --rm api 
 
 队列、配额、租约存入 PostgreSQL。API 重启不丢任务。Worker 超过 30 秒不续租的任务被终止并标记失败，不自动重跑用户程序。用户可重新上传。
 
+Wine runner 额外挂载专属 `/run/user/10001` tmpfs，规避 Debian Wine 10 在缺失运行目录且设置 `TMPDIR` 时的初始化崩溃（[Debian #1110936](https://bugs.debian.org/1110936)）。Wine prefix 的 tmpfs 上限为 2 GiB，仍计入单个 Wine 任务的 4 GiB 总内存限制。保持默认 seccomp/AppArmor，无需增加 capability 或使用 `unconfined`。
+
 ## 升级与备份
 
 升级前暂停队列，等待任务结束并备份数据库。更新代码、重建镜像，然后执行 `up -d --force-recreate migrate api worker caddy`。不要删除 PostgreSQL volume；先在测试数据库验证迁移和恢复。

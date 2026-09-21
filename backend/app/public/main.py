@@ -545,14 +545,14 @@ def create_app(config: PublicConfig | None = None) -> FastAPI:
         derived_id = None
         try:
             derived_id, payload = await storage().create_repair_job(
-                job_id, repair, files or []
+                job_id, repair, files or [], reserved_job_id=reserved_id
             )
             with db.connect() as conn:
                 conn.execute(
-                    "UPDATE jobs SET id=%s,status='uploaded',filename=%s WHERE id=%s",
+                    "UPDATE jobs SET status='uploaded',filename=%s,size=%s WHERE id=%s",
                     (
-                        derived_id,
                         storage().read_metadata(derived_id).filename,
+                        storage().read_metadata(derived_id).size,
                         reserved_id,
                     ),
                 )
