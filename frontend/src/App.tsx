@@ -1,5 +1,5 @@
 import { AlertTriangle, Archive, CheckCircle2, FileArchive, Github, RotateCcw, Shield, UploadCloud } from "lucide-react";
-import { FormEvent, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ConversionReport,
   applyRepairs,
@@ -7,6 +7,7 @@ import {
   deleteJob,
   downloadJob,
   getJob,
+  getInspection,
   getLogs,
   inspectZip,
   InspectResult,
@@ -39,7 +40,7 @@ function splitList(value: string): string[] {
     .filter(Boolean);
 }
 
-export default function App() {
+export default function App({ initialJobId }: { initialJobId?: string } = {}) {
   const [file, setFile] = useState<File | null>(null);
   const [inspectedFile, setInspectedFile] = useState<File | null>(null);
   const [inspect, setInspect] = useState<InspectResult | null>(null);
@@ -73,6 +74,28 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const capabilityDialogRef = useRef<HTMLDialogElement>(null);
   const requestEpoch = useRef(0);
+
+  useEffect(() => {
+    if (!initialJobId) return;
+    let active = true;
+    const controller = new AbortController();
+    setBusy(true);
+    void Promise.all([getInspection(initialJobId, controller.signal), getJob(initialJobId)]).then(([inspection, saved]) => {
+      if (!active) return;
+      setInspect(inspection);
+      setSourceFormat(inspection.detected_format ?? "auto");
+      setTargetFormat((saved.target_format as TargetFormat | null) ?? inspection.supported_targets[0] ?? "hydro");
+      const placeholder = new File([], inspection.filename);
+      setFile(placeholder);
+      setInspectedFile(placeholder);
+      if (saved.lifecycle !== "uploaded") setJob(saved);
+    }).catch((error: unknown) => {
+      if (active) setError(error instanceof Error ? error.message : "任务加载失败");
+    }).finally(() => {
+      if (active) setBusy(false);
+    });
+    return () => { active = false; controller.abort(); };
+  }, [initialJobId]);
 
   const isRunning = job?.status === "queued" || job?.status === "running";
   const canStart = Boolean(inspect && file && inspectedFile === file) && !isRunning && !busy && !resetting;

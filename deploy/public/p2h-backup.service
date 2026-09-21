@@ -1,0 +1,10 @@
+[Unit]
+Description=Encrypted PostgreSQL backup for P2H public
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/Problem-Change-Center
+EnvironmentFile=/etc/p2h-backup.env
+ExecStart=/usr/bin/bash /opt/Problem-Change-Center/scripts/public-backup.sh
+UMask=0077

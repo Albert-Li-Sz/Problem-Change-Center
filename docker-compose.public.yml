@@ -1,0 +1,142 @@
+name: p2h-public
+
+x-app: &app
+  image: p2h-public-api
+  build:
+    context: .
+    dockerfile: deploy/public/Dockerfile
+    target: api
+  restart: unless-stopped
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp:size=2g,mode=1777]
+  volumes:
+    # Same absolute path is required inside Worker and on the Docker host.
+    - ${PUBLIC_DATA_DIR:-/srv/p2h/data}:${PUBLIC_DATA_DIR:-/srv/p2h/data}
+  networks: [database]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: p2h
+      POSTGRES_USER: p2h_owner
+      POSTGRES_PASSWORD: ${PUBLIC_OWNER_DB_PASSWORD:?Run scripts/public-config.py first}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U p2h_owner -d p2h"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    mem_limit: 2g
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: [python, -m, app.public.cli, provision]
+    environment:
+      PUBLIC_DATABASE_URL: postgresql://p2h_owner:${PUBLIC_OWNER_DB_PASSWORD}@postgres:5432/p2h
+      PUBLIC_API_DB_PASSWORD: ${PUBLIC_API_DB_PASSWORD:?Generate public configuration}
+      PUBLIC_WORKER_DB_PASSWORD: ${PUBLIC_WORKER_DB_PASSWORD:?Generate public configuration}
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: *app
+    environment:
+      PUBLIC_DATABASE_URL: postgresql://p2h_api:${PUBLIC_API_DB_PASSWORD}@postgres:5432/p2h
+      PUBLIC_ORIGIN: https://${PUBLIC_DOMAIN:?Set PUBLIC_DOMAIN}
+      PUBLIC_DATA_DIR: ${PUBLIC_DATA_DIR:-/srv/p2h/data}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:?Set Turnstile site key}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:?Set Turnstile secret}
+      SMTP_HOST: ${SMTP_HOST:?Set SMTP host}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:?Set SMTP sender}
+      PUBLIC_CONTACT_EMAIL: ${PUBLIC_CONTACT_EMAIL:?Set operator contact}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    networks: [database, edge]
+    mem_limit: 3g
+    cpus: 2
+    pids_limit: 256
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live',timeout=5)"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    <<: *app
+    image: p2h-public-worker
+    build:
+      context: .
+      dockerfile: deploy/public/Dockerfile
+      target: worker
+    command: [python, -m, app.public.worker]
+    environment:
+      PUBLIC_DATABASE_URL: postgresql://p2h_worker:${PUBLIC_WORKER_DB_PASSWORD}@postgres:5432/p2h
+      PUBLIC_DATA_DIR: ${PUBLIC_DATA_DIR:-/srv/p2h/data}
+      PUBLIC_RUNNER_IMAGE: ${PUBLIC_RUNNER_IMAGE:-p2h-public-runner}
+      PUBLIC_WINE_IMAGE: ${PUBLIC_WINE_IMAGE:-p2h-public-runner-wine}
+    group_add: ["${DOCKER_GID:-0}"]
+    volumes:
+      - ${PUBLIC_DATA_DIR:-/srv/p2h/data}:${PUBLIC_DATA_DIR:-/srv/p2h/data}
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    stop_grace_period: 45s
+    mem_limit: 4g
+    cpus: 2
+    pids_limit: 512
+
+  caddy:
+    build:
+      context: .
+      dockerfile: deploy/public/Dockerfile.web
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+      ACME_EMAIL: ${PUBLIC_CONTACT_EMAIL}
+    volumes: [caddy_data:/data, caddy_config:/config]
+    networks:
+      edge: {ipv4_address: 172.30.0.2}
+    depends_on:
+      api: {condition: service_healthy}
+    mem_limit: 512m
+
+  runner:
+    profiles: [build-runners]
+    image: p2h-public-runner
+    build:
+      context: .
+      dockerfile: runner/Dockerfile.public
+      args: {RUNNER_BASE: "${P2H_RUNNER_BASE:-p2h-runner}"}
+
+  runner-wine:
+    profiles: [build-runners]
+    platform: linux/amd64
+    image: p2h-public-runner-wine
+    build:
+      context: .
+      dockerfile: runner/Dockerfile.public
+      args: {RUNNER_BASE: "${P2H_WINE_BASE:-p2h-runner-wine}"}
+
+networks:
+  database: {internal: true}
+  edge:
+    ipam:
+      config: [{subnet: 172.30.0.0/24}]
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

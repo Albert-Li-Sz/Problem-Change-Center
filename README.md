@@ -1,5 +1,7 @@
 # OJ 题包转换器
 
+此 `public` 分支新增单机 Docker 公益平台：邮箱验证、邀请码注册、个人任务历史、持久队列、公平使用额度、管理员后台，以及 Wine / `doall.sh` 执行。公众版请使用 **[部署指南](deploy/public/README.md)** 和 `docker-compose.public.yml`；下方保留主线的内网工具说明。
+
 一个面向竞赛出题人和 OJ 管理员的本地 Web 工具，用于识别、检查并转换不同
 Online Judge 的 ZIP 题包。
 

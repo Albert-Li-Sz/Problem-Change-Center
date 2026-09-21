@@ -1,0 +1,60 @@
+.public-platform { min-height: 100vh; }
+.public-header { min-height: 68px; padding: 16px max(24px, calc((100vw - 1196px) / 2)); background: white; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.public-brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; text-decoration: none; white-space: nowrap; }
+.public-brand span { color: var(--blue-deep); background: var(--blue-soft); font-size: 11px; padding: 4px 7px; border-radius: 4px; }
+.public-identity { display: flex; align-items: center; gap: 16px; font-size: 13px; }
+.public-platform button { cursor: pointer; }
+.public-platform button:disabled { opacity: .5; cursor: not-allowed; }
+.public-header button, .public-card button, .public-nav button, .public-back, .public-footer button { border: 1px solid var(--border-strong); border-radius: 5px; padding: 8px 12px; background: white; color: var(--blue-deep); font: inherit; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; }
+.public-card { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 28px; box-shadow: var(--shadow); }
+.public-card h2 { margin: 0 0 12px; font-size: 21px; display: flex; align-items: center; gap: 9px; }
+.public-card h3 { margin-top: 28px; font-size: 16px; }
+.public-card p { color: var(--muted); font-size: 14px; line-height: 1.8; }
+.public-card form:not(.public-user-row) { display: grid; gap: 16px; }
+.public-card label { display: grid; gap: 6px; font-size: 13px; color: var(--text); }
+.public-card input:not([type=checkbox]), .public-card textarea { width: 100%; border: 1px solid var(--border-strong); border-radius: 5px; padding: 10px 12px; background: white; font: inherit; }
+.public-card input:focus, .public-card textarea:focus { outline: 2px solid #b8d9f1; outline-offset: 1px; }
+.public-card small { color: var(--muted); font-size: 12px; }
+.public-card .public-checkbox { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; line-height: 1.7; }
+.public-card .public-primary { background: var(--blue-deep); border-color: var(--blue-deep); color: white; min-height: 42px; }
+.public-card .public-danger { color: var(--red); border-color: #e7bdc0; }
+.public-card .public-link { border: 0; padding: 0; background: transparent; }
+.public-auth { display: grid; grid-template-columns: 1fr 420px; gap: 100px; align-items: center; max-width: 1040px; margin: 72px auto 90px; padding: 0 24px; }
+.public-intro h1 { font-size: clamp(40px, 5vw, 64px); line-height: 1.18; letter-spacing: -2px; margin: 24px 0; }
+.public-intro p { color: var(--muted); font-size: 16px; line-height: 1.9; }
+.public-eyebrow { font-size: 12px; color: var(--blue-deep); letter-spacing: 3px; font-weight: 700; }
+.public-points { display: grid; gap: 18px; margin-top: 40px; font-size: 14px; color: var(--muted); }
+.public-points span { display: flex; gap: 10px; align-items: center; }
+.public-points svg { color: var(--blue-deep); }
+.public-auth-links { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 22px; }
+.public-auth-links button { border: 0; padding: 0; font-size: 12px; }
+.public-nav { max-width: 1196px; margin: 24px auto 0; padding: 0 16px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.public-nav button { background: transparent; border-color: transparent; }
+.public-nav button.selected { background: white; border-color: var(--border); color: var(--blue-deep); }
+.public-quota { margin-left: auto; color: var(--muted); font-size: 12px; }
+.public-quota strong { color: var(--blue-deep); font-size: 16px; }
+.public-wide { max-width: 1164px; margin: 24px auto; }
+.public-section-title { display: flex; align-items: center; justify-content: space-between; }
+.public-notice { max-width: 1164px; margin: 18px auto; padding: 12px 18px; background: var(--green-soft); border: 1px solid #b7d9ca; border-radius: 5px; font-size: 14px; color: var(--green); }
+.public-notice.error { background: var(--red-soft); border-color: #e7bdc0; color: var(--red); }
+.public-job { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.public-job p { margin: 6px 0; }
+.public-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.public-empty { padding: 48px; text-align: center; color: var(--muted); }
+.public-account, .public-terms { max-width: 680px; margin: 32px auto; }
+.public-account form { max-width: 440px; }
+.public-account hr { border: 0; border-top: 1px solid var(--border); margin-top: 32px; }
+.public-admin { display: grid; gap: 24px; }
+.public-table-wrap { overflow-x: auto; margin-top: 20px; }
+.public-card table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.public-card td, .public-card th { text-align: left; padding: 12px 8px; border-bottom: 1px solid var(--border); }
+.public-user-row { display: flex; gap: 16px; align-items: end; padding: 14px 0; border-top: 1px solid var(--border); }
+.public-user-row > span { flex: 1; align-self: center; overflow-wrap: anywhere; }
+.public-user-row small { display: block; margin-top: 6px; }
+.public-user-row label { width: 110px; }
+.public-footer { max-width: 1196px; margin: 48px auto 0; padding: 20px 16px 28px; display: flex; justify-content: center; gap: 24px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+.public-footer button { border: 0; padding: 0; background: transparent; font-size: 12px; }
+.public-footer a { color: var(--blue-deep); text-decoration: none; }
+.public-back { display: flex; margin: 0 auto; }
+.public-error-text { color: var(--red) !important; }
+@media (max-width: 850px) { .public-auth { grid-template-columns: 1fr; gap: 32px; margin: 32px auto; max-width: 500px; } .public-intro h1 { font-size: 40px; } .public-intro h1 br { display: none; } .public-points { display: none; } .public-wide, .public-account, .public-terms { margin: 20px 16px; } .public-header { padding: 16px; flex-wrap: wrap; } .public-identity { margin-left: auto; } .public-quota { flex-basis: 100%; margin-top: 10px; } .public-job, .public-user-row { flex-wrap: wrap; } .public-user-row > span { flex-basis: 100%; } .public-notice { margin: 16px; } }

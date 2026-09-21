@@ -30,6 +30,14 @@ def build_docker_command(
 ) -> list[str]:
     runner_image = _runner_image_for_request(settings.runner_image, request)
     cmd = _base_docker_command(settings, job_id, paths, runner_image)
+    return cmd + conversion_arguments(settings, paths, request)
+
+
+def conversion_arguments(
+    settings: Settings, paths: JobPaths, request: JobRequest
+) -> list[str]:
+    """Build converter arguments independently of its execution environment."""
+    cmd: list[str] = []
 
     if not request.is_legacy_request:
         _append_package_convert_args(cmd, request, paths, settings)
