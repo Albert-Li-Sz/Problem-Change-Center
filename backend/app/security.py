@@ -375,6 +375,8 @@ def _request_hostname(request: Request) -> str | None:
 
 
 def _host_allowed(host: str, allowed_hosts: tuple[str, ...]) -> bool:
+    if "*" in allowed_hosts:
+        return True
     normalized = host.rstrip(".").lower()
     return any(
         normalized == candidate.rstrip(".").lower() for candidate in allowed_hosts
