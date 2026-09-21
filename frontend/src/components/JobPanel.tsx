@@ -65,6 +65,8 @@ export function JobPanel({
         </div>
 
         <div className="status-grid">
+          {job?.queue_position != null && <div><span>排队位置</span><strong>第 {job.queue_position} 位</strong></div>}
+          {job?.expires_at && <div><span>文件到期</span><strong>{new Date(job.expires_at).toLocaleString()}</strong></div>}
           <div>
             <span>Job</span>
             <strong>

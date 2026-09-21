@@ -1,0 +1,11 @@
+FROM node:24-alpine AS frontend
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+ENV VITE_PUBLIC_MODE=1
+RUN npm run build
+
+FROM caddy:2-alpine
+COPY --from=frontend /src/frontend/dist /srv/www
+COPY deploy/public/Caddyfile /etc/caddy/Caddyfile

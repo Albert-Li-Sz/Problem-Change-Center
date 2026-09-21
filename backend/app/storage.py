@@ -70,17 +70,24 @@ class JobPaths:
 
 
 class Storage:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, *, job_index=None, backfill: bool = True
+    ) -> None:
         self.settings = settings
         self.jobs_dir = settings.data_dir / "jobs"
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.job_index = JobIndex(settings.data_dir / "jobs.sqlite3")
+        self.job_index = (
+            job_index
+            if job_index is not None
+            else JobIndex(settings.data_dir / "jobs.sqlite3")
+        )
         self._upload_lock = asyncio.Lock()
         self._log_lock = threading.Lock()
         self._metadata_lock = threading.RLock()
         self._change_condition = threading.Condition()
         self._change_revisions: dict[str, int] = {}
-        self._backfill_job_index()
+        if backfill:
+            self._backfill_job_index()
 
     def _backfill_job_index(self) -> None:
         existing_ids: set[str] = set()

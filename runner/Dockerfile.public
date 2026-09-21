@@ -1,0 +1,7 @@
+ARG RUNNER_BASE=p2h-runner
+FROM ${RUNNER_BASE}
+COPY runner/public_runner.py /opt/public_runner.py
+COPY runner/public_export.py /opt/public_export.py
+COPY backend/app/format_detection.py /opt/format_detection.py
+USER 10001:10001
+ENTRYPOINT ["python", "-u", "/opt/public_runner.py"]

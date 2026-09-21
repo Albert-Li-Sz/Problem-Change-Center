@@ -2,8 +2,15 @@ import { fetchEventSource } from "@microsoft/fetch-event-source";
 
 const accessKeyStorageName = "p2h.access-key";
 const unauthorizedEventName = "p2h:unauthorized";
+export const publicMode = import.meta.env.VITE_PUBLIC_MODE === "1";
+
+export function csrfToken(): string {
+  const value = document.cookie.split("; ").find((item) => item.startsWith("p2h_csrf="));
+  return value ? decodeURIComponent(value.slice("p2h_csrf=".length)) : "";
+}
 
 function apiBaseUrl(): string {
+  if (publicMode) return "";
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
   if (configured) return configured.replace(/\/$/, "");
   if (typeof window !== "undefined" && window.location.port === "11452") {
@@ -50,11 +57,15 @@ function accessHeaders(
   accessKey = getStoredAccessKey()
 ): Headers {
   const headers = new Headers(initial);
+  if (publicMode) {
+    headers.set("X-CSRF-Token", csrfToken());
+    return headers;
+  }
   if (accessKey) headers.set("X-P2H-Access-Key", accessKey);
   return headers;
 }
 
-async function apiFetch(
+export async function apiFetch(
   path: string,
   init: RequestInit = {},
   accessKey = getStoredAccessKey(),
@@ -62,6 +73,7 @@ async function apiFetch(
 ): Promise<Response> {
   const response = await fetch(apiUrl(path), {
     ...init,
+    credentials: "same-origin",
     headers: accessHeaders(init.headers, accessKey)
   });
   if (response.status === 401 && notifyOnUnauthorized) notifyUnauthorized();
@@ -149,6 +161,13 @@ export type JobResponse = {
   exit_code: number | null;
   download_ready: boolean;
   error: string | null;
+  filename?: string;
+  lifecycle?: string;
+  kind?: "inspect" | "convert";
+  queue_position?: number | null;
+  expires_at?: string;
+  billed_minutes?: number;
+  reserved_minutes?: number;
   source_format: string | null;
   target_format: string | null;
   report_ready: boolean;
@@ -213,7 +232,7 @@ export type LogChunk = {
   reset: boolean;
 };
 
-async function parseResponse<T>(response: Response): Promise<T> {
+export async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response));
   }
@@ -271,7 +290,24 @@ export async function inspectZip(file: File): Promise<InspectResult> {
     method: "POST",
     body: form
   });
+  if (publicMode && response.status === 202) {
+    const pending = await parseResponse<{ job_id: string }>(response);
+    return getInspection(pending.job_id);
+  }
   return parseResponse<InspectResult>(response);
+}
+
+export async function getInspection(jobId: string, signal?: AbortSignal): Promise<InspectResult> {
+  // History may be reopened before the sandboxed inspection has finished.
+  for (let attempt = 0; attempt < 1800; attempt += 1) {
+    signal?.throwIfAborted();
+    const value = await parseResponse<InspectResult & { status?: string }>(
+      await apiFetch(`/api/inspections/${jobId}`, { signal })
+    );
+    if (!value.status) return value;
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+  }
+  throw new Error("检查仍在排队，可从任务历史继续查看");
 }
 
 export async function startJob(payload: JobRequest): Promise<JobResponse> {
