@@ -200,6 +200,19 @@ def _access_headers(**extra: str) -> dict[str, str]:
     }
 
 
+def test_internal_wildcard_host_is_allowed(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), allowed_hosts=("*",))
+    client = _client(settings)
+
+    response = client.get(
+        "/api/health",
+        headers={"host": "internal-service.example"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_inspect_accepts_zip_and_rejects_non_zip(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     client = _client(settings)
