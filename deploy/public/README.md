@@ -82,6 +82,8 @@ sudo systemctl start p2h-backup.service
 
 ## 本地验证
 
+公众版的本地 Python 环境要求 3.11 或更新版本，以使用已修复的 DNS 验证依赖。生产 Docker 镜像已使用 Python 3.14；内网工具仍支持 Python 3.10+。
+
 ```bash
 uv pip install --python backend/.venv/bin/python --require-hashes -r backend/requirements-public.lock
 PUBLIC_TEST_DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:5432/TEST_DB \

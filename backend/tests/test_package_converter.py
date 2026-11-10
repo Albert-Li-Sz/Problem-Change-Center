@@ -722,9 +722,9 @@ def test_polygon_icpc_2025_reuses_icpc_route_before_ir(
 
     monkeypatch.setattr(package_converter, "_polygon_command", fake_command)
     monkeypatch.setattr(
-        package_converter.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1),
+        package_converter,
+        "_run_polygon_subprocess",
+        lambda *args, **kwargs: 1,
     )
 
     with pytest.raises(ValueError, match="exited with code 1"):
@@ -739,6 +739,83 @@ def test_polygon_icpc_2025_reuses_icpc_route_before_ir(
         )
 
     assert requested_targets == ["icpc"]
+
+
+@pytest.mark.parametrize("output_mode", ["stdout", "stderr", "partial"])
+def test_polygon_child_output_prevents_false_idle_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_mode: str
+) -> None:
+    # Exercise the real Polygon subprocess boundary, with a converter that
+    # produces output for longer than the idle deadline before finishing.
+    output_stream = "stderr" if output_mode == "stderr" else "stdout"
+    line_ending = " " if output_mode == "partial" else "\n"
+    script = (
+        "import pathlib, sys, time\n"
+        "for i in range(20):\n"
+        f" print('Generating answer for test', i, file=sys.{output_stream}, "
+        f"end={line_ending!r}, flush=True)\n"
+        " time.sleep(0.1)\n"
+        "pathlib.Path(sys.argv[1], 'P1000-test.zip').write_bytes(b'package')\n"
+    )
+    monkeypatch.setattr(
+        package_converter,
+        "_polygon_command",
+        lambda source, output, **kwargs: [
+            sys.executable,
+            "-u",
+            "-c",
+            script,
+            str(output),
+        ],
+    )
+    stream = StringIO()
+    with ProgressReporter(
+        output_format="jsonl",
+        stream=stream,
+        heartbeat_seconds=0.05,
+        idle_timeout_seconds=1,
+        total_timeout_seconds=10,
+        stage_timeout_seconds=10,
+    ) as reporter:
+        report = package_converter._run_polygon_route(
+            tmp_path / "polygon.zip",
+            tmp_path / "output",
+            target_format="hydro",
+            loss_policy="warn",
+            only=(),
+            options={},
+            workspace=tmp_path,
+            reporter=reporter,
+        )
+    assert report["problem_count"] == 1
+    assert "Generating answer for test" in stream.getvalue()
+
+
+@pytest.mark.parametrize("limit", ["idle", "stage", "overall"])
+def test_polygon_subprocess_deadlines_kill_child(tmp_path: Path, limit: str) -> None:
+    pid_file = tmp_path / "pid"
+    script = (
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "while True:\n"
+        + (" print('still working', flush=True)\n" if limit != "idle" else "")
+        + " time.sleep(0.1)\n"
+    )
+    with pytest.raises(ProgressDeadlineExceeded) as timeout:
+        with ProgressReporter(
+            output_format="none",
+            stream=StringIO(),
+            idle_timeout_seconds=1 if limit == "idle" else 10,
+            stage_timeout_seconds=1 if limit == "stage" else 10,
+            total_timeout_seconds=1 if limit == "overall" else 10,
+        ) as reporter:
+            reporter.phase("write", detail="running Polygon converter")
+            package_converter._run_polygon_subprocess(
+                [sys.executable, "-u", "-c", script, str(pid_file)], reporter
+            )
+    assert timeout.value.kind == limit
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
 
 
 @pytest.mark.parametrize("target", ["fps", "qduoj", "uoj", "dmoj"])

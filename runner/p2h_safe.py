@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import yaml
 from defusedxml import ElementTree as DefusedET
 
 from format_bridge import (
@@ -637,8 +638,28 @@ def ensure_checker_lang_auto(config_yaml: str) -> str:
     return result
 
 
+def build_hydro_problem_yaml(pid: str, owner: int, title: str, tags: list[str]) -> str:
+    # Plain interpolation turns titles such as "1024" into a YAML number.
+    # Hydro rejects non-string titles when importing problem.yaml.
+    return yaml.safe_dump(
+        {
+            "pid": pid,
+            "owner": owner,
+            "title": title,
+            "tag": tags,
+            "nSubmit": 0,
+            "nAccept": 0,
+        },
+        allow_unicode=True,
+        sort_keys=False,
+    )
+
+
 def _install_hydro_writer_patches() -> None:
     import p2h.hydro_writer as hydro_writer
+
+    if hasattr(hydro_writer, "_build_problem_yaml"):
+        hydro_writer._build_problem_yaml = build_hydro_problem_yaml
 
     original = getattr(hydro_writer, "_build_config_yaml", None)
     if original is None or getattr(original, "_p2h_safe_checker_language_patch", False):

@@ -54,7 +54,7 @@ jobs:
             --generate-hashes \
             --output-file backend/requirements.lock
           git diff --exit-code -- backend/requirements.lock
-          uv pip compile backend/requirements-public.txt --universal --python-version 3.10 --generate-hashes --output-file backend/requirements-public.lock
+          uv pip compile backend/requirements-public.txt --universal --python-version 3.11 --generate-hashes --output-file backend/requirements-public.lock
           git diff --exit-code -- backend/requirements-public.lock
       - name: Validate compatibility lock
         run: python compat/check_lock.py

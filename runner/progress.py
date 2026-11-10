@@ -133,6 +133,10 @@ class ProgressReporter:
             self._current = self._total
         self._emit("phase_completed")
 
+    def activity(self) -> None:
+        """Record real work, including subprocess output, without a new phase."""
+        self._last_activity_monotonic = time.monotonic()
+
     def _heartbeat_loop(self) -> None:
         while not self._stopped.wait(self.heartbeat_seconds):
             if self._phase is not None:
@@ -140,7 +144,7 @@ class ProgressReporter:
 
     def _emit(self, event: str) -> None:
         if event != "heartbeat":
-            self._last_activity_monotonic = time.monotonic()
+            self.activity()
         if self.output_format == "none":
             return
         with self._lock:
