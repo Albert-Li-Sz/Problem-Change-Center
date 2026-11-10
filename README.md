@@ -9,7 +9,7 @@ Online Judge 的 ZIP 题包。
 与多题包，使用统一的 `ProblemBundle` 中间模型保留题面、样例、测试数据、分组、
 checker、interactor、附件和标程，并对无法无损映射的内容生成结构化报告。
 
-当前版本：`0.7.0`
+当前版本：`0.7.1`
 
 版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -96,8 +96,8 @@ docker compose version
 ### 安装
 
 ```bash
-git clone https://github.com/LMTINSUZHOU/Polygon-to-Hydro-or-Domujudge-Web-UI.git
-cd Polygon-to-Hydro-or-Domujudge-Web-UI
+git clone https://github.com/Albert-Li-Sz/Problem-Change-Center.git
+cd Problem-Change-Center
 ./install.sh
 ```
 
@@ -175,10 +175,10 @@ npm_config_registry=https://registry.npmmirror.com \
 
 `main` 分支会发布：
 
-- `ghcr.io/lmtinsuzhou/p2h-runner:main`
+- `ghcr.io/albert-li-sz/p2h-runner:main`
   - `linux/amd64`
   - `linux/arm64`
-- `ghcr.io/lmtinsuzhou/p2h-runner-wine:main`
+- `ghcr.io/albert-li-sz/p2h-runner-wine:main`
   - `linux/amd64`
 
 `Pre` 分支每次推送还会发布同平台范围的滚动测试标签 `:pre`；正式部署使用
@@ -188,20 +188,20 @@ npm_config_registry=https://registry.npmmirror.com \
 
 ```bash
 ./install.sh \
-  --runner-image ghcr.io/lmtinsuzhou/p2h-runner:main
+  --runner-image ghcr.io/albert-li-sz/p2h-runner:main
 ```
 
 只有题包必须执行 binary-only Windows `.exe` 时才使用 Wine：
 
 ```bash
 ./install.sh \
-  --runner-image ghcr.io/lmtinsuzhou/p2h-runner-wine:main
+  --runner-image ghcr.io/albert-li-sz/p2h-runner-wine:main
 ```
 
 生产环境不要长期跟随可变的 `main` 标签，应固定发布 digest：
 
 ```text
-P2H_RUNNER_IMAGE=ghcr.io/lmtinsuzhou/p2h-runner@sha256:<digest>
+P2H_RUNNER_IMAGE=ghcr.io/albert-li-sz/p2h-runner@sha256:<digest>
 ```
 
 GitHub Actions 还会生成 `sha-<commit>` 和版本标签，并附带 provenance 与 SBOM。
@@ -364,7 +364,12 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
 ### HOJ、FPS、QDUOJ、UOJ、DMOJ
 
 - HOJ 使用原生 `problem_*.json` 和数据目录。
+- HOJ 的 `subtask_average` 会逐组平均后取整，当前中间模型无法保留该规则，
+  因此转换会以 `fatal` 报告失败，避免静默改成子任务最低分。
 - FPS 支持 HUSTOJ 1.6 与 QDUOJ 1.2 profile，并防护 XML 实体和 XML Bomb。
+- FPS 的 `<spj>` 按 HUSTOJ 原生协议读取，`<tpj>` 按 testlib 协议读取。
+  HUSTOJ 原生特判可保留到 Hydro 的 `checker_type: hustoj` 或 HUSTOJ FPS；
+  其他目标暂未实现该协议的适配，会以 `fatal` 报告失败。
 - QDUOJ 使用编号目录、`problem.json` 和 `testcase/`。
 - UOJ 支持 `problem.conf`、普通/额外测试、子任务和 checker。
 - DMOJ 支持 `init.yml`、batch、dependency、archive、bridged checker 和 interactor。
@@ -393,7 +398,7 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
 | `P2H_MAX_CONCURRENT_JOBS` | `2` | 最大并发任务数 |
 | `P2H_MAX_STORED_JOBS` | `100` | 最大保存任务数 |
 | `P2H_MAX_STORAGE_BYTES` | `10737418240` | 任务存储上限 |
-| `P2H_DOCKER_MEMORY` | `1g` | runner 内存 |
+| `P2H_DOCKER_MEMORY` | `3g` | runner 内存；tmpfs（工作区、输出、临时目录）中的数据也计入，应不小于三者之和 |
 | `P2H_DOCKER_CPUS` | `2` | runner CPU |
 | `P2H_DOCKER_WORK_SIZE` | `1g` | 工作区 tmpfs |
 | `P2H_DOCKER_OUTPUT_SIZE` | `1g` | 输出 tmpfs |

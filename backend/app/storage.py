@@ -172,7 +172,9 @@ class Storage:
                 detail="Stored job limit reached; delete an existing job and retry",
             )
         parent_size = self.paths_for(parent_job_id).upload_path.stat().st_size
-        existing_bytes = self.total_storage_bytes()
+        # Walking the data directory, copying and hashing can each take seconds;
+        # keep them off the event loop so other requests are still served.
+        existing_bytes = await asyncio.to_thread(self.total_storage_bytes)
         if existing_bytes + parent_size > self.settings.max_storage_bytes:
             raise HTTPException(
                 status_code=507,
@@ -218,10 +220,12 @@ class Storage:
             paths.work_dir.mkdir()
             paths.output_dir.mkdir()
             paths.logs_path.write_text("", encoding="utf-8")
-            _copy_file_bounded(
-                self.paths_for(parent_job_id).upload_path, paths.upload_path
+            await asyncio.to_thread(
+                _copy_file_bounded,
+                self.paths_for(parent_job_id).upload_path,
+                paths.upload_path,
             )
-            source_hash = _sha256_file(paths.upload_path)
+            source_hash = await asyncio.to_thread(_sha256_file, paths.upload_path)
         except Exception:
             shutil.rmtree(paths.root, ignore_errors=True)
             raise
@@ -361,7 +365,7 @@ class Storage:
                 status_code=507,
                 detail="Stored job limit reached; delete an existing job and retry",
             )
-        existing_bytes = self.total_storage_bytes()
+        existing_bytes = await asyncio.to_thread(self.total_storage_bytes)
         if existing_bytes >= self.settings.max_storage_bytes:
             raise HTTPException(
                 status_code=507,

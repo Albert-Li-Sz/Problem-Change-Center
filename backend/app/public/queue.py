@@ -46,10 +46,12 @@ class Queue:
                 "SELECT count(*) AS n FROM jobs WHERE user_id=%s AND status='uploading'",
                 (user_id,),
             ).fetchone()["n"]
-            if count >= 20 or uploading >= 2:
-                raise HTTPException(
-                    429, "最多保留 20 个任务，同时最多上传 2 个文件；请先删除旧任务"
-                )
+            # The site accepts two uploads at once; one per user keeps a single
+            # account from occupying every slot.
+            if count >= 20:
+                raise HTTPException(429, "最多保留 20 个任务；请先删除旧任务")
+            if uploading >= 1:
+                raise HTTPException(429, "同时只能上传 1 个文件，请等待当前上传完成")
             if (
                 conn.execute(
                     "SELECT count(*) AS n FROM jobs WHERE status='uploading'"

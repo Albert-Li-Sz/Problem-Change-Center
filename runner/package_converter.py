@@ -24,6 +24,15 @@ from progress import ProgressReporter
 
 REPORT_FILENAME = ".p2h-report.json"
 MAX_NESTED_PACKAGES = 1000
+# Raised when package metadata has an unexpected shape, for example a list
+# where a number belongs. Readers validate most fields, but a stray one must
+# end in a diagnostic report rather than a traceback.
+MALFORMED_METADATA_ERRORS = (
+    ArithmeticError,
+    AttributeError,
+    LookupError,
+    TypeError,
+)
 EXPECTED_CONVERSION_ERRORS = (
     OSError,
     RuntimeError,
@@ -633,6 +642,19 @@ def convert_package(
                 message=f"failed to read {detected} package: {exc}",
             )
             raise
+        except MALFORMED_METADATA_ERRORS as exc:
+            message = (
+                f"{detected} package metadata has an unexpected structure: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            _write_fatal_report_if_missing(
+                output,
+                source_format=detected,
+                target_format=target_format,
+                code="source-metadata-error",
+                message=message,
+            )
+            raise ValueError(message) from exc
         bundle.applied_repairs = applied_repairs
         if source_override_candidates:
             bundle.add_issue(

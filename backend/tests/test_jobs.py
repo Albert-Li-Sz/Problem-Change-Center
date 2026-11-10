@@ -522,6 +522,46 @@ def test_cleanup_expired_jobs_removes_only_inactive_expired_data() -> None:
         assert storage.paths_for(current_job).root.exists()
 
 
+def test_recover_interrupted_leaves_uploaded_jobs_that_never_started() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        fake_docker = root / "fake-docker"
+        _write_fake_docker(fake_docker, "#!/usr/bin/env bash\nexit 0\n")
+        settings = _settings(root, fake_docker)
+        storage = Storage(settings)
+        job_id = "a" * 32
+        _prepare_job(storage, job_id)
+        manager = JobManager(settings, storage)
+
+        assert manager.recover_interrupted() == 0
+
+        metadata = storage.read_metadata(job_id)
+        assert metadata.status == "queued"
+        assert metadata.error is None
+        assert storage.read_logs(job_id) == ""
+
+
+def test_cleanup_if_due_scans_at_most_once_per_interval() -> None:
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        settings = _settings(root, root / "fake-docker")
+        manager = JobManager(settings, Storage(settings))
+        scans = 0
+
+        def count_scan(**_: object) -> int:
+            nonlocal scans
+            scans += 1
+            return 0
+
+        manager.cleanup_expired = count_scan  # type: ignore[method-assign]
+
+        manager.cleanup_if_due()
+        manager.cleanup_if_due()
+        assert scans == 1
+        manager.cleanup_if_due(interval_seconds=0)
+        assert scans == 2
+
+
 def test_recover_interrupted_marks_active_jobs_failed() -> None:
     with TemporaryDirectory() as td:
         root = Path(td)
@@ -533,6 +573,8 @@ def test_recover_interrupted_marks_active_jobs_failed() -> None:
         _prepare_job(storage, job_id)
         paths = storage.paths_for(job_id)
         paths.result_path.write_bytes(b"partial")
+        # start() persists the request before work begins.
+        storage.write_request(job_id, {"job_id": job_id})
         manager = JobManager(settings, storage)
 
         assert manager.recover_interrupted() == 1

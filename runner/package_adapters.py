@@ -57,6 +57,8 @@ LANG_SUFFIXES = {
     ".rs": "Rust",
     ".pas": "Pascal",
 }
+# Characters XML 1.0 cannot represent, even escaped.
+_XML_FORBIDDEN_TEXT = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 LOCAL_INCLUDE_PATTERN = re.compile(r'^\s*#\s*include\s*"([^"\r\n]+)"', re.MULTILINE)
 
 
@@ -423,7 +425,10 @@ def _case_groups_from_hydro(
     for index, raw in enumerate(raw_groups, start=1):
         if not isinstance(raw, dict):
             continue
-        name = str(raw.get("name") or index)
+        # Hydro itself names subtasks by "id" and lists prerequisites under
+        # "if"; "name"/"dependencies" are this converter's older spelling.
+        identity = raw.get("id")
+        name = str(identity if identity is not None else raw.get("name") or index)
         case_names: list[str] = []
         for case in bridge._as_list(raw.get("cases")):
             input_name = (
@@ -436,9 +441,10 @@ def _case_groups_from_hydro(
             key = Path(input_name).as_posix()
             case_names.append(key)
             case_to_group[key] = name
-        dependencies = tuple(
-            str(item) for item in bridge._as_list(raw.get("dependencies"))
-        )
+        raw_dependencies = raw.get("if")
+        if raw_dependencies is None:
+            raw_dependencies = raw.get("dependencies")
+        dependencies = tuple(str(item) for item in bridge._as_list(raw_dependencies))
         groups.append(
             TestGroup(name, tuple(case_names), raw.get("score"), dependencies)
         )
@@ -1663,9 +1669,12 @@ def read_icpc(
                             field="solutions",
                         )
         limits = meta.get("limits") if isinstance(meta.get("limits"), dict) else {}
-        time_seconds = bridge._parse_seconds(
-            limits.get("time_limit", ini.get("timelimit")), default=1
-        )
+        raw_time_limit = limits.get("time_limit", ini.get("timelimit"))
+        timelimit_file = problem_dir / ".timelimit"
+        if raw_time_limit is None and timelimit_file.is_file():
+            # problemtools and DOMjudge keep the limit in this one-line file.
+            raw_time_limit = read_limited_text(timelimit_file, limit=64).strip()
+        time_seconds = bridge._parse_seconds(raw_time_limit, default=1)
         memory_mb = bridge._parse_memory_mb(limits.get("memory", 256), default=256)
         problems.append(
             Problem(
@@ -1859,7 +1868,10 @@ def _program_from_fps(node: Any, kind: str) -> Program | None:
     language = str(child.attrib.get("language") or "") or None
     mapped_kind = "checker" if kind in {"spj", "tpj"} else kind
     return Program(
-        kind=mapped_kind, language=language, mode="testlib", content=child.text
+        kind=mapped_kind,
+        language=language,
+        mode="hustoj" if kind == "spj" else "testlib",
+        content=child.text,
     )  # type: ignore[arg-type]
 
 
@@ -3428,6 +3440,7 @@ def _write_hydro_problem_dir(
     if problem.groups:
         subtasks = []
         grouped_names: set[str] = set()
+        written_groups: list[tuple[TestGroup, dict[str, Any]]] = []
         for group in problem.groups:
             raw_cases = []
             for case_name in group.cases:
@@ -3437,12 +3450,20 @@ def _write_hydro_problem_dir(
                     grouped_names.add(case_name)
             if not raw_cases:
                 continue
-            raw_group: dict[str, Any] = {"cases": raw_cases}
+            # Hydro identifies subtasks by a numeric "id" and reads their
+            # prerequisites from "if"; any other key is ignored on import.
+            raw_group: dict[str, Any] = {"id": len(subtasks) + 1, "cases": raw_cases}
             if group.score is not None:
                 raw_group["score"] = group.score
-            if group.dependencies:
-                raw_group["dependencies"] = list(group.dependencies)
             subtasks.append(raw_group)
+            written_groups.append((group, raw_group))
+        subtask_ids = {group.name: raw["id"] for group, raw in written_groups}
+        for group, raw_group in written_groups:
+            prerequisites = [
+                subtask_ids[name] for name in group.dependencies if name in subtask_ids
+            ]
+            if prerequisites:
+                raw_group["if"] = prerequisites
         config["subtasks"] = subtasks
         ungrouped = [
             entry
@@ -3466,7 +3487,7 @@ def _write_hydro_problem_dir(
             if checker.mode in {"testlib", "custom", "bridged"}
             else checker.mode or "custom"
         )
-        config["checker"] = {"file": checker_name, "lang": "auto"}
+        config["checker"] = checker_name
         if config["checker_type"] == "testlib":
             bridge._copy_packaged_testlib(testdata)
     if problem.interactor is not None:
@@ -3915,8 +3936,16 @@ def write_fps(
         ElementTree.SubElement(item, "remote_id").text = problem.id
         checker = _normalized_checker(bundle, problem)
         if checker is not None:
+            # HUSTOJ calls <spj> as (input, answer, output) and <tpj> in
+            # testlib order (input, output, answer); a testlib checker stored
+            # as <spj> would read the two files swapped.
+            checker_tag = (
+                "tpj"
+                if profile == "hustoj-1.6" and _checker_needs_answer_file(checker)
+                else "spj"
+            )
             ElementTree.SubElement(
-                item, "spj", {"language": checker.language or "C++"}
+                item, checker_tag, {"language": checker.language or "C++"}
             ).text = _program_text(checker)
         if problem.interactor is not None:
             if profile == "qduoj-1.2":
@@ -3961,6 +3990,13 @@ def write_fps(
             ElementTree.SubElement(image, "base64").text = base64.b64encode(
                 data
             ).decode("ascii")
+    for node in root.iter():
+        text = node.text or ""
+        if _XML_FORBIDDEN_TEXT.search(text):
+            raise ValueError(
+                f"FPS XML cannot store control characters found in <{node.tag}>; "
+                "the importing judge would reject the file"
+            )
     output_path = output / "problem.xml"
     xml_body = ElementTree.tostring(root, encoding="utf-8")
     doctype = (
@@ -4304,9 +4340,12 @@ def write_dmoj(
             bridge._zip_dir(data, archive_path)
             config: dict[str, Any] = {"archive": "data.zip", "test_cases": []}
             grouped: set[str] = set()
-            group_positions = {
-                group.name: index for index, group in enumerate(problem.groups, start=1)
-            }
+            # Positions refer to entries actually written to test_cases, so a
+            # group without usable cases must not shift later references.
+            group_positions: dict[str, int] = {}
+            for group in problem.groups:
+                if any(name in case_names for name in group.cases):
+                    group_positions[group.name] = len(group_positions) + 1
             for group in problem.groups:
                 children = []
                 for name in group.cases:
@@ -4321,7 +4360,9 @@ def write_dmoj(
                     entry["points"] = group.score
                 if group.dependencies:
                     entry["dependencies"] = [
-                        group_positions[value] for value in group.dependencies
+                        group_positions[value]
+                        for value in group.dependencies
+                        if value in group_positions
                     ]
                 config["test_cases"].append(entry)
             for case in secret:
@@ -4409,6 +4450,38 @@ def _loss(
     bundle.add_issue("loss", code, message, problem=problem.slug, field=field)
 
 
+def _checker_needs_answer_file(checker: Program | None) -> bool:
+    mode = (checker.mode or "").casefold() if checker is not None else ""
+    return mode in {"testlib", "bridged"} or mode.startswith("uoj-builtin:")
+
+
+def _qduoj_checker_protocol_loss(bundle: ProblemBundle, problem: Problem) -> None:
+    if _checker_needs_answer_file(problem.checker):
+        _loss(
+            bundle,
+            problem,
+            "qduoj-checker-protocol",
+            "QDUOJ runs a special judge with only the input and the contestant output; "
+            "this testlib-style checker also needs the answer file and must be rewritten after import",
+            "checker",
+        )
+
+
+def _validate_hustoj_checker_target(
+    bundle: ProblemBundle, problem: Problem, target: str
+) -> None:
+    if problem.checker is not None and problem.checker.mode == "hustoj":
+        bundle.add_issue(
+            "fatal",
+            "hustoj-checker-protocol",
+            f"{target} output cannot run a HUSTOJ native checker with "
+            "(input, answer, contestant output) arguments; convert to Hydro "
+            "or HUSTOJ FPS, or port the checker to the target protocol",
+            problem=problem.slug,
+            field="checker",
+        )
+
+
 def _validate_hydro_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     return None
 
@@ -4416,6 +4489,7 @@ def _validate_hydro_target(bundle: ProblemBundle, options: dict[str, Any]) -> No
 def _validate_icpc_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     profile = str(options.get("profile") or "legacy-icpc")
     for problem in bundle.problems:
+        _validate_hustoj_checker_target(bundle, problem, "ICPC")
         if problem.groups or any(
             case.score is not None for case in problem.cases if not case.sample
         ):
@@ -4462,6 +4536,7 @@ def _validate_icpc_target(bundle: ProblemBundle, options: dict[str, Any]) -> Non
 
 def _validate_hoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     for problem in bundle.problems:
+        _validate_hustoj_checker_target(bundle, problem, "HOJ")
         has_pdf = any(statement.format == "pdf" for statement in problem.statements)
         has_text = any(
             statement.format in {"markdown", "html"} for statement in problem.statements
@@ -4589,6 +4664,9 @@ def _validate_fps_target(bundle: ProblemBundle, options: dict[str, Any]) -> None
                 "FPS output keeps only one statement language",
                 "statements",
             )
+        if profile == "qduoj-1.2":
+            _validate_hustoj_checker_target(bundle, problem, "QDUOJ FPS")
+            _qduoj_checker_protocol_loss(bundle, problem)
         if profile == "qduoj-1.2" and problem.interactor:
             bundle.add_issue(
                 "fatal",
@@ -4601,6 +4679,8 @@ def _validate_fps_target(bundle: ProblemBundle, options: dict[str, Any]) -> None
 
 def _validate_qduoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     for problem in bundle.problems:
+        _validate_hustoj_checker_target(bundle, problem, "QDUOJ")
+        _qduoj_checker_protocol_loss(bundle, problem)
         if problem.problem_type == "interactive" or problem.interactor:
             bundle.add_issue(
                 "fatal",
@@ -4637,6 +4717,18 @@ def _validate_qduoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> No
 
 def _validate_uoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     for problem in bundle.problems:
+        _validate_hustoj_checker_target(bundle, problem, "UOJ")
+        if problem.time_ms % 1000:
+            _loss(
+                bundle,
+                problem,
+                "uoj-time-limit-rounded",
+                (
+                    f"UOJ problem.conf stores whole seconds; {problem.time_ms} ms "
+                    f"was rounded up to {(problem.time_ms + 999) // 1000} s"
+                ),
+                "time_ms",
+            )
         if problem.problem_type == "interactive" or problem.interactor:
             bundle.add_issue(
                 "fatal",
@@ -4689,6 +4781,7 @@ def _validate_uoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None
 
 def _validate_dmoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     for problem in bundle.problems:
+        _validate_hustoj_checker_target(bundle, problem, "DMOJ")
         for program in (_normalized_dmoj_checker(bundle, problem), problem.interactor):
             if program is None:
                 continue

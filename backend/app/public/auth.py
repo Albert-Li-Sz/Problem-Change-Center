@@ -10,6 +10,7 @@ import ssl
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 
 from argon2 import PasswordHasher
@@ -55,6 +56,10 @@ def password_matches(hashed: str, password: str) -> bool:
 class Auth:
     def __init__(self, db: Database, config: PublicConfig):
         self.db, self.config = db, config
+        # Mail is sent after the response: a synchronous SMTP exchange made
+        # requests for registered addresses measurably slower than for unknown
+        # ones, revealing which addresses have accounts.
+        self._mailer = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mail")
 
     def captcha(self, token: str, ip: str):
         if self.config.development:
@@ -113,6 +118,9 @@ class Auth:
         mail.set_content(
             f"请打开以下链接继续操作：\n{link}\n\n链接有效期：{ttl // 60} 分钟。若不是您操作，请忽略。"
         )
+        self._mailer.submit(self._deliver, mail)
+
+    def _deliver(self, mail: EmailMessage):
         try:
             context = ssl.create_default_context()
             if self.config.smtp_port == 465:

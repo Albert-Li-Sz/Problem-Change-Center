@@ -318,6 +318,8 @@ def _write_hoj_as_hydro(
     verbose: bool,
 ) -> None:
     pdoc = item.problem
+    judge_case_mode = str(pdoc.get("judgeCaseMode") or "default")
+    _ensure_supported_hoj_case_mode(judge_case_mode)
     title = str(pdoc.get("title") or pdoc.get("problemId") or item.key)
     tags = _string_list(item.document.get("tags"))
     for tag in extra_tags:
@@ -387,9 +389,7 @@ def _write_hoj_as_hydro(
     if copied_judge:
         config["judge_extra_files"] = copied_judge
 
-    _apply_hoj_case_config(
-        config, copied_cases, str(pdoc.get("judgeCaseMode") or "default")
-    )
+    _apply_hoj_case_config(config, copied_cases, judge_case_mode)
     (testdata_dir / "config.yaml").write_text(
         bridge._dump_yaml(config), encoding="utf-8"
     )
@@ -460,10 +460,21 @@ def _copy_hoj_cases(cases: list[HojCase], testdata_dir: Path) -> list[dict[str, 
     return result
 
 
+def _ensure_supported_hoj_case_mode(judge_case_mode: str) -> None:
+    if judge_case_mode == "subtask_average":
+        raise ValueError(
+            "HOJ subtask_average scoring is unsupported: HOJ rounds each group's "
+            "average to the nearest integer; Hydro min/sum subtasks cannot "
+            "preserve this rule. Export with a supported scoring mode or "
+            "implement an equivalent grader before conversion."
+        )
+
+
 def _apply_hoj_case_config(
     config: dict[str, Any], cases: list[dict[str, Any]], judge_case_mode: str
 ) -> None:
-    grouped = judge_case_mode in {"subtask_lowest", "subtask_average"} and any(
+    _ensure_supported_hoj_case_mode(judge_case_mode)
+    grouped = judge_case_mode == "subtask_lowest" and any(
         case.get("group_num") is not None for case in cases
     )
     if grouped:

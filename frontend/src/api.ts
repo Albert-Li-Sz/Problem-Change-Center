@@ -439,6 +439,20 @@ function downloadFilename(response: Response, jobId: string): string {
 }
 
 export async function downloadJob(jobId: string): Promise<void> {
+  if (publicMode) {
+    // The session cookie authenticates a plain navigation, so the browser can
+    // stream the archive to disk instead of holding up to 1 GiB in memory.
+    const probe = await apiFetch(`/api/jobs/${jobId}`);
+    if (!probe.ok) throw new Error(await responseErrorMessage(probe));
+    const link = document.createElement("a");
+    link.href = apiUrl(`/api/jobs/${jobId}/download`);
+    link.download = "";
+    link.style.display = "none";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    return;
+  }
   const response = await apiFetch(`/api/jobs/${jobId}/download`);
   if (!response.ok) throw new Error(await responseErrorMessage(response));
   const objectUrl = URL.createObjectURL(await response.blob());

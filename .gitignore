@@ -21,3 +21,5 @@ __pycache__/
 .env.public
 .public-dev/
 .coverage
+*.swp
+*.swo

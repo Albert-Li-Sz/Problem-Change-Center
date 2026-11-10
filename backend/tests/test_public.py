@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg import sql
 
@@ -434,7 +435,10 @@ def test_upload_admission_precedes_multipart_parsing_and_releases_on_error(site)
     client, app, _ = site
     owner = register(site)
     first = app.state.queue.create_upload(owner["id"], "one.zip")
-    second = app.state.queue.create_upload(owner["id"], "two.zip")
+    # One account may hold only one of the site's upload slots.
+    with pytest.raises(HTTPException) as refused:
+        app.state.queue.create_upload(owner["id"], "two.zip")
+    assert refused.value.status_code == 429
     # Even an invalid multipart body must be rejected by admission first.
     response = client.post(
         "/api/inspect",
@@ -443,7 +447,6 @@ def test_upload_admission_precedes_multipart_parsing_and_releases_on_error(site)
     )
     assert response.status_code == 429
     app.state.queue.abandon_upload(first)
-    app.state.queue.abandon_upload(second)
     assert client.post("/api/inspect", json={}).status_code == 422
     assert (
         app.state.db.one("SELECT count(*) AS n FROM jobs WHERE status='uploading'")["n"]

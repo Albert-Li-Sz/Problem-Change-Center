@@ -192,7 +192,7 @@ exit 1
     fake_docker.chmod(fake_docker.stat().st_mode | 0o100)
     environment = os.environ.copy()
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
-    image = "ghcr.io/lmtinsuzhou/p2h-runner@sha256:" + "a" * 64
+    image = "ghcr.io/albert-li-sz/p2h-runner@sha256:" + "a" * 64
 
     completed = subprocess.run(
         [

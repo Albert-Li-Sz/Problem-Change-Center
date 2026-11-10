@@ -24,7 +24,9 @@
         reverse_proxy api:8000 {
             flush_interval -1
             transport http {
-                read_timeout 10m
+                # Also bounds an upload: the API sends nothing until the body
+                # has arrived, so a shorter value cuts off slow connections.
+                read_timeout 30m
             }
         }
     }

@@ -158,6 +158,11 @@ def _runner_image_for_request(image: str, request: JobRequest) -> str:
         return image
 
     prefix, name, suffix = _split_image_name(image)
+    if suffix.startswith("@"):
+        # A digest identifies the Wine image only; the plain runner has a
+        # different digest that cannot be derived from it. The Wine image
+        # contains the full converter, so keep using it.
+        return image
     if name.endswith("-wine"):
         return f"{prefix}{name.removesuffix('-wine')}{suffix}"
     return image

@@ -79,7 +79,7 @@ class PublicConfig:
             max_upload_bytes=self.max_upload,
             job_timeout_seconds=1800,
             job_ttl_seconds=86400,
-            docker_memory="2g",
+            docker_memory="4g",
             docker_cpus="2",
             docker_pids_limit=512,
             docker_wine_pids_limit=1024,

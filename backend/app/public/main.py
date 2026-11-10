@@ -125,7 +125,7 @@ def create_app(config: PublicConfig | None = None) -> FastAPI:
 
     app = FastAPI(
         title="题包转换公益站",
-        version="0.7.0",
+        version="0.7.1",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -231,8 +231,10 @@ def create_app(config: PublicConfig | None = None) -> FastAPI:
     def auth_limit(request, email, action, captcha):
         ip = request.client.host if request.client else "unknown"
         db.rate_limit(f"auth:{action}:ip:{ip}", 10, 600)
-        db.rate_limit(f"auth:{action}:email:{email.strip().lower()}", 5, 600)
+        # Verify the captcha before counting against the address, so requests
+        # that never passed it cannot lock somebody else's account out.
         auth.captcha(captcha, ip)
+        db.rate_limit(f"auth:{action}:email:{email.strip().lower()}", 5, 600)
 
     def job_response(row):
         value = (
@@ -547,15 +549,12 @@ def create_app(config: PublicConfig | None = None) -> FastAPI:
             derived_id, payload = await storage().create_repair_job(
                 job_id, repair, files or [], reserved_job_id=reserved_id
             )
-            with db.connect() as conn:
-                conn.execute(
-                    "UPDATE jobs SET status='uploaded',filename=%s,size=%s WHERE id=%s",
-                    (
-                        storage().read_metadata(derived_id).filename,
-                        storage().read_metadata(derived_id).size,
-                        reserved_id,
-                    ),
-                )
+            derived = await run_in_threadpool(storage().read_metadata, derived_id)
+            await run_in_threadpool(
+                db.execute,
+                "UPDATE jobs SET status='uploaded',filename=%s,size=%s WHERE id=%s",
+                (derived.filename, derived.size, reserved_id),
+            )
             return await run_in_threadpool(
                 submit_request, JobRequest.model_validate(payload), request
             )
@@ -583,7 +582,9 @@ def create_app(config: PublicConfig | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel(job_id: str, request: Request):
-        queue.owned(job_id, user(request)["id"])
+        row = queue.owned(job_id, user(request)["id"])
+        if row["status"] in {"success", "failed", "cancelled"}:
+            raise HTTPException(409, "任务已结束，无法取消")
         queue.cancel(job_id)
         return {"id": job_id, "status": "cancelled", "deleted": False}
 

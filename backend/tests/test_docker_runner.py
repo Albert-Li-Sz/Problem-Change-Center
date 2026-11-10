@@ -5,7 +5,12 @@ from tempfile import TemporaryDirectory
 import pytest
 from app.config import Settings
 
-from app.docker_runner import build_docker_command, pack_output, parse_size_bytes
+from app.docker_runner import (
+    _runner_image_for_request,
+    build_docker_command,
+    pack_output,
+    parse_size_bytes,
+)
 from app.schemas import JobRequest
 from app.storage import JobPaths
 
@@ -107,6 +112,17 @@ def test_wine_runner_requests_amd64_platform() -> None:
     assert "WINEPREFIX=/home/app/.wine" in cmd
     assert "XDG_CACHE_HOME=/home/app/.cache" in cmd
     assert "XDG_CACHE_HOME=/work/.cache" not in cmd
+
+
+def test_non_polygon_request_keeps_digest_pinned_wine_image() -> None:
+    request = JobRequest(job_id="a" * 32, source_format="hydro", target_format="icpc")
+    pinned = "registry.example.com/p2h-runner-wine@sha256:" + "a" * 64
+
+    assert _runner_image_for_request(pinned, request) == pinned
+    assert (
+        _runner_image_for_request("registry.example.com/p2h-runner-wine:main", request)
+        == "registry.example.com/p2h-runner:main"
+    )
 
 
 def test_wine_runner_digest_image_requests_amd64_platform() -> None:

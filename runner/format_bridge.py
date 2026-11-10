@@ -18,6 +18,9 @@ from package_security import load_yaml_file
 
 IN_SUFFIXES = {".in", ".input"}
 OUT_SUFFIXES = {".ans", ".out", ".output"}
+# Fixed preference when several outputs share an input's stem; iterating the
+# set above would make the choice depend on the interpreter's hash seed.
+OUT_SUFFIX_ORDER = (".ans", ".out", ".output")
 SOURCE_SUFFIXES = {
     ".c",
     ".cc",
@@ -209,7 +212,7 @@ def _write_hydro_problem(
     }
     if checker is not None:
         config["checker_type"] = "testlib"
-        config["checker"] = {"file": checker, "lang": "auto"}
+        config["checker"] = checker
     config["cases"] = [
         {"input": input_name, "output": output_name}
         for input_name, output_name in copied_cases
@@ -1023,7 +1026,7 @@ def _hydro_cases_from_config(
         if isinstance(case, str):
             input_name = case
             output_name = _find_matching_output_name(testdata_dir, input_name)
-            sample = "sample" in input_name.lower()
+            sample = False
             score = inherited_score
         elif isinstance(case, dict):
             input_name = _first_string(case, "input", "in", "inputFile", "stdin")
@@ -1045,9 +1048,7 @@ def _hydro_cases_from_config(
         output_path = _safe_join(testdata_dir, output_name)
         if input_path.exists() and output_path.exists():
             name = _safe_name(Path(input_name).stem)
-            result.append(
-                CaseFile(input_path, output_path, name, sample or score == 0, score)
-            )
+            result.append(CaseFile(input_path, output_path, name, sample, score))
     return result
 
 
@@ -1132,11 +1133,11 @@ def _scan_example_pairs(root: Path) -> list[CaseFile]:
 
 
 def _find_matching_output_path(input_path: Path) -> Path | None:
-    for suffix in OUT_SUFFIXES:
+    for suffix in OUT_SUFFIX_ORDER:
         candidate = input_path.with_suffix(suffix)
         if candidate.exists():
             return candidate
-    for suffix in OUT_SUFFIXES:
+    for suffix in OUT_SUFFIX_ORDER:
         candidate = input_path.parent / f"{input_path.stem}{suffix}"
         if candidate.exists():
             return candidate

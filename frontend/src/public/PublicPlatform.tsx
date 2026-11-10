@@ -153,8 +153,10 @@ export function PublicPlatform() {
     </header>
     {loading ? <main className="public-card">正在连接站点…</main> : <>
       {(error || message) && <div role={error ? "alert" : "status"} className={`public-notice ${error ? "error" : ""}`}>{error || message}</div>}
-      {screen === "terms" ? <><Terms contact={config?.contact_email ?? ""} /><button className="public-back" onClick={() => setScreen("convert")}>返回</button></> : !user || mode === "verify" || mode === "reset" ?
-        <main className="public-auth"><section className="public-intro"><span className="public-eyebrow">FREE · COMMUNITY</span><h1>让题包<br />自由转换。</h1><p>连接 Polygon、Hydro、DOMjudge 等 OJ 格式。<br />上传、转换、下载，保留你的出题工作流。</p><div className="public-points"><span><Shield size={18} />题包仅自己可见</span><span><Clock size={18} />文件保留 24 小时</span><span><Archive size={18} />完全免费</span></div></section>
+      {screen === "terms" && <><Terms contact={config?.contact_email ?? ""} /><button className="public-back" onClick={() => setScreen("convert")}>返回</button></>}
+      {!user || mode === "verify" || mode === "reset" ?
+        /* Stay mounted behind the terms so a half-filled registration form survives. */
+        <main className="public-auth" style={screen === "terms" ? { display: "none" } : undefined}><section className="public-intro"><span className="public-eyebrow">FREE · COMMUNITY</span><h1>让题包<br />自由转换。</h1><p>连接 Polygon、Hydro、DOMjudge 等 OJ 格式。<br />上传、转换、下载，保留你的出题工作流。</p><div className="public-points"><span><Shield size={18} />题包仅自己可见</span><span><Clock size={18} />文件保留 24 小时</span><span><Archive size={18} />完全免费</span></div></section>
           <section className="public-card public-login"><h2>{title}</h2><p>{mode === "register" ? "准备好邀请码，验证邮箱后即可使用。" : "使用邮箱登录，继续你的转换任务。"}</p>
             <form onSubmit={(event) => void authenticate(event)}>
               {!["verify", "reset"].includes(mode) && <label>邮箱<input name="email" type="email" autoComplete="email" required maxLength={254} /></label>}
@@ -165,7 +167,7 @@ export function PublicPlatform() {
             </form>
             <div className="public-auth-links"><button onClick={() => changeMode(mode === "register" ? "login" : "register")}>{mode === "register" ? "已有账号，登录" : "使用邀请码注册"}</button><button onClick={() => changeMode("forgot")}>忘记密码</button><button onClick={() => changeMode("resend")}>重发验证邮件</button>{mode !== "login" && <button onClick={() => changeMode("login")}>返回登录</button>}</div>
           </section></main>
-        : <>
+        : screen !== "terms" && <>
           <nav className="public-nav" aria-label="平台导航">{([["convert", "新建转换"], ["history", "任务历史"], ["account", "账号设置"], ...(user.is_admin ? [["admin", "管理后台"]] : [])] as [Screen, string][]).map(([key, text]) => <button className={screen === key ? "selected" : ""} key={key} onClick={() => { setScreen(key); if (key === "convert") setSelectedJob(undefined); }}>{text}</button>)}<span className="public-quota">今日剩余 <strong>{user.quota?.remaining ?? "–"}</strong> 分钟 · 已预留 {user.quota?.reserved ?? 0} 分钟</span></nav>
           {screen === "convert" && <App key={selectedJob ?? "new"} initialJobId={selectedJob} />}
           {screen === "history" && <main className="public-card public-wide"><div className="public-section-title"><h2>任务历史</h2><button onClick={() => void action(refreshHistory)}>刷新</button></div><p>检查与转换都进入队列。文件自动保留 24 小时，额度每日 UTC 00:00 重置。</p>{!history.length && <div className="public-empty"><Archive size={32} /><p>还没有任务，创建一次转换开始吧。</p></div>}

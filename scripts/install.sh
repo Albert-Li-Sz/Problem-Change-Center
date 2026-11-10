@@ -4,8 +4,8 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 DEFAULT_PYTHON_BASE_IMAGE="python:3.14-slim-trixie"
-DEFAULT_PREBUILT_RUNNER_IMAGE="ghcr.io/lmtinsuzhou/p2h-runner:main"
-DEFAULT_PREBUILT_WINE_IMAGE="ghcr.io/lmtinsuzhou/p2h-runner-wine:main"
+DEFAULT_PREBUILT_RUNNER_IMAGE="ghcr.io/albert-li-sz/p2h-runner:main"
+DEFAULT_PREBUILT_WINE_IMAGE="ghcr.io/albert-li-sz/p2h-runner-wine:main"
 PYTHON_BASE_IMAGE="${P2H_PYTHON_BASE_IMAGE:-$DEFAULT_PYTHON_BASE_IMAGE}"
 PYTHON_BASE_IMAGE_EXPLICIT=0
 if [[ -n "${P2H_PYTHON_BASE_IMAGE:-}" ]]; then
@@ -105,7 +105,7 @@ Examples:
   P2H_ACCESS_KEY='a-long-random-key' ./install.sh --non-interactive \
     --external --site-address convert.example.com
   ./install.sh --wine
-  ./install.sh --runner-image ghcr.io/lmtinsuzhou/p2h-runner:main
+  ./install.sh --runner-image ghcr.io/albert-li-sz/p2h-runner:main
   ./install.sh --skip-runner
   ./install.sh --base-image registry.example.com/library/python:3.14-slim-trixie
   ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
@@ -976,7 +976,7 @@ P2H_MAX_CONCURRENT_JOBS=2
 P2H_MAX_STORED_JOBS=100
 P2H_MAX_STORAGE_BYTES=10737418240
 P2H_MAX_LOG_BYTES=10485760
-P2H_DOCKER_MEMORY=1g
+P2H_DOCKER_MEMORY=3g
 P2H_DOCKER_CPUS=2
 P2H_DOCKER_PIDS_LIMIT=1024
 P2H_DOCKER_WINE_PIDS_LIMIT=4096

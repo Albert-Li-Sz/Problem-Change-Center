@@ -66,7 +66,7 @@ sudo -u ojconverter -H docker info
 
 ```bash
 sudo -u ojconverter -H git clone \
-  https://github.com/LMTINSUZHOU/Problem-Change-Center.git \
+  https://github.com/Albert-Li-Sz/Problem-Change-Center.git \
   /opt/oj-package-converter
 cd /opt/oj-package-converter
 sudo -u ojconverter -H ./install.sh --interactive \

@@ -12,6 +12,7 @@ import {
   inspectZip,
   InspectResult,
   JobResponse,
+  publicMode,
   SourceFormat,
   startJob,
   TargetFormat
@@ -98,7 +99,9 @@ export default function App({ initialJobId }: { initialJobId?: string } = {}) {
   }, [initialJobId]);
 
   const isRunning = job?.status === "queued" || job?.status === "running";
-  const canStart = Boolean(inspect && file && inspectedFile === file) && !isRunning && !busy && !resetting;
+  // The public queue converts each upload once; a finished task needs a new upload.
+  const publicTaskFinished = publicMode && Boolean(job) && !isRunning;
+  const canStart = Boolean(inspect && file && inspectedFile === file) && !isRunning && !busy && !resetting && !publicTaskFinished;
   const effectiveSource = sourceFormat === "auto" ? inspect?.detected_format ?? null : sourceFormat;
   const sourceFormatOverride = Boolean(
     inspect &&
@@ -235,6 +238,9 @@ export default function App({ initialJobId }: { initialJobId?: string } = {}) {
       });
       if (requestEpoch.current !== epoch) return;
       setJob(nextJob);
+      // A restarted job reuses its id; drop the previous run's output.
+      setLogs("");
+      setReport(null);
     } catch (err) {
       if (requestEpoch.current !== epoch) return;
       setError(err instanceof Error ? err.message : "任务启动失败");
@@ -860,6 +866,7 @@ export default function App({ initialJobId }: { initialJobId?: string } = {}) {
             )}
 
             {validation && <div className="inline-error" role="alert">{validation}</div>}
+            {publicTaskFinished && <div className="format-note">该任务已结束。如需再次转换，请重新上传题包。</div>}
 
             <button className="primary-button wide" type="submit" disabled={!canStart || Boolean(validation)}>
               <Shield size={17} aria-hidden="true" />

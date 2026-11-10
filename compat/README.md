@@ -20,3 +20,13 @@ environment 注入，不得写入 fixture、日志或转换报告。平台启动
 导入失败必须分开报告。
 
 兼容语料应为原创最小题或具有明确再分发许可的题包，不提交真实比赛私有数据。
+
+本地语义回归位于 `backend/tests/test_adapter_semantics.py`，覆盖 FPS 特判协议、
+Hydro 零分评测点与 `id: 0` 依赖，以及 HOJ 平均分模式的显式拒绝。依据为：
+
+- [HUSTOJ FPS 导出实现](https://github.com/zhblue/hustoj/blob/11085130b1c0ee8a4e2dcf84c7a1e10023c2cf04/trunk/web/admin/problem_export_xml.php)：区分 `<spj>` 与 `<tpj>`。
+- [Hydro checker 实现](https://github.com/hydro-dev/Hydro/blob/2267ac9984bf2a03311b765d1b1928f9f4cc2bd8/packages/hydrojudge/src/checkers.ts)：原生 `hustoj` 协议使用输入、标准答案、选手输出的参数顺序。
+- [Hydro 配置读取实现](https://github.com/hydro-dev/Hydro/blob/2267ac9984bf2a03311b765d1b1928f9f4cc2bd8/packages/utils/lib/cases.ts)：`checker` 必须是文件路径字符串，不能写为 `file`/`lang` 对象。
+- [HOJ 计分实现](https://github.com/HimitZH/HOJ/blob/9a65e3f24e81ed76cc1aa1c06da68262434eaadd/hoj-springboot/JudgeServer/src/main/java/top/hcode/hoj/judge/JudgeStrategy.java)：`subtask_average` 对每组测试点的得分求平均，再用 `Math.round` 取整。
+
+以上是上游源码核对和本地转换测试，不等同于真实 OJ 实例的导入、提交验收。

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import logging
@@ -31,6 +32,64 @@ STOP = threading.Event()
 TMP_MOUNT = "/tmp:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=700"  # nosec B108
 
 
+_MARKERS = ("P2H_EVENT ", "P2H_PUBLIC_DONE ")
+_DONE_RE = re.compile(r"P2H_PUBLIC_DONE (-?\d+)\r?\n")
+# Lease lasts 30 seconds; tolerate database errors for less than that.
+LEASE_GRACE_SECONDS = 20
+
+
+class RunnerOutput:
+    """Split the runner stream into user-visible log text and control lines.
+
+    Decoding is incremental so multi-byte characters split across reads stay
+    intact. Progress events and the completion marker are consumed here instead
+    of being written to the log the user reads.
+    """
+
+    def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._buffer = ""
+        self._midline = False
+
+    def feed(self, data: bytes) -> tuple[str, list[str], int | None]:
+        self._buffer += self._decoder.decode(data)
+        visible: list[str] = []
+        events: list[str] = []
+        code: int | None = None
+        while (end := self._buffer.find("\n")) >= 0:
+            line, self._buffer = self._buffer[: end + 1], self._buffer[end + 1 :]
+            if self._midline:
+                # Tail of a line whose start was already written to the log.
+                self._midline = False
+                visible.append(line)
+            elif line.startswith("P2H_EVENT "):
+                if len(line) <= 8192:
+                    events.append(line)
+            elif done := _DONE_RE.fullmatch(line):
+                code = int(done[1])
+            else:
+                visible.append(line)
+        # Show output that has no newline yet (prompts, progress dots) unless it
+        # may still turn out to be a control line.
+        if self._buffer and (
+            self._midline
+            or len(self._buffer) > 8192
+            or not any(
+                self._buffer.startswith(marker) or marker.startswith(self._buffer)
+                for marker in _MARKERS
+            )
+        ):
+            visible.append(self._buffer)
+            self._buffer = ""
+            self._midline = True
+        return "".join(visible), events, code
+
+    def flush(self) -> str:
+        rest = self._buffer + self._decoder.decode(b"", final=True)
+        self._buffer = ""
+        return rest
+
+
 def disk_percent(path: Path) -> int:
     usage = shutil.disk_usage(path)
     return round(usage.used * 100 / usage.total)
@@ -38,6 +97,21 @@ def disk_percent(path: Path) -> int:
 
 def docker(*args, **kwargs):
     return subprocess.run(["docker", *args], check=True, timeout=30, **kwargs)  # nosec B603 B607
+
+
+def oom_killed(name: str) -> bool:
+    try:
+        state = docker(
+            "inspect",
+            "--format",
+            "{{.State.OOMKilled}}",
+            name,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return state.stdout.decode().strip() == "true"
 
 
 def container_name(row):
@@ -54,7 +128,9 @@ def command(config: PublicConfig, row, storage: Storage) -> list[str]:
     paths = storage.paths_for(row["id"])
     wine = row["wine"]
     image = config.wine_image if wine else config.runner_image
-    memory = "4g" if wine else "2g"
+    # tmpfs pages are charged to the container, so the limit has to cover the
+    # work, output and home mounts as well as the converter itself.
+    memory = "6g" if wine else "4g"
     home_size = "2g" if wine else "1g"
     cmd = [
         "docker",
@@ -249,6 +325,21 @@ class Worker:
         metadata.status, metadata.started_at = "running", utc_now_iso()
         self.storage.write_metadata(metadata)
         outcome, error = "failed", None
+        renewed_at = time.monotonic()
+
+        def renew():
+            """Renew the lease, riding out database errors shorter than it."""
+            nonlocal renewed_at
+            try:
+                lease = self.queue.heartbeat(job_id, row["lease_token"])
+            except Exception:
+                if time.monotonic() - renewed_at > LEASE_GRACE_SECONDS:
+                    raise
+                LOGGER.warning("lease_renewal_failed_retrying")
+                return {"cancel_requested": False, "delete_requested": False}
+            renewed_at = time.monotonic()
+            return lease
+
         try:
             if row["kind"] == "convert":
                 self.storage.write_request(job_id, row["request"])
@@ -263,7 +354,7 @@ class Worker:
             )
             selector = selectors.DefaultSelector()
             selector.register(process.stdout, selectors.EVENT_READ)
-            pending = ""
+            output = RunnerOutput()
             next_beat = 0.0
             next_progress = 0.0
             progress_manager = JobManager(self.config.storage_settings(), self.storage)
@@ -278,7 +369,7 @@ class Worker:
                             else "任务超过运行时间上限"
                         )
                     if now >= next_beat:
-                        lease = self.queue.heartbeat(job_id, row["lease_token"])
+                        lease = renew()
                         if (
                             not lease
                             or lease["cancel_requested"]
@@ -291,39 +382,32 @@ class Worker:
                         chunk = os.read(key.fileobj.fileno(), 65536)
                         if not chunk:
                             raise RuntimeError("Docker runner 意外退出")
-                        text = chunk.decode("utf-8", errors="replace")
-                        self.storage.append_log(job_id, text)
-                        pending = (pending + text)[-131072:]
-                        if now >= next_progress:
-                            lines = pending.splitlines()
-                            for line in reversed(
-                                lines[:-1] if not pending.endswith("\n") else lines
-                            ):
-                                if line.startswith("P2H_EVENT ") and len(line) <= 8192:
-                                    progress_manager._handle_progress_line(job_id, line)
-                                    next_progress = now + 0.5
-                                    break
-                        match = re.search(
-                            r"(?:^|\n)P2H_PUBLIC_DONE (-?\d+)\r?\n", pending
-                        )
-                        if match:
-                            code = int(match[1])
+                        text, events, done = output.feed(chunk)
+                        if text:
+                            self.storage.append_log(job_id, text)
+                        if events and now >= next_progress:
+                            progress_manager._handle_progress_line(job_id, events[-1])
+                            next_progress = now + 0.5
+                        if done is not None:
+                            code = done
                     if process.poll() is not None and code is None:
                         raise RuntimeError("Docker runner 启动失败，请联系管理员")
             finally:
                 selector.close()
+                if rest := output.flush():
+                    self.storage.append_log(job_id, rest)
 
             # Docker's archive endpoint cannot read tmpfs. The read-only exporter
             # terminates descendants and streams a bounded archive instead.
             def export_check():
                 if STOP.is_set() or time.monotonic() >= deadline:
                     raise RuntimeError("输出导出超时或任务停止")
-                current_lease = self.queue.heartbeat(job_id, row["lease_token"])
+                current_lease = renew()
                 if not current_lease or current_lease["cancel_requested"]:
                     raise RuntimeError("任务已取消或执行租约失效")
 
             collect_output(name, paths.output_dir, check=export_check)
-            lease = self.queue.heartbeat(job_id, row["lease_token"])
+            lease = renew()
             if not lease or lease["cancel_requested"]:
                 raise RuntimeError("任务已取消")
             metadata.exit_code = code
@@ -375,7 +459,7 @@ class Worker:
                     if now >= deadline or STOP.is_set():
                         raise RuntimeError("打包超时或任务停止")
                     if now >= next_beat:
-                        lease = self.queue.heartbeat(job_id, row["lease_token"])
+                        lease = renew()
                         if not lease or lease["cancel_requested"]:
                             raise RuntimeError("任务已取消")
                         next_beat = now + 2
@@ -398,6 +482,9 @@ class Worker:
                 outcome = "success"
         except Exception as exc:
             error = str(exc)[:2048]
+            # The container still exists here; it is removed in finally.
+            if oom_killed(name):
+                error = "任务超出内存上限；题包数据过大，请拆分后重试"
             self.storage.append_log(job_id, f"\n{error}\n")
         finally:
             try:
@@ -423,7 +510,7 @@ class Worker:
             metadata.error = error
             metadata.finished_at = utc_now_iso()
             self.storage.write_metadata(metadata)
-            if self.queue.finish(job_id, row["lease_token"], outcome, error):
+            if self._finish(job_id, row["lease_token"], outcome, error):
                 row = self.db.one("SELECT * FROM jobs WHERE id=%s", (job_id,))
                 metadata.status = (
                     "queued" if row["status"] == "uploaded" else row["status"]
@@ -435,6 +522,18 @@ class Worker:
                     paths.result_path.unlink(missing_ok=True)
                 shutil.rmtree(paths.output_dir, ignore_errors=True)
                 paths.output_dir.mkdir(mode=0o700)
+
+    def _finish(self, job_id, token, outcome, error):
+        # The result is already on disk; a brief database outage should not
+        # turn it into "Worker 中断" when the lease reaper runs later.
+        for attempt in range(5):
+            try:
+                return self.queue.finish(job_id, token, outcome, error)
+            except Exception:
+                if attempt == 4:
+                    raise
+                LOGGER.warning("job_settlement_failed_retrying")
+                time.sleep(2)
 
     def reap_finished_containers(self):
         # A temporary daemon outage may have prevented run_job's final rm.

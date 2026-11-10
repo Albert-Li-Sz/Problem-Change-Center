@@ -1,6 +1,6 @@
 # 公益公众版：单机 Docker 部署
 
-邀请码 + 邮箱验证的免费公众站，由 Caddy、API、PostgreSQL、Worker 和临时 Docker runner 组成。API 不挂载 Docker Socket，Worker 无法通过数据库账号读取密码、邮件和会话。使用专用 Linux x86_64 主机，建议 24 vCPU、64 GiB 内存和 500 GiB 磁盘。全局 10 并发，其中 Wine 最多 3 并发。
+邀请码 + 邮箱验证的免费公众站，由 Caddy、API、PostgreSQL、Worker 和临时 Docker runner 组成。API 不挂载 Docker Socket，Worker 无法通过数据库账号读取密码、邮件和会话。使用专用 Linux x86_64 主机，建议 24 vCPU、64 GiB 内存和 500 GiB 磁盘。全局 10 并发，其中 Wine 最多 3 并发。单个任务的内存上限为 4 GiB（Wine 为 6 GiB），tmpfs 中的数据计入其中；满负载最坏情况约占 46 GiB，并发数固定在代码中，不建议使用内存更小的主机。
 
 公众代码使用非 root、默认 seccomp/AppArmor、禁网、只读根目录、零 capability、内存/PID/CPU 限额的普通 Docker。Docker 与宿主共享内核，本方案按项目决定接受该隔离边界；主机不应存放其他业务或无关凭据。
 
@@ -50,9 +50,9 @@ docker compose --env-file .env.public -f docker-compose.public.yml run --rm api 
 
 ## 额度与数据
 
-- 每人最多运行 2 个、排队 5 个、同时上传 2 个任务，最多保留 20 个任务。全站同时接收 2 个上传，解析请求体之前预占名额，避免临时文件挤满内存。
+- 每人最多运行 2 个、排队 5 个、同时上传 1 个任务，最多保留 20 个任务。全站同时接收 2 个上传，解析请求体之前预占名额，避免临时文件挤满内存。
 - 每日 120 分钟，UTC 00:00 重置；检查预留 1 分钟，转换预留 30 分钟。实际运行时间（含失败）向上取整，结束后退回未用额度；排队取消不消耗额度，跨午夜结算回提交日。这仅用于公平分配资源，不涉及收费。
-- 上传最大 512 MiB；检查最长 60 秒，转换最长 30 分钟；输出最大 1 GiB，日志最大 10 MiB。
+- 上传最大 512 MiB，单次上传须在 30 分钟内完成（满额文件约需 2.3 Mbps 上行）；检查最长 60 秒，转换最长 30 分钟；输出最大 1 GiB，日志最大 10 MiB。
 - 输入、补充文件、报告、日志、结果保留至任务结束后 24 小时；未开始任务自创建起保留 24 小时，未完成上传 1 小时后清理。
 - Worker 每 15 秒清理到期/删除任务；删除运行任务先终止容器。注销立即撤销会话，文件删除后移除账号；安全审计保留 30 天。
 - 磁盘达到 80% 拒绝上传，90% 停止领取任务；后台显示磁盘和 Worker 心跳。
@@ -61,7 +61,7 @@ docker compose --env-file .env.public -f docker-compose.public.yml run --rm api 
 
 队列、配额、租约存入 PostgreSQL。API 重启不丢任务。Worker 超过 30 秒不续租的任务被终止并标记失败，不自动重跑用户程序。用户可重新上传。
 
-Wine runner 额外挂载专属 `/run/user/10001` tmpfs，规避 Debian Wine 10 在缺失运行目录且设置 `TMPDIR` 时的初始化崩溃（[Debian #1110936](https://bugs.debian.org/1110936)）。Wine prefix 的 tmpfs 上限为 2 GiB，仍计入单个 Wine 任务的 4 GiB 总内存限制。保持默认 seccomp/AppArmor，无需增加 capability 或使用 `unconfined`。
+Wine runner 额外挂载专属 `/run/user/10001` tmpfs，规避 Debian Wine 10 在缺失运行目录且设置 `TMPDIR` 时的初始化崩溃（[Debian #1110936](https://bugs.debian.org/1110936)）。Wine prefix 的 tmpfs 上限为 2 GiB，仍计入单个 Wine 任务的 6 GiB 总内存限制。保持默认 seccomp/AppArmor，无需增加 capability 或使用 `unconfined`。
 
 Wine 部署请使用已修复的 Docker Engine 29.4.3 或更新版本。29.4.2 的默认 seccomp 配置会阻断 32 位程序使用的 `socketcall`，导致 Wine 报 `socket: Function not implemented`；升级 Engine 后重建容器，保持默认隔离配置。参见 [Docker 29.4.3 修复记录](https://docs.docker.com/engine/release-notes/29/#2943)。CI 固定使用 Docker 29.9.3，避免托管 runner 预装版本变化造成验收失败。
 

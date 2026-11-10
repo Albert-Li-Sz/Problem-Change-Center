@@ -15,6 +15,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from .config import settings
 from .jobs import JobManager
@@ -125,7 +126,7 @@ async def lifespan(application: FastAPI):  # type: ignore[no-untyped-def]
 
 app = FastAPI(
     title="OJ Package Converter",
-    version="0.7.0",
+    version="0.7.1",
     docs_url=None if settings.is_external else "/docs",
     redoc_url=None if settings.is_external else "/redoc",
     openapi_url=None if settings.is_external else "/openapi.json",
@@ -175,7 +176,7 @@ async def observe_requests(request, call_next):  # type: ignore[no-untyped-def]
 @app.middleware("http")
 async def cleanup_expired_jobs(request, call_next):  # type: ignore[no-untyped-def]
     if not request.url.path.startswith("/api/health"):
-        request.app.state.job_manager.cleanup_expired()
+        await run_in_threadpool(request.app.state.job_manager.cleanup_if_due)
     return await call_next(request)
 
 

@@ -251,7 +251,7 @@ class Settings:
             max_upload_bytes=max_upload_bytes,
             job_timeout_seconds=_int_env("P2H_JOB_TIMEOUT_SECONDS", 7200),
             job_ttl_seconds=_int_env("P2H_JOB_TTL_SECONDS", 24 * 60 * 60),
-            docker_memory=_size_env("P2H_DOCKER_MEMORY", "1g"),
+            docker_memory=_size_env("P2H_DOCKER_MEMORY", "3g"),
             docker_cpus=_positive_number_env("P2H_DOCKER_CPUS", "2"),
             docker_pids_limit=_int_env(
                 "P2H_DOCKER_PIDS_LIMIT", 1024, allow_minus_one=True
