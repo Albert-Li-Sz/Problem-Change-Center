@@ -112,6 +112,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      - name: Set up compatible Docker Engine
+        uses: docker/setup-docker-action@v5
+        with:
+          version: v29.9.3
       - uses: actions/checkout@v4
       - name: Build runner
         run: docker compose --profile wine build runner runner-wine

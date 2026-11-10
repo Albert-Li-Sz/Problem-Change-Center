@@ -26,6 +26,11 @@ jobs:
       PUBLIC_TEST_ROLES: "1"
       P2H_E2E_PYTHON: python
     steps:
+      - name: Set up compatible Docker Engine
+        uses: docker/setup-docker-action@v5
+        with:
+          # 29.4.2 blocks socketcall and breaks 32-bit Wine startup.
+          version: v29.9.3
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
