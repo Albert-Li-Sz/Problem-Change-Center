@@ -1,11 +1,21 @@
-FROM node:24-alpine AS frontend
+FROM node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8 AS frontend
 WORKDIR /src/frontend
+ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
 ENV VITE_PUBLIC_MODE=1
 RUN npm run build
 
-FROM caddy:2-alpine
+# Cerberus adds a proof-of-work challenge and IP blocking in front of the site.
+# The Go module proxy checksum database verifies the pinned version.
+FROM caddy:2.11-builder-alpine@sha256:a0fde94c08a09fc31a8f2aeb42d0c2003807a325f04efeb98fa6cc89e25682e0 AS caddy
+ARG CERBERUS_VERSION=v0.4.9
+ARG GOPROXY=https://proxy.golang.org,direct
+RUN xcaddy build --with github.com/sjtug/cerberus@${CERBERUS_VERSION}
+
+FROM caddy:2.11-alpine@sha256:78bd35025c7ba85961dd149ae670315129954e77abe2383ac47c89106b35ade9
+COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
 COPY --from=frontend /src/frontend/dist /srv/www
 COPY deploy/public/Caddyfile /etc/caddy/Caddyfile
+RUN caddy list-modules | grep -q '^http.handlers.cerberus$'

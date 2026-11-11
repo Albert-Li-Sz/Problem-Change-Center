@@ -62,7 +62,7 @@ class Auth:
         self._mailer = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mail")
 
     def captcha(self, token: str, ip: str):
-        if self.config.development:
+        if self.config.development or self.config.captcha == "off":
             return
         if not token or len(token) > 2048:
             raise HTTPException(400, "请完成人机验证")

@@ -727,3 +727,27 @@ def test_real_docker_inspect_and_convert(site):
     ).text
     assert client.get(f"/api/jobs/{job_id}/download").status_code == 200
     assert client.get(f"/api/jobs/{job_id}/report").json()["target_format"] == "icpc"
+
+
+def test_anonymous_status_reports_worker_and_disk_without_details(site):
+    client, app, _ = site
+    # No Worker heartbeat yet.
+    response = client.get("/api/health/status")
+    assert response.status_code == 503 and response.json() == {"status": "degraded"}
+    app.state.db.execute(
+        "INSERT INTO worker_status(id,active,disk_percent) VALUES ('single',0,40)"
+    )
+    response = client.get("/api/health/status")
+    assert response.status_code == 200 and response.json() == {"status": "ok"}
+    app.state.db.execute("UPDATE worker_status SET disk_percent=95")
+    assert client.get("/api/health/status").status_code == 503
+    app.state.db.execute(
+        "UPDATE worker_status SET disk_percent=40,heartbeat_at=now()-interval '2 minutes'"
+    )
+    assert client.get("/api/health/status").status_code == 503
+
+
+def test_public_config_exposes_captcha_mode_and_upload_limit(site):
+    client, _, _ = site
+    value = client.get("/api/public/config").json()
+    assert value["captcha"] == "off" and value["max_upload_mb"] == 512

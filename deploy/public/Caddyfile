@@ -1,26 +1,80 @@
 {
     email {$ACME_EMAIL}
     admin off
+
+    # Proof-of-work challenge and IP blocking. Difficulty counts pairs of
+    # leading zero bits: 10 is about a million hashes, well under a second.
+    cerberus {
+        difficulty {$CERBERUS_DIFFICULTY:10}
+        # One approval covers the page load and a few sign-in attempts.
+        access_per_approval 32
+        approval_ttl "1h"
+        # An address that requests this many challenges without solving them
+        # is blocked. Kept short because campus networks share addresses.
+        max_pending 128
+        pending_ttl "1h"
+        block_ttl "{$CERBERUS_BLOCK_TTL:1h}"
+        max_mem_usage "64MiB"
+        title "题包转换公益站"
+        mail "{$ACME_EMAIL}"
+        prefix_cfg 32 64
+    }
 }
 
 {$PUBLIC_DOMAIN} {
     encode zstd gzip
+    # Access log on stdout; Docker rotates it. Caddy redacts cookies and
+    # authorization headers, and one-use tokens stay in URL fragments.
+    log {
+        output stdout
+        format json
+    }
     header {
         Strict-Transport-Security "max-age=31536000"
         X-Content-Type-Options nosniff
         X-Frame-Options DENY
         Referrer-Policy no-referrer
         Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
-        Content-Security-Policy "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+        # wasm-unsafe-eval and blob: workers are needed by the Cerberus solver.
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; worker-src 'self' blob:; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
     }
     @auth path /api/auth/* /api/admin/* /api/account
     request_body @auth {
         max_size 16KB
     }
     request_body {
-        max_size 528MB
+        max_size {$PUBLIC_MAX_BODY:528MiB}
     }
+
+    handle_path /.cerberus/* {
+        cerberus_endpoint
+    }
+    # Challenge the page itself and the anonymous account endpoints. Signed-in
+    # API traffic is not challenged, so uploads and event streams are unaffected.
+    @challenge {
+        path / /index.html /api/auth/login /api/auth/register /api/auth/resend /api/auth/forgot /api/auth/reset /api/auth/verify
+    }
+    cerberus @challenge {
+        base_url "/.cerberus"
+    }
+    # Everything else only rejects addresses that are already blocked.
+    @guarded {
+        not path /.cerberus/* /api/health/live
+    }
+    cerberus @guarded {
+        base_url "/.cerberus"
+        block_only
+    }
+
     handle /api/* {
+        # Optional allowlist for the administrator API (PUBLIC_ADMIN_ALLOW).
+        @admin_denied {
+            path /api/admin/*
+            not remote_ip {$PUBLIC_ADMIN_ALLOW:0.0.0.0/0 ::/0}
+        }
+        respond @admin_denied `{"detail":"管理接口仅允许指定地址访问"}` 403 {
+            close
+        }
         reverse_proxy api:8000 {
             flush_interval -1
             transport http {

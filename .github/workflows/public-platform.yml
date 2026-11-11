@@ -45,7 +45,7 @@ jobs:
           docker build -f runner/Dockerfile.public --build-arg RUNNER_BASE=p2h-runner -t p2h-public-runner .
           docker build -f runner/Dockerfile.public --build-arg RUNNER_BASE=p2h-runner-wine -t p2h-public-runner-wine .
       - name: PostgreSQL, isolation, Wine and conversion acceptance
-        run: python -m pytest backend/tests/test_public.py -q
+        run: python -m pytest backend/tests/test_public.py backend/tests/test_public_deploy.py -q
       - name: Public browser workflow
         working-directory: frontend
         run: |
@@ -58,3 +58,42 @@ jobs:
           docker build -f deploy/public/Dockerfile --target worker -t p2h-public-worker .
           docker build -f deploy/public/Dockerfile.web -t p2h-public-web .
           docker run --rm -e PUBLIC_DOMAIN=localhost -e ACME_EMAIL=ci@example.org p2h-public-web caddy validate --config /etc/caddy/Caddyfile
+
+  # Prebuilt images for `./public.sh install` with the "pull" image source.
+  publish:
+    needs: public-docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io/albert-li-sz
+    steps:
+      - name: Set up compatible Docker Engine
+        uses: docker/setup-docker-action@v5
+        with:
+          version: v29.9.3
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build images
+        run: |
+          docker compose --profile wine build runner runner-wine
+          docker build -f runner/Dockerfile.public --build-arg RUNNER_BASE=p2h-runner -t "$REGISTRY/p2h-public-runner:public" .
+          docker build -f runner/Dockerfile.public --build-arg RUNNER_BASE=p2h-runner-wine -t "$REGISTRY/p2h-public-runner-wine:public" .
+          docker build -f deploy/public/Dockerfile --target api -t "$REGISTRY/p2h-public-api:public" .
+          docker build -f deploy/public/Dockerfile --target worker -t "$REGISTRY/p2h-public-worker:public" .
+          docker build -f deploy/public/Dockerfile.web -t "$REGISTRY/p2h-public-web:public" .
+      - name: Push images
+        run: |
+          for name in runner runner-wine api worker web; do
+            image="$REGISTRY/p2h-public-$name"
+            docker tag "$image:public" "$image:${GITHUB_SHA::12}"
+            docker push "$image:public"
+            docker push "$image:${GITHUB_SHA::12}"
+          done

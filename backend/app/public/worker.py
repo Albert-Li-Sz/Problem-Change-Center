@@ -20,13 +20,12 @@ from ..docker_runner import conversion_arguments, pack_output
 from ..jobs import JobManager
 from ..schemas import InspectResponse, JobRequest
 from ..storage import Storage, utc_now_iso
-from .config import PublicConfig
+from .config import PublicConfig, size_bytes
 from .db import Database, PostgresJobIndex
 from .queue import Queue
 
 
 LOGGER = logging.getLogger(__name__)
-OUTPUT_LIMIT = 1024**3
 STOP = threading.Event()
 # A private, bounded container mount, not a shared host temporary path.
 TMP_MOUNT = "/tmp:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=700"  # nosec B108
@@ -129,16 +128,18 @@ def command(config: PublicConfig, row, storage: Storage) -> list[str]:
     wine = row["wine"]
     image = config.wine_image if wine else config.runner_image
     # tmpfs pages are charged to the container, so the limit has to cover the
-    # work, output and home mounts as well as the converter itself.
-    memory = "6g" if wine else "4g"
-    home_size = "2g" if wine else "1g"
+    # work, output and home mounts as well as the converter itself. Optional
+    # swap lets a small host hold large packages without raising the RAM cap.
+    memory = size_bytes(config.wine_memory if wine else config.job_memory)
+    home_size = config.wine_home_size if wine else config.home_size
+    member_limit = min(config.archive_limit, 256 * 1024**2)
     cmd = [
         "docker",
         "run",
         "--name",
         container_name(row),
         "--runtime",
-        "runc",
+        config.runner_runtime,
         "--label",
         "app=p2h-public",
         "--label",
@@ -157,11 +158,11 @@ def command(config: PublicConfig, row, storage: Storage) -> list[str]:
         "--pids-limit",
         "1024" if wine else "512",
         "--memory",
-        memory,
+        str(memory),
         "--memory-swap",
-        memory,
+        str(memory + size_bytes(config.job_swap)),
         "--cpus",
-        "2",
+        config.job_cpus,
         "--ulimit",
         "nofile=1024:1024",
         "--ulimit",
@@ -169,9 +170,9 @@ def command(config: PublicConfig, row, storage: Storage) -> list[str]:
         "--tmpfs",
         TMP_MOUNT,
         "--tmpfs",
-        "/work:rw,exec,nosuid,nodev,size=2g,uid=10001,gid=10001,mode=700",
+        f"/work:rw,exec,nosuid,nodev,size={config.work_size},uid=10001,gid=10001,mode=700",
         "--tmpfs",
-        "/output:rw,noexec,nosuid,nodev,size=1g,uid=10001,gid=10001,mode=700",
+        f"/output:rw,noexec,nosuid,nodev,size={config.output_size},uid=10001,gid=10001,mode=700",
         "--tmpfs",
         f"/home/app:rw,exec,nosuid,nodev,size={home_size},uid=10001,gid=10001,mode=700",
         "--mount",
@@ -183,11 +184,11 @@ def command(config: PublicConfig, row, storage: Storage) -> list[str]:
         "-e",
         "TMPDIR=/work",
         "-e",
-        "P2H_MAX_ARCHIVE_UNCOMPRESSED_BYTES=1073741824",
+        f"P2H_MAX_ARCHIVE_UNCOMPRESSED_BYTES={config.archive_limit}",
         "-e",
         "P2H_MAX_ARCHIVE_ENTRIES=50000",
         "-e",
-        "P2H_MAX_ARCHIVE_MEMBER_BYTES=268435456",
+        f"P2H_MAX_ARCHIVE_MEMBER_BYTES={member_limit}",
     ]
     if wine:
         # Debian Wine 10 frees TMPDIR's environment pointer if this directory
@@ -209,7 +210,7 @@ def command(config: PublicConfig, row, storage: Storage) -> list[str]:
     return cmd + conversion_arguments(config.storage_settings(), paths, request)
 
 
-def collect_output(name: str, output: Path, *, check=None):
+def collect_output(name: str, output: Path, *, check=None, limit: int = 1024**3):
     """Read Docker's archive without extractall, links, devices or trusted modes."""
     if check is not None:
         check()
@@ -279,8 +280,8 @@ def collect_output(name: str, output: Path, *, check=None):
                     target.mkdir(parents=True, exist_ok=True, mode=0o700)
                     continue
                 total += member.size
-                if member.size < 0 or total > OUTPUT_LIMIT:
-                    raise ValueError("Output exceeds 1 GiB")
+                if member.size < 0 or total > limit:
+                    raise ValueError("Output exceeds the size limit")
                 target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 source = archive.extractfile(member)
                 if source is None:
@@ -406,7 +407,12 @@ class Worker:
                 if not current_lease or current_lease["cancel_requested"]:
                     raise RuntimeError("任务已取消或执行租约失效")
 
-            collect_output(name, paths.output_dir, check=export_check)
+            collect_output(
+                name,
+                paths.output_dir,
+                check=export_check,
+                limit=self.config.output_limit,
+            )
             lease = renew()
             if not lease or lease["cancel_requested"]:
                 raise RuntimeError("任务已取消")
@@ -476,7 +482,7 @@ class Worker:
                     paths.output_dir,
                     paths.result_path,
                     target=request.effective_target_format,
-                    max_uncompressed_bytes=OUTPUT_LIMIT,
+                    max_uncompressed_bytes=self.config.output_limit,
                     progress_callback=progress,
                 )
                 outcome = "success"

@@ -1,5 +1,16 @@
 # 版本变更
 
+## 未发布（public 分支）
+
+- 新增 `./public.sh`：一条命令完成公众版的交互式安装、升级、备份、状态与环境检查，取代 `scripts/public-config.py`、`scripts/public-backup.sh` 和静态 systemd 单元。升级自动备份、暂停队列、等待任务结束并在完成或失败后恢复队列。
+- 新增 8 / 16 / 64 GiB 三个资源档位。并发数、任务内存与交换空间、tmpfs 大小、上传上限、任务运行时和各服务内存上限均可在 `.env.public` 中配置；8 GiB 档说明见部署指南。
+- Caddy 内置 cerberus 插件：首页与匿名账号接口需完成工作量证明，反复不完成挑战的地址会被临时封禁；前端在批准用完时自动重新验证。Cloudflare Turnstile 改为可选（`PUBLIC_CAPTCHA`）。
+- 新增免登录的 `/api/health/status`，在 Worker 失联、磁盘将满或数据库不可达时返回 503，供外部监控使用。
+- 新增可选的管理接口来源白名单（`PUBLIC_ADMIN_ALLOW`）和 Caddy JSON 访问日志；Caddy 与 PostgreSQL 容器改为只读根文件系统并收紧 capability。
+- Worker 镜像只安装 Docker 客户端；基础镜像按 digest 固定并由 Dependabot 跟进；CI 在验收通过后向 GHCR 发布公众版镜像，部署时可选择拉取。
+- 修复公众版 Compose 无法启动的两个问题：`/tmp` 的 tmpfs 选项被 YAML 拆成两项，以及 API 可能占用 Caddy 的固定地址。
+- 修复代理请求体上限按十进制 `528MB` 计算、实际小于 512 MiB 上传上限的问题，改用 `MiB`。
+
 ## 0.7.1 — 2026-11-10
 
 - FPS 读取区分 HUSTOJ 原生 `<spj>` 与 testlib `<tpj>`，导出 Hydro 时保留正确特判协议；尚未适配的目标协议会明确报错。

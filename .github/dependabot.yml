@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Base images are pinned by digest; these keep the pins current.
+  - package-ecosystem: docker
+    directory: /deploy/public
+    target-branch: public
+    schedule: {interval: weekly}
+  - package-ecosystem: docker-compose
+    directory: /
+    target-branch: public
+    schedule: {interval: weekly}

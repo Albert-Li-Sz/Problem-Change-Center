@@ -146,6 +146,7 @@ def create_app(config: PublicConfig | None = None) -> FastAPI:
 
     anonymous = {
         "/api/health/live",
+        "/api/health/status",
         "/api/public/config",
         "/api/auth/register",
         "/api/auth/login",
@@ -267,10 +268,27 @@ def create_app(config: PublicConfig | None = None) -> FastAPI:
     def public_config():
         return {
             "turnstile_site_key": config.turnstile_site_key,
+            "captcha": "off" if config.development else config.captcha,
+            "max_upload_mb": config.max_upload // 1024**2,
             "development": config.development,
             "contact_email": config.contact_email,
             **db.one("SELECT registration_open FROM site_settings WHERE id=1"),
         }
+
+    @app.get("/api/health/status")
+    def status():
+        """Anonymous monitoring probe: one word, no internals."""
+        try:
+            worker = db.one(
+                "SELECT heartbeat_at>now()-interval '30 seconds' AS alive,disk_percent FROM worker_status WHERE id='single'"
+            )
+        except Exception:
+            worker = None
+        healthy = bool(worker and worker["alive"] and worker["disk_percent"] < 90)
+        return JSONResponse(
+            {"status": "ok" if healthy else "degraded"},
+            status_code=200 if healthy else 503,
+        )
 
     @app.get("/api/health/ready")
     def ready(request: Request):
@@ -381,7 +399,9 @@ def create_app(config: PublicConfig | None = None) -> FastAPI:
                 while chunk := await file.read(1024 * 1024):
                     size += len(chunk)
                     if size > config.max_upload:
-                        raise HTTPException(413, "单次上传最多 512 MiB")
+                        raise HTTPException(
+                            413, f"单次上传最多 {config.max_upload // 1024**2} MiB"
+                        )
                     checksum.update(chunk)
                     await run_in_threadpool(dest.write, chunk)
             if not size:

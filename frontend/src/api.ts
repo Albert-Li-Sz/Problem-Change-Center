@@ -76,6 +76,16 @@ export async function apiFetch(
     credentials: "same-origin",
     headers: accessHeaders(init.headers, accessKey)
   });
+  if (publicMode) {
+    // The proxy answers with its own page instead of the API when the
+    // proof-of-work approval has run out or the address is blocked.
+    const guard = response.headers.get("X-Cerberus-Status");
+    if (guard === "CHALLENGE") {
+      window.location.reload();
+      throw new Error("正在重新进行安全验证，页面即将刷新…");
+    }
+    if (guard === "BLOCKED") throw new Error("当前网络地址的请求过于频繁，已被暂时限制，请稍后再试");
+  }
   if (response.status === 401 && notifyOnUnauthorized) notifyUnauthorized();
   return response;
 }

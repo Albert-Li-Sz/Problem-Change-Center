@@ -5,7 +5,7 @@ import { apiFetch, cancelJob, deleteJob, downloadJob, JobResponse, onUnauthorize
 
 type Quota = { daily_minutes: number; used: number; reserved: number; remaining: number };
 type User = { id: string; email: string; is_admin: boolean; banned: boolean; verified: boolean; daily_minutes: number; quota: Quota };
-type Config = { turnstile_site_key: string; development: boolean; contact_email: string; registration_open: boolean };
+type Config = { turnstile_site_key: string; captcha: "turnstile" | "off"; development: boolean; contact_email: string; registration_open: boolean };
 type Status = { registration_open: boolean; queue_open: boolean; worker: { heartbeat_at: string; active: number; disk_percent: number } | null };
 type Invitation = { id: string; expires_at: string; used_at: string | null; revoked: boolean };
 type AdminJob = { id: string; status: string; kind: string; user_id: string };
@@ -62,7 +62,7 @@ function Terms({ contact }: { contact: string }) {
     <p>仅上传您有权处理的题包。不得利用本站攻击系统、绕过配额、挖矿或传播违法内容。请自行核验转换结果，本站不承诺永久保存文件。</p>
     <p>题包默认仅您本人可见，不公开分享。上传文件、转换结果、报告与日志在任务完成后保留 24 小时；未开始的上传自创建起保留 24 小时。用户可提前删除任务或注销账号。</p>
     <p>账号保存邮箱与密码哈希，登录 Cookie 用于维持会话。IP 的不可逆摘要用于限流；安全审计保留最多 30 天。数据库加密备份保留 7 天，删除记录可能在备份到期前仍存在。</p>
-    <p>邮件服务负责发送验证与找回密码邮件；Cloudflare Turnstile 用于人机验证。除安全排障和处理举报外，运营方不主动查看题包内容。</p>
+    <p>邮件服务负责发送验证与找回密码邮件；人机验证由本站的工作量证明完成，站点启用 Cloudflare Turnstile 时由其辅助。除安全排障和处理举报外，运营方不主动查看题包内容。</p>
     <p>隐私、内容权利或滥用问题请联系：{contact ? <a href={`mailto:${contact}`}>{contact}</a> : "站点管理员"}。</p>
   </article>;
 }
@@ -144,7 +144,7 @@ export function PublicPlatform() {
   }
 
   const changeMode = (next: AuthMode) => { setMode(next); setError(""); setMessage(""); setCaptcha(""); setCaptchaKey((key) => key + 1); };
-  const needsCaptcha = ["login", "register", "forgot", "resend"].includes(mode);
+  const needsCaptcha = config?.captcha === "turnstile" && ["login", "register", "forgot", "resend"].includes(mode);
   const title = { login: "欢迎回来", register: "加入公益站", forgot: "找回密码", resend: "重新发送验证邮件", verify: "验证邮箱", reset: "设置新密码" }[mode];
 
   return <div className="public-platform">
@@ -162,8 +162,8 @@ export function PublicPlatform() {
               {!["verify", "reset"].includes(mode) && <label>邮箱<input name="email" type="email" autoComplete="email" required maxLength={254} /></label>}
               {["login", "register", "reset"].includes(mode) && <label>密码<input name="password" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={mode === "login" ? 1 : 12} maxLength={128} /><small>{mode !== "login" && "至少 12 个字符"}</small></label>}
               {mode === "register" && <><label>邀请码<input name="invitation" required maxLength={128} autoComplete="off" /></label><label className="public-checkbox"><input name="terms" type="checkbox" required />我已阅读并同意<button type="button" className="public-link" onClick={() => setScreen("terms")}>服务条款与隐私说明</button></label></>}
-              {needsCaptcha && config && !config.development && <Captcha key={captchaKey} siteKey={config.turnstile_site_key} onToken={setCaptcha} />}
-              <button className="public-primary" disabled={busy || !config || (needsCaptcha && !config.development && !captcha) || (mode === "register" && !config.registration_open)}>{busy ? "处理中…" : title}</button>
+              {needsCaptcha && config && <Captcha key={captchaKey} siteKey={config.turnstile_site_key} onToken={setCaptcha} />}
+              <button className="public-primary" disabled={busy || !config || (needsCaptcha && !captcha) || (mode === "register" && !config.registration_open)}>{busy ? "处理中…" : title}</button>
             </form>
             <div className="public-auth-links"><button onClick={() => changeMode(mode === "register" ? "login" : "register")}>{mode === "register" ? "已有账号，登录" : "使用邀请码注册"}</button><button onClick={() => changeMode("forgot")}>忘记密码</button><button onClick={() => changeMode("resend")}>重发验证邮件</button>{mode !== "login" && <button onClick={() => changeMode("login")}>返回登录</button>}</div>
           </section></main>
