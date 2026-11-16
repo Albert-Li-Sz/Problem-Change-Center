@@ -9,7 +9,7 @@ Online Judge 的 ZIP 题包。
 与多题包，使用统一的 `ProblemBundle` 中间模型保留题面、样例、测试数据、分组、
 checker、interactor、附件和标程，并对无法无损映射的内容生成结构化报告。
 
-当前版本：`0.7.1`
+当前版本：`0.7.2`
 
 版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -345,12 +345,17 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
 - `doall.sh` 默认关闭，只有用户显式启用才执行。
 - 有 C/C++ 源码时优先在 Linux runner 内原生重编译。
 - binary-only Windows 程序才需要 Wine。
+- TeX 题面支持嵌套的 `\texttt` / `\t`、`\textbf`、`\textit` / `\emph`、
+  下划线、删除线和上下标；字体族命令保留正文内容。公式、verbatim 和行内代码
+  会受到保护，避免命令或字面内容被后续转换误改。
+- 缺少预生成答案时，需要显式启用 `doall.sh`，或重新导出包含答案的题包。
 
 ### HydroOJ
 
 - 读取和输出 `problem.yaml`、`problem_<语言>.md`、
   `testdata/config.yaml`、数据和 `additional_file/`。
 - 支持 ACM/OI、文件 IO、子任务依赖、checker、interactor、模板、附件和标程。
+- 题名和题目标识按文本读取及写出，保留 `0`、前导零和长数字题名。
 
 ### ICPC 题包（DOMjudge / Kattis 兼容）
 

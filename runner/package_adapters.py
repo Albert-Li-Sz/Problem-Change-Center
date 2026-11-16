@@ -27,6 +27,7 @@ from package_security import (
     MAX_METADATA_BYTES,
     load_json_file,
     load_json_value_file,
+    load_problem_yaml_file,
     load_yaml_file,
     read_limited_text,
 )
@@ -468,7 +469,7 @@ def read_hydro(
         _report_read_progress(
             reporter, index - 1, len(problem_dirs), problem_dir.name, "reading Hydro"
         )
-        meta = load_yaml_file(problem_dir / "problem.yaml")
+        meta = load_problem_yaml_file(problem_dir / "problem.yaml")
         config = load_yaml_file(problem_dir / "testdata" / "config.yaml")
         pid = str(meta.get("pid") or meta.get("id") or problem_dir.name)
         slug = bridge._problem_slug(problem_dir, meta)
@@ -1473,7 +1474,7 @@ def read_icpc(
         _report_read_progress(
             reporter, index - 1, len(problem_dirs), problem_dir.name, "reading ICPC"
         )
-        meta = load_yaml_file(problem_dir / "problem.yaml")
+        meta = load_problem_yaml_file(problem_dir / "problem.yaml")
         ini = bridge._read_domjudge_ini(problem_dir / "domjudge-problem.ini")
         slug = bridge._domjudge_problem_slug(problem_dir, meta, ini)
         title_value = meta.get("name")
@@ -2701,7 +2702,7 @@ def read_dmoj(
     bundle = ProblemBundle("dmoj", [])
     for index, init_path in enumerate(init_paths, start=1):
         problem_root = init_path.parent
-        config = load_yaml_file(init_path)
+        config = load_yaml_file(init_path, string_fields=("title", "name"))
         metadata = _sidecar_metadata(problem_root)
         slug = _safe_name(metadata.get("code") or problem_root.name, f"problem-{index}")
         data_root = problem_root
@@ -3667,7 +3668,7 @@ def _normalize_icpc_legacy(
     package_dir: Path, problem: Problem, options: dict[str, Any]
 ) -> None:
     _write_icpc_legacy_statements(package_dir, problem)
-    meta = load_yaml_file(package_dir / "problem.yaml")
+    meta = load_problem_yaml_file(package_dir / "problem.yaml")
     # The selected profile stays within the legacy ICPC subset. Declare the
     # legacy superset because the current reference problemtools release does
     # not yet recognize the otherwise specification-valid "legacy-icpc"
@@ -3752,7 +3753,7 @@ def write_icpc(
             )
             package_dir = root / "icpc" / f"{index:04d}"
             code = bridge._index_to_code(start_index + index - 1)
-            meta = load_yaml_file(hydro_dir / "problem.yaml")
+            meta = load_problem_yaml_file(hydro_dir / "problem.yaml")
             bridge._write_domjudge_problem(
                 hydro_dir, package_dir, meta, problem.title, code, color, verbose=False
             )
@@ -3817,7 +3818,7 @@ def write_hoj(
             key = hoj_bridge._unique_hoj_key(
                 f"problem_{_safe_name(problem.slug)}", used
             )
-            meta = load_yaml_file(hydro_dir / "problem.yaml")
+            meta = load_problem_yaml_file(hydro_dir / "problem.yaml")
             hoj_bridge._write_hydro_as_hoj(hydro_dir, output, key, meta, verbose=False)
             artifacts.extend([f"{key}.json", key])
             _report_problem_progress(

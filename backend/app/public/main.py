@@ -125,7 +125,7 @@ def create_app(config: PublicConfig | None = None) -> FastAPI:
 
     app = FastAPI(
         title="题包转换公益站",
-        version="0.7.1",
+        version="0.7.2",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,

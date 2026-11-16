@@ -9,6 +9,7 @@ import shutil
 import subprocess  # nosec B404
 import sys
 import tempfile
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -25,6 +26,7 @@ from hoj_bridge import (
     convert_hoj_to_hydro,
     convert_hydro_to_hoj,
 )
+from statement_markup import render_tex_with_formatting
 
 
 EXECUTABLE_SUFFIXES = {".sh", ".bash", ".exe"}
@@ -643,9 +645,9 @@ def build_hydro_problem_yaml(pid: str, owner: int, title: str, tags: list[str]) 
     # Hydro rejects non-string titles when importing problem.yaml.
     return yaml.safe_dump(
         {
-            "pid": pid,
+            "pid": str(pid),
             "owner": owner,
-            "title": title,
+            "title": str(title),
             "tag": tags,
             "nSubmit": 0,
             "nAccept": 0,
@@ -672,6 +674,37 @@ def _install_hydro_writer_patches() -> None:
     hydro_writer._build_config_yaml = build_config_yaml_with_checker_language_auto
 
 
+def _install_statement_patches() -> None:
+    try:
+        import p2h.statement_markdown as statement_markdown
+    except ModuleNotFoundError as exc:
+        if exc.name in {"p2h", "p2h.statement_markdown"}:
+            return
+        raise
+
+    def wrap(original: Any) -> Any:
+        @wraps(original)
+        def render(text: str) -> str:
+            return render_tex_with_formatting(text, original)
+
+        render._p2h_safe_text_formatting_patch = True  # type: ignore[attr-defined]
+        return render
+
+    for name in ("tex_to_markdown", "tex_block_to_markdown"):
+        original = getattr(statement_markdown, name, None)
+        if original is None or getattr(
+            original, "_p2h_safe_text_formatting_patch", False
+        ):
+            continue
+        patched = wrap(original)
+        setattr(statement_markdown, name, patched)
+        # These modules may already have imported the renderer directly.
+        for module_name in ("p2h.polygon_reader", "p2h.cli"):
+            module = sys.modules.get(module_name)
+            if module is not None and getattr(module, name, None) is original:
+                setattr(module, name, patched)
+
+
 def _install_p2h_patches() -> Any:
     try:
         _install_hydro_writer_patches()
@@ -679,6 +712,7 @@ def _install_p2h_patches() -> Any:
         if exc.name not in {"p2h", "p2h.hydro_writer"}:
             raise
 
+    _install_statement_patches()
     p2h_convert = _load_p2h_convert()
     p2h_convert._collect_tools_from_script = collect_tools_from_script
 

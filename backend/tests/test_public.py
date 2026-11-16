@@ -694,16 +694,34 @@ def test_native_wine_under_public_restrictions(site):
     os.getenv("PUBLIC_TEST_DOCKER") != "1",
     reason="requires locally built public runner",
 )
-def test_real_docker_inspect_and_convert(site):
+@pytest.mark.parametrize("source_format", ["hydro", "polygon"])
+def test_real_docker_inspect_and_convert(site, source_format):
     client, app, config = site
     register(site)
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("problem.yaml", "pid: P1000\ntitle: Addition\ntag: []\n")
-        archive.writestr("problem.md", "# Addition\nAdd two integers.\n")
-        archive.writestr("testdata/config.yaml", "time: 1s\nmemory: 256m\n")
-        archive.writestr("testdata/1.in", "1 2\n")
-        archive.writestr("testdata/1.out", "3\n")
+        if source_format == "hydro":
+            archive.writestr("problem.yaml", "pid: P1000\ntitle: Addition\ntag: []\n")
+            archive.writestr("problem.md", "# Addition\nAdd two integers.\n")
+            archive.writestr("testdata/config.yaml", "time: 1s\nmemory: 256m\n")
+            archive.writestr("testdata/1.in", "1 2\n")
+            archive.writestr("testdata/1.out", "3\n")
+        else:
+            archive.writestr("contest.xml", "<contest/>\n")
+            archive.writestr(
+                "problems/numeric/problem.xml",
+                '<problem><names><name language="chinese" value="001024"/></names>'
+                "<judging><testset><time-limit>1000</time-limit><memory-limit>268435456</memory-limit>"
+                '</testset></judging><assets><checker type="testlib"><source path="check.cpp"/>'
+                "</checker></assets></problem>",
+            )
+            archive.writestr("problems/numeric/tests/01", "1 2\n")
+            archive.writestr("problems/numeric/tests/01.a", "3\n")
+            archive.writestr("problems/numeric/check.cpp", "int main() { return 0; }\n")
+            archive.writestr(
+                "problems/numeric/statement-sections/chinese/legend.tex",
+                r"\textbf{Check \texttt{a\_b}} and $\mathbf{x}+\textbf{y}$.",
+            )
     response = client.post(
         "/api/inspect",
         files={"file": ("test.zip", package.getvalue(), "application/zip")},
@@ -714,10 +732,15 @@ def test_real_docker_inspect_and_convert(site):
     worker.run_job(app.state.queue.claim())
     response = client.get(f"/api/inspections/{job_id}")
     assert response.status_code == 200, response.text
-    assert response.json()["detected_format"] == "hydro"
+    assert response.json()["detected_format"] == source_format
+    target = "icpc" if source_format == "hydro" else "hydro"
     response = client.post(
         "/api/jobs",
-        json={"job_id": job_id, "source_format": "hydro", "target_format": "icpc"},
+        json={
+            "job_id": job_id,
+            "source_format": source_format,
+            "target_format": target,
+        },
     )
     assert response.status_code == 202, response.text
     worker.run_job(app.state.queue.claim())
@@ -725,8 +748,26 @@ def test_real_docker_inspect_and_convert(site):
     assert response.json()["status"] == "success", client.get(
         f"/api/jobs/{job_id}/logs"
     ).text
-    assert client.get(f"/api/jobs/{job_id}/download").status_code == 200
-    assert client.get(f"/api/jobs/{job_id}/report").json()["target_format"] == "icpc"
+    download = client.get(f"/api/jobs/{job_id}/download")
+    assert download.status_code == 200
+    assert client.get(f"/api/jobs/{job_id}/report").json()["target_format"] == target
+    if source_format == "polygon":
+        import yaml
+
+        archive_bytes = io.BytesIO(download.content)
+        with zipfile.ZipFile(archive_bytes) as result:
+            if not any(n.endswith("problem.yaml") for n in result.namelist()):
+                problem_zip = next(n for n in result.namelist() if n.endswith(".zip"))
+                archive_bytes = io.BytesIO(result.read(problem_zip))
+        with zipfile.ZipFile(archive_bytes) as problem:
+            metadata = next(n for n in problem.namelist() if n.endswith("problem.yaml"))
+            assert yaml.safe_load(problem.read(metadata))["title"] == "001024"
+            statement = next(
+                n for n in problem.namelist() if n.endswith("problem_zh.md")
+            )
+            markdown = problem.read(statement).decode()
+            assert "**Check `a_b`**" in markdown
+            assert r"$\mathbf{x}+\textbf{y}$" in markdown
 
 
 def test_anonymous_status_reports_worker_and_disk_without_details(site):

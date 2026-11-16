@@ -30,3 +30,8 @@ Hydro 零分评测点与 `id: 0` 依赖，以及 HOJ 平均分模式的显式拒
 - [HOJ 计分实现](https://github.com/HimitZH/HOJ/blob/9a65e3f24e81ed76cc1aa1c06da68262434eaadd/hoj-springboot/JudgeServer/src/main/java/top/hcode/hoj/judge/JudgeStrategy.java)：`subtask_average` 对每组测试点的得分求平均，再用 `Math.round` 取整。
 
 以上是上游源码核对和本地转换测试，不等同于真实 OJ 实例的导入、提交验收。
+
+`backend/tests/test_statement_markup.py` 覆盖 TeX 嵌套文本格式、数学公式与代码保护；
+行内代码的反引号和空白处理依据 [CommonMark 0.31.2](https://spec.commonmark.org/0.31.2/#code-spans)。
+公众版 Docker 验收还运行完整的 Polygon → Hydro 转换，核对数字题名、嵌套粗体与
+行内代码，以及保留在数学公式内的 TeX 命令。

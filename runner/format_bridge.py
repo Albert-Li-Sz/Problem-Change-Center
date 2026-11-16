@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote
 
-from package_security import load_yaml_file
+from package_security import load_problem_yaml_file, load_yaml_file
 
 
 IN_SUFFIXES = {".in", ".input"}
@@ -1259,6 +1259,8 @@ def _zip_dir(src_dir: Path, output_zip: Path) -> None:
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
+    if path.name in {"problem.yaml", "problem.yml"}:
+        return load_problem_yaml_file(path)
     return load_yaml_file(path)
 
 
@@ -1330,9 +1332,9 @@ def _problem_title(problem_dir: Path, meta: dict[str, Any]) -> str:
         if isinstance(candidate, dict):
             for lang in ("zh", "zh-cn", "en"):
                 value = candidate.get(lang)
-                if value:
+                if value is not None and value != "":
                     return str(value)
-        elif candidate:
+        elif candidate is not None and candidate != "":
             return str(candidate)
     return problem_dir.name
 

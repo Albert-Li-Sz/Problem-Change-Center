@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "runner"))
 
 import format_bridge as bridge  # noqa: E402
 from package_converter import REPORT_FILENAME, convert_package  # noqa: E402
+from package_security import load_problem_yaml_file  # noqa: E402
 
 
 CHECKER = '#include "testlib.h"\nint main(int c, char** v) { registerTestlibCmd(c, v); quitf(_ok, "ok"); }\n'
@@ -62,6 +63,64 @@ def _hydro_config(archive_path: Path) -> dict:
 
 def _issue_codes(report: dict) -> set[str]:
     return {issue["code"] for issue in report["issues"]}
+
+
+@pytest.mark.parametrize("title", ["0", "00042", "1024", "12345678901234567890"])
+def test_numeric_hydro_titles_keep_their_original_text(
+    tmp_path: Path, title: str
+) -> None:
+    source = _hydro(
+        tmp_path, "time: 1s\n", **{"P1/problem.yaml": f"title: {title}\npid: P1\n"}
+    )
+    output = tmp_path / "out"
+
+    convert_package(source, output, source_format="hydro", target_format="qduoj")
+
+    metadata = next(output.rglob("problem.json"))
+    document = json.loads(metadata.read_text())
+    assert document["title"] == title
+
+
+def test_multilingual_icpc_numeric_titles_keep_leading_zeros(tmp_path: Path) -> None:
+    source = _icpc(tmp_path, **{"sum/problem.yaml": "name: {en: 00042, zh: 0}\n"})
+    output = tmp_path / "out"
+
+    convert_package(source, output, source_format="icpc", target_format="hydro")
+
+    with zipfile.ZipFile(next(output.glob("*.zip"))) as archive:
+        metadata = next(n for n in archive.namelist() if n.endswith("problem.yaml"))
+        document = yaml.safe_load(archive.read(metadata))
+    assert document["title"] == "00042"
+
+
+def test_numeric_text_metadata_does_not_retype_aliased_limits(tmp_path: Path) -> None:
+    source = tmp_path / "problem.yaml"
+    source.write_text("title: &digits 00042\ntime: *digits\nscore: 0\n")
+
+    metadata = load_problem_yaml_file(source)
+
+    assert metadata == {"title": "00042", "time": 34, "score": 0}
+
+
+def test_numeric_title_is_read_as_text_before_integer_size_limits(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "problem.yaml"
+    title = "1" * 5000
+    source.write_text("title: " + title + "\n")
+
+    assert load_problem_yaml_file(source)["title"] == title
+
+
+@pytest.mark.parametrize("source", ["title: 0\ntitle: 1\n", "name: {en: 0, en: 1}\n"])
+def test_text_metadata_still_rejects_duplicate_yaml_keys(
+    tmp_path: Path, source: str
+) -> None:
+    path = tmp_path / "problem.yaml"
+    path.write_text(source)
+
+    with pytest.raises(ValueError, match="duplicate YAML mapping key"):
+        load_problem_yaml_file(path)
 
 
 def test_hydro_reader_accepts_native_subtask_id_and_if(tmp_path: Path) -> None:
