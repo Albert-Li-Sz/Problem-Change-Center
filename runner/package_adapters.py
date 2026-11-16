@@ -4538,6 +4538,20 @@ def _validate_icpc_target(bundle: ProblemBundle, options: dict[str, Any]) -> Non
 def _validate_hoj_target(bundle: ProblemBundle, options: dict[str, Any]) -> None:
     for problem in bundle.problems:
         _validate_hustoj_checker_target(bundle, problem, "HOJ")
+        if any(
+            not hoj_bridge._hoj_sample_representable(pair)
+            for statement in problem.statements
+            if statement.format == "markdown"
+            for pair in hoj_bridge._hydro_sample_pairs(statement.content or "")
+        ):
+            _loss(
+                bundle,
+                problem,
+                "hoj-sample-delimiter",
+                "HOJ native sample delimiters cannot represent this sample text; "
+                "its input/output blocks are retained in the statement instead",
+                "statements",
+            )
         has_pdf = any(statement.format == "pdf" for statement in problem.statements)
         has_text = any(
             statement.format in {"markdown", "html"} for statement in problem.statements

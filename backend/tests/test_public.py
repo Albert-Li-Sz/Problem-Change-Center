@@ -694,8 +694,10 @@ def test_native_wine_under_public_restrictions(site):
     os.getenv("PUBLIC_TEST_DOCKER") != "1",
     reason="requires locally built public runner",
 )
-@pytest.mark.parametrize("source_format", ["hydro", "polygon"])
-def test_real_docker_inspect_and_convert(site, source_format):
+@pytest.mark.parametrize("source_case", ["hydro", "polygon", "polygon-interactive"])
+def test_real_docker_inspect_and_convert(site, source_case):
+    source_format = "hydro" if source_case == "hydro" else "polygon"
+    interactive = source_case == "polygon-interactive"
     client, app, config = site
     register(site)
     package = io.BytesIO()
@@ -707,21 +709,33 @@ def test_real_docker_inspect_and_convert(site, source_format):
             archive.writestr("testdata/1.in", "1 2\n")
             archive.writestr("testdata/1.out", "3\n")
         else:
+            role = "interactor" if interactive else "checker"
             archive.writestr("contest.xml", "<contest/>\n")
             archive.writestr(
                 "problems/numeric/problem.xml",
                 '<problem><names><name language="chinese" value="001024"/></names>'
                 "<judging><testset><time-limit>1000</time-limit><memory-limit>268435456</memory-limit>"
-                '</testset></judging><assets><checker type="testlib"><source path="check.cpp"/>'
-                "</checker></assets></problem>",
+                f'</testset></judging><assets><{role} type="testlib"><source path="check.cpp"/>'
+                f"</{role}></assets></problem>",
             )
             archive.writestr("problems/numeric/tests/01", "1 2\n")
             archive.writestr("problems/numeric/tests/01.a", "3\n")
             archive.writestr("problems/numeric/check.cpp", "int main() { return 0; }\n")
             archive.writestr(
                 "problems/numeric/statement-sections/chinese/legend.tex",
-                r"\textbf{Check \texttt{a\_b}} and $\mathbf{x}+\textbf{y}$.",
+                r"\textbf{Check \texttt{a\_b}} and $\mathbf{x}+\textbf{y}$."
+                r"\begin{center}CENTER_CAPTION\end{center}",
             )
+            for name in ("input", "output", "scoring", "notes"):
+                archive.writestr(
+                    f"problems/numeric/statement-sections/chinese/{name}.tex",
+                    f"BODY_{name}",
+                )
+            if interactive:
+                archive.writestr(
+                    "problems/numeric/statement-sections/chinese/interaction.tex",
+                    "BODY_interaction",
+                )
     response = client.post(
         "/api/inspect",
         files={"file": ("test.zip", package.getvalue(), "application/zip")},
@@ -768,6 +782,11 @@ def test_real_docker_inspect_and_convert(site, source_format):
             markdown = problem.read(statement).decode()
             assert "**Check `a_b`**" in markdown
             assert r"$\mathbf{x}+\textbf{y}$" in markdown
+            assert "CENTER_CAPTION" in markdown
+            for name in ("input", "output", "scoring", "notes"):
+                assert f"BODY_{name}" in markdown
+            if interactive:
+                assert "BODY_interaction" in markdown
 
 
 def test_anonymous_status_reports_worker_and_disk_without_details(site):

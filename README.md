@@ -9,7 +9,7 @@ Online Judge 的 ZIP 题包。
 与多题包，使用统一的 `ProblemBundle` 中间模型保留题面、样例、测试数据、分组、
 checker、interactor、附件和标程，并对无法无损映射的内容生成结构化报告。
 
-当前版本：`0.7.2`
+当前版本：`0.7.3`
 
 版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -345,9 +345,12 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
 - `doall.sh` 默认关闭，只有用户显式启用才执行。
 - 有 C/C++ 源码时优先在 Linux runner 内原生重编译。
 - binary-only Windows 程序才需要 Wine。
+- 交互题分别保留 Input、Output、Interaction；同时支持 Scoring、Constraints、
+  Notes 章节，样例的一侧缺失时仍保留已有内容。
 - TeX 题面支持嵌套的 `\texttt` / `\t`、`\textbf`、`\textit` / `\emph`、
   下划线、删除线和上下标；字体族命令保留正文内容。公式、verbatim 和行内代码
   会受到保护，避免命令或字面内容被后续转换误改。
+- `center` 环境中的文字、图片和图注都会保留。
 - 缺少预生成答案时，需要显式启用 `doall.sh`，或重新导出包含答案的题包。
 
 ### HydroOJ

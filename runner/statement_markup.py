@@ -1,6 +1,6 @@
 """Convert TeX text formatting while shielding code and mathematics.
 
-The upstream Polygon renderer still handles sections, lists, images and samples.
+The upstream Polygon renderer still handles lists and images.
 Opaque tokens keep its regular expressions away from balanced formatting groups,
 math commands and literal code.
 """
@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
+
+from package_security import read_limited_text
 
 
 _FONTS = {
@@ -81,6 +84,7 @@ _COMMAND = re.compile(r"\\([A-Za-z]+)")
 _VERB = re.compile(r"\\(?:verb\*?|lstinline)(?![A-Za-z])(?:\[[^\]]*\])?")
 _DECLARATION = re.compile(r"\s*\\([A-Za-z]+)(?:\s+|(?=[^A-Za-z]))")
 _FENCE = re.compile(r"(?m)^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n")
+_CENTER = re.compile(r"\\(?:begin|end)\{center\}")
 MAX_FORMATTING_DEPTH = 48
 
 
@@ -97,11 +101,14 @@ def _code_span(text: str) -> str:
     return f"{fence}{content}{fence}" if text else ""
 
 
-def _code_block(text: str, language: str = "text") -> str:
+def _code_block(
+    text: str, language: str = "text", *, strip_outer_newlines: bool = True
+) -> str:
     width = max(3, max((len(m[0]) for m in re.finditer(r"`+", text)), default=0) + 1)
     fence = "`" * width
-    body = text.strip("\r\n")
-    return f"\n{fence}{language}\n{body}\n{fence}\n"
+    body = text.strip("\r\n") if strip_outer_newlines else text
+    newline = "" if body.endswith("\n") else "\n"
+    return f"\n{fence}{language}\n{body}{newline}{fence}\n"
 
 
 class _Formatting:
@@ -269,6 +276,13 @@ class _Formatting:
                     output.append(self.keep(text[pos:end]))
                     pos = end
                     continue
+                # Upstream's center handler extracts images and discards every
+                # other child. Keep the body in the normal rendering pipeline.
+                centered = _CENTER.match(text, pos)
+                if centered:
+                    output.append("\n\n")
+                    pos = centered.end()
+                    continue
             if text[pos] == "%":
                 newline = text.find("\n", pos)
                 if newline < 0:
@@ -341,3 +355,90 @@ def render_tex_with_formatting(text: str, renderer: Callable[[str], str]) -> str
     text = text.replace("\r\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
     formatting = _Formatting(text)
     return formatting.restore(renderer(formatting.parse(text)))
+
+
+def render_polygon_sections(
+    sections_dir: Path,
+    *,
+    is_interactive: bool,
+    renderer: Callable[[str], str],
+) -> str:
+    def read(path: Path) -> str:
+        if not path.is_file():
+            return ""
+        text = read_limited_text(path)
+        return text.replace("\r\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+
+    sections = {
+        name: read(sections_dir / f"{name}.tex").strip()
+        for name in (
+            "legend",
+            "input",
+            "output",
+            "interaction",
+            "scoring",
+            "constraints",
+            "notes",
+        )
+    }
+    samples: dict[str, dict[str, Path]] = {}
+    for path in sorted(sections_dir.iterdir()):
+        match = re.fullmatch(r"example\.(\d+)(\.a)?", path.name)
+        if path.is_file() and match:
+            samples.setdefault(match[1], {})["output" if match[2] else "input"] = path
+    # A directory with just name.tex must not mask a usable declared HTML/TeX
+    # statement by returning a nonempty placeholder.
+    if not any(sections.values()) and not samples:
+        return ""
+
+    lines = [
+        "# Description",
+        renderer(sections["legend"])
+        if sections["legend"]
+        else "(No description provided)",
+        "",
+    ]
+    interactive = is_interactive or bool(sections["interaction"])
+    if sections["input"] or sections["output"] or not interactive:
+        lines.extend(["# Format", ""])
+        for name in ("input", "output"):
+            if sections[name] or not interactive:
+                lines.extend(
+                    [
+                        f"## {name.title()}",
+                        renderer(sections[name])
+                        if sections[name]
+                        else f"(No {name} format provided)",
+                        "",
+                    ]
+                )
+    if interactive:
+        lines.extend(
+            [
+                "# Interaction",
+                renderer(sections["interaction"])
+                if sections["interaction"]
+                else "(No interaction provided)",
+                "",
+            ]
+        )
+    for name in ("scoring", "constraints"):
+        if sections[name]:
+            lines.extend([f"# {name.title()}", renderer(sections[name]), ""])
+    if samples:
+        lines.extend(["# Samples", ""])
+        for number, key in enumerate(
+            sorted(samples, key=lambda key: (int(key), key)), 1
+        ):
+            for role in ("input", "output"):
+                if role in samples[key]:
+                    lines.append(
+                        _code_block(
+                            read(samples[key][role]),
+                            f"{role}{number}",
+                            strip_outer_newlines=False,
+                        )
+                    )
+    if sections["notes"]:
+        lines.extend(["# Note", renderer(sections["notes"]), ""])
+    return "\n".join(lines).strip() + "\n"

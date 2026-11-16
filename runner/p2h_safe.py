@@ -26,7 +26,7 @@ from hoj_bridge import (
     convert_hoj_to_hydro,
     convert_hydro_to_hoj,
 )
-from statement_markup import render_tex_with_formatting
+from statement_markup import render_polygon_sections, render_tex_with_formatting
 
 
 EXECUTABLE_SUFFIXES = {".sh", ".bash", ".exe"}
@@ -703,6 +703,27 @@ def _install_statement_patches() -> None:
             module = sys.modules.get(module_name)
             if module is not None and getattr(module, name, None) is original:
                 setattr(module, name, patched)
+
+    try:
+        import p2h.polygon_reader as polygon_reader
+    except ModuleNotFoundError as exc:
+        if exc.name == "p2h.polygon_reader":
+            return
+        raise
+    original_sections = getattr(polygon_reader, "_sections_to_markdown", None)
+    if original_sections is not None and not getattr(
+        original_sections, "_p2h_safe_sections_patch", False
+    ):
+
+        def sections_to_markdown(sections_dir: Path, *, is_interactive: bool) -> str:
+            return render_polygon_sections(
+                sections_dir,
+                is_interactive=is_interactive,
+                renderer=statement_markdown.tex_block_to_markdown,
+            )
+
+        sections_to_markdown._p2h_safe_sections_patch = True  # type: ignore[attr-defined]
+        polygon_reader._sections_to_markdown = sections_to_markdown
 
 
 def _install_p2h_patches() -> Any:

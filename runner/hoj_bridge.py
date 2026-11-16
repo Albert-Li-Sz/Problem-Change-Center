@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import tempfile
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -759,16 +760,33 @@ def _read_hydro_code_templates(hydro_dir: Path) -> list[dict[str, str]]:
 
 
 def _split_hydro_statement(markdown: str, title: str) -> dict[str, str]:
-    sample_pairs = _parse_hydro_samples(markdown)
-    without_samples = re.sub(
-        r"```(?:input|output)\d*\s*\n[\s\S]*?\n```", "", markdown, flags=re.I
-    )
+    sample_pairs = [
+        pair
+        for pair in _hydro_sample_pairs(markdown)
+        if _hoj_sample_representable(pair)
+    ]
+    spans = sorted((block.start, block.end) for pair in sample_pairs for block in pair)
+    chunks = []
+    offset = 0
+    for start, end in spans:
+        chunks.append(markdown[offset:start])
+        offset = end
+    chunks.append(markdown[offset:])
+    without_samples = "".join(chunks)
+    literal_blocks = iter(_markdown_fences(without_samples))
+    literal = next(literal_blocks, None)
     sections: dict[str, list[str]] = {
         key: [] for key in ("description", "input", "output", "hint", "source")
     }
     current = "description"
-    for line in without_samples.splitlines():
-        match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+    offset = 0
+    for raw_line in without_samples.splitlines(keepends=True):
+        while literal is not None and offset >= literal.end:
+            literal = next(literal_blocks, None)
+        inside_code = literal is not None and literal.start <= offset < literal.end
+        offset += len(raw_line)
+        line = raw_line.rstrip("\r\n")
+        match = None if inside_code else re.match(r"^#{1,6}\s+(.+?)\s*$", line)
         if match:
             heading = re.sub(r"[：:]$", "", match.group(1).strip()).lower()
             section = _statement_section(heading)
@@ -781,8 +799,8 @@ def _split_hydro_statement(markdown: str, title: str) -> dict[str, str]:
 
     result = {key: "\n".join(lines).strip() for key, lines in sections.items()}
     result["examples"] = "".join(
-        f"<input>{sample_input}</input><output>{sample_output}</output>"
-        for sample_input, sample_output in sample_pairs
+        f"<input>{input_block.content}</input><output>{output_block.content}</output>"
+        for input_block, output_block in sample_pairs
     )
     return result
 
@@ -804,13 +822,65 @@ def _statement_section(heading: str) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class _MarkdownFence:
+    start: int
+    end: int
+    info: str
+    content: str
+
+
+def _markdown_fences(markdown: str) -> list[_MarkdownFence]:
+    opening = re.compile(r"(?m)^ {0,3}(`{3,}|~{3,})([^\n]*)\n")
+    blocks = []
+    offset = 0
+    while match := opening.search(markdown, offset):
+        fence = match[1]
+        closing = re.compile(
+            r"(?m)^ {0,3}"
+            + re.escape(fence[0])
+            + "{"
+            + str(len(fence))
+            + r",}[ \t]*\r?(?:\n|$)"
+        ).search(markdown, match.end())
+        if closing is None:
+            blocks.append(_MarkdownFence(match.start(), len(markdown), "", ""))
+            break
+        content = (
+            markdown[match.end() : closing.start()]
+            .removesuffix("\n")
+            .removesuffix("\r")
+        )
+        blocks.append(
+            _MarkdownFence(match.start(), closing.end(), match[2].strip(), content)
+        )
+        offset = closing.end()
+    return blocks
+
+
+def _hydro_sample_pairs(markdown: str) -> list[tuple[_MarkdownFence, _MarkdownFence]]:
+    inputs = []
+    outputs: dict[str, deque[_MarkdownFence]] = defaultdict(deque)
+    for block in _markdown_fences(markdown):
+        match = re.fullmatch(r"(input|output)([0-9]*)", block.info, re.I)
+        if match:
+            key = (match[2].lstrip("0") or "0") if match[2] else ""
+            if match[1].lower() == "input":
+                inputs.append((key, block))
+            else:
+                outputs[key].append(block)
+    return [(block, outputs[key].popleft()) for key, block in inputs if outputs[key]]
+
+
+def _hoj_sample_representable(pair: tuple[_MarkdownFence, _MarkdownFence]) -> bool:
+    sample_input, sample_output = (block.content for block in pair)
+    encoded = f"<input>{sample_input}</input><output>{sample_output}</output>"
+    # HOJ uses a literal delimiter protocol, with no entity-unescaping step.
+    return _parse_hoj_examples(encoded) == [(sample_input, sample_output)]
+
+
 def _parse_hydro_samples(markdown: str) -> list[tuple[str, str]]:
-    inputs = re.findall(r"```input\d*\s*\n([\s\S]*?)\n```", markdown, flags=re.I)
-    outputs = re.findall(r"```output\d*\s*\n([\s\S]*?)\n```", markdown, flags=re.I)
-    return [
-        (value, outputs[idx] if idx < len(outputs) else "")
-        for idx, value in enumerate(inputs)
-    ]
+    return [(a.content, b.content) for a, b in _hydro_sample_pairs(markdown)]
 
 
 def _hydro_case_groups(
