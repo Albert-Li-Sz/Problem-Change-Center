@@ -153,7 +153,7 @@ def test_hoj_unrepresentable_sample_stays_in_statement_with_loss(
         archive.writestr("P1/testdata/1.out", "1\n")
     output = tmp_path / "hoj"
     report = convert_package(source, output, source_format="hydro", target_format="hoj")
-    metadata = json.loads(next(output.glob("*.json")).read_text())
+    metadata = json.loads(next(output.glob("problem_*.json")).read_text())
     assert metadata["problem"]["examples"] == ""
     assert "</input> literal" in metadata["problem"]["description"]
     assert "</output> literal" in metadata["problem"]["description"]
