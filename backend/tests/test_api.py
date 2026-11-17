@@ -813,6 +813,33 @@ def test_external_mode_limits_auth_failures_without_locking_out_valid_key(
     assert client.get("/api/health", headers=_access_headers()).status_code == 200
 
 
+def test_external_mode_derives_the_access_key_only_until_one_is_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import security
+
+    monkeypatch.setattr(security, "_VERIFIED_KEYS", {})
+    calls = 0
+    original = security.hashlib.pbkdf2_hmac
+
+    def counting(*args: object, **kwargs: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(security.hashlib, "pbkdf2_hmac", counting)
+    client = _client(_external_settings(tmp_path))
+    wrong = {"host": "converter.example.com", "x-p2h-access-key": "wrong-key"}
+
+    assert client.get("/api/health", headers=wrong).status_code == 401
+    assert client.get("/api/health", headers=_access_headers()).status_code == 200
+    assert calls == 2
+    # Once a key has passed, neither valid nor invalid requests pay for PBKDF2.
+    assert client.get("/api/health", headers=_access_headers()).status_code == 200
+    assert client.get("/api/health", headers=wrong).status_code == 401
+    assert calls == 2
+
+
 def test_request_body_limit_rejects_before_upload_parsing(tmp_path: Path) -> None:
     settings = _external_settings(tmp_path, max_request_body_bytes=64)
     client = _client(settings)

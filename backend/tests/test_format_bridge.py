@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -119,7 +120,7 @@ def test_domjudge_to_hydro_uses_pdf_statement_and_preserves_problem_files(
         assert "time" in config and "2.5s" in config
         assert "memory" in config and "512m" in config
         assert "checker_type" in config and "testlib" in config
-        assert "checker.cpp" in config
+        assert yaml.safe_load(config)["checker"] == "checker.cpp"
 
 
 def test_domjudge_to_hydro_accepts_outer_zip_of_nested_problem_packages(

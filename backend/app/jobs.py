@@ -88,6 +88,7 @@ class JobManager:
         self.logger = structured_logger("p2h.jobs")
         self._lock = threading.RLock()
         self._runtime: dict[str, RuntimeJob] = {}
+        self._last_cleanup = float("-inf")
 
     def start(self, request: JobRequest) -> JobResponse:
         self.cleanup_expired()
@@ -270,8 +271,13 @@ class JobManager:
                 continue
             if metadata.status not in {"queued", "running"}:
                 continue
-            stop_container(self.settings, job_id)
             paths = self.storage.paths_for(job_id)
+            if metadata.status == "queued" and not paths.request_path.exists():
+                # Uploaded and inspected but never started: "queued" is also
+                # the status of a fresh upload, and start() writes the request
+                # file before any work begins. Nothing was interrupted.
+                continue
+            stop_container(self.settings, job_id)
             if paths.result_path.exists():
                 paths.result_path.unlink()
             metadata.status = "failed"
@@ -443,6 +449,15 @@ class JobManager:
                     metadata.status = "failed"
                     metadata.finished_at = utc_now_iso()
                     metadata.error = f"Runner exited with code {exit_code}"
+                    if exit_code == 137:
+                        # SIGKILL, normally the kernel enforcing --memory.
+                        metadata.error += (
+                            "; the runner was killed, most likely for exceeding "
+                            "P2H_DOCKER_MEMORY (tmpfs data counts towards it)"
+                        )
+                        self.storage.append_log(
+                            request.job_id, f"backend error: {metadata.error}\n"
+                        )
                     self.storage.write_metadata(metadata)
                 return
 
@@ -570,6 +585,20 @@ class JobManager:
                 runtime = self._runtime.get(request.job_id)
                 if runtime:
                     runtime.process = None
+
+    def cleanup_if_due(self, interval_seconds: float = 60.0) -> int:
+        """Run cleanup_expired at most once per interval.
+
+        Scanning every stored job on each request made request latency grow
+        with the number of jobs; an expired job may now outlive its TTL by up
+        to the interval.
+        """
+        with self._lock:
+            current = time.monotonic()
+            if current - self._last_cleanup < interval_seconds:
+                return 0
+            self._last_cleanup = current
+        return self.cleanup_expired()
 
     def cleanup_expired(self, *, now: datetime | None = None) -> int:
         current_time = now or datetime.now(timezone.utc)

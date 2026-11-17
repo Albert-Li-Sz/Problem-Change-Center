@@ -17,6 +17,7 @@ import {
 } from "./api";
 
 vi.mock("./api", () => ({
+  publicMode: false,
   applyRepairs: vi.fn(),
   cancelJob: vi.fn(),
   deleteJob: vi.fn(),
@@ -148,7 +149,7 @@ describe("App archive selection", () => {
   it("links the navigation and footer to the project repository", () => {
     render(<App />);
 
-    const expectedUrl = "https://github.com/LMTINSUZHOU/Problem-Change-Center";
+    const expectedUrl = "https://github.com/Albert-Li-Sz/Problem-Change-Center";
     const navigationLink = screen.getByRole("link", { name: "项目" });
     const footerLink = screen.getByRole("link", { name: "Problem Change Center" });
 

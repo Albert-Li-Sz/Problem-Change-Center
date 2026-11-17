@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import codecs
+import os
+import selectors
 import shutil
+import signal
 
 # Invokes this runner's fixed Python entrypoint without a shell.
 import subprocess  # nosec B404
@@ -20,6 +24,15 @@ from progress import ProgressReporter
 
 REPORT_FILENAME = ".p2h-report.json"
 MAX_NESTED_PACKAGES = 1000
+# Raised when package metadata has an unexpected shape, for example a list
+# where a number belongs. Readers validate most fields, but a stray one must
+# end in a diagnostic report rather than a traceback.
+MALFORMED_METADATA_ERRORS = (
+    ArithmeticError,
+    AttributeError,
+    LookupError,
+    TypeError,
+)
 EXPECTED_CONVERSION_ERRORS = (
     OSError,
     RuntimeError,
@@ -293,6 +306,44 @@ def _polygon_command(
     return command
 
 
+def _run_polygon_subprocess(command: list[str], reporter: ProgressReporter) -> int:
+    # Read both output streams as they arrive. Inheriting stdout lets the host
+    # see activity but leaves this process's CLI idle deadline unchanged.
+    with subprocess.Popen(  # nosec B603
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    ) as process:
+        if process.stdout is None:
+            raise RuntimeError("Polygon converter stdout pipe is unavailable")
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while selector.get_map():
+                    for key, _ in selector.select(timeout=0.2):
+                        chunk = os.read(key.fd, 64 * 1024)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        reporter.activity()
+                        reporter.stream.write(decoder.decode(chunk))
+                        reporter.stream.flush()
+                reporter.stream.write(decoder.decode(b"", final=True))
+                reporter.stream.flush()
+            return process.wait()
+        except BaseException:
+            # A deadline or cancellation must stop doall.sh and its children,
+            # including descendants still holding the output pipe open.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise
+
+
 def _run_polygon_route(
     source_zip: Path,
     output: Path,
@@ -317,14 +368,14 @@ def _run_polygon_route(
         detail=f"running Polygon optimized route to {direct_target}",
     )
     # The argv is internally constructed and shell=False is retained.
-    result = subprocess.run(  # nosec B603
+    returncode = _run_polygon_subprocess(
         _polygon_command(
             source_zip, polygon_output, target=direct_target, options=options, only=only
         ),
-        check=False,
+        reporter,
     )
-    if result.returncode != 0:
-        raise ValueError(f"Polygon converter exited with code {result.returncode}")
+    if returncode != 0:
+        raise ValueError(f"Polygon converter exited with code {returncode}")
     if target_format == "hydro" or return_direct_icpc:
         artifacts = sorted(
             path.relative_to(polygon_output).as_posix()
@@ -591,6 +642,19 @@ def convert_package(
                 message=f"failed to read {detected} package: {exc}",
             )
             raise
+        except MALFORMED_METADATA_ERRORS as exc:
+            message = (
+                f"{detected} package metadata has an unexpected structure: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            _write_fatal_report_if_missing(
+                output,
+                source_format=detected,
+                target_format=target_format,
+                code="source-metadata-error",
+                message=message,
+            )
+            raise ValueError(message) from exc
         bundle.applied_repairs = applied_repairs
         if source_override_candidates:
             bundle.add_issue(

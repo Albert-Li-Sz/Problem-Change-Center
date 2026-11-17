@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 from yaml.events import AliasEvent
-from yaml.nodes import MappingNode
+from yaml.nodes import MappingNode, ScalarNode
 
 
 MAX_METADATA_BYTES = 4 * 1024 * 1024
@@ -23,6 +23,8 @@ class LimitedSafeLoader(yaml.SafeLoader):
         self._p2h_aliases = 0
         self._p2h_depth = 0
         self._p2h_nodes = 0
+        self._p2h_text_fields: tuple[str, ...] = ()
+        self._p2h_root: Any = None
 
     def compose_node(self, parent: Any, index: Any) -> Any:
         if self.check_event(AliasEvent):
@@ -41,7 +43,9 @@ class LimitedSafeLoader(yaml.SafeLoader):
         finally:
             self._p2h_depth -= 1
 
-    def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+    def construct_mapping(
+        self, node: Any, deep: bool = False, *, text_values: bool = False
+    ) -> dict[Any, Any]:
         if not isinstance(node, MappingNode):
             raise ValueError("YAML mapping node is invalid")
         self.flatten_mapping(node)
@@ -54,7 +58,17 @@ class LimitedSafeLoader(yaml.SafeLoader):
                 raise ValueError("YAML mapping contains an unhashable key") from exc
             if duplicate:
                 raise ValueError(f"duplicate YAML mapping key: {key!r}")
-            mapping[key] = self.construct_object(value_node, deep=deep)
+            text_field = text_values or (
+                node is self._p2h_root and key in self._p2h_text_fields
+            )
+            if text_field and isinstance(value_node, ScalarNode):
+                mapping[key] = value_node.value
+            elif text_field and not text_values and isinstance(value_node, MappingNode):
+                mapping[key] = self.construct_mapping(
+                    value_node, deep, text_values=True
+                )
+            else:
+                mapping[key] = self.construct_object(value_node, deep=deep)
         return mapping
 
 
@@ -68,14 +82,20 @@ def read_limited_text(path: Path, *, limit: int = MAX_METADATA_BYTES) -> str:
         raise ValueError(f"metadata file is not valid UTF-8: {path.name}") from exc
 
 
-def load_yaml_file(path: Path) -> dict[str, Any]:
+def load_yaml_file(
+    path: Path, *, string_fields: tuple[str, ...] = ()
+) -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        # LimitedSafeLoader subclasses yaml.SafeLoader and only adds stricter limits.
-        value = yaml.load(  # nosec B506
-            read_limited_text(path), Loader=LimitedSafeLoader
-        )
+        loader = LimitedSafeLoader(read_limited_text(path))
+        try:
+            node = loader.get_single_node()
+            loader._p2h_root = node
+            loader._p2h_text_fields = string_fields
+            value = loader.construct_document(node) if node is not None else None
+        finally:
+            loader.dispose()
     except (OSError, yaml.YAMLError, ValueError) as exc:
         raise ValueError(f"invalid YAML {path.name}: {exc}") from exc
     if value is None:
@@ -84,6 +104,12 @@ def load_yaml_file(path: Path) -> dict[str, Any]:
         raise ValueError(f"YAML root must be a mapping: {path.name}")
     validate_structure(value, source=path.name)
     return value
+
+
+def load_problem_yaml_file(path: Path) -> dict[str, Any]:
+    # Preserve the spelling of text metadata before YAML resolves 00042 to an
+    # octal integer or 0 to a falsey value. Limits and scores keep their types.
+    return load_yaml_file(path, string_fields=("title", "name", "pid", "id", "slug"))
 
 
 def load_json_text(text: str, *, source: str) -> Any:

@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -300,6 +301,30 @@ def test_hydro_writer_patch_adds_checker_language(monkeypatch) -> None:
         writer_module._build_config_yaml()
         == "checker:\n  file: check.cpp\n  lang: auto\n"
     )  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("title", ["1024", "true", "null", "A: B", "# title", "[A, B]"])
+def test_hydro_writer_patch_preserves_metadata_strings(monkeypatch, title: str) -> None:
+    p2h_module = types.ModuleType("p2h")
+    p2h_module.__path__ = []  # type: ignore[attr-defined]
+    writer_module = types.ModuleType("p2h.hydro_writer")
+    # Upstream interpolates the title directly into a plain YAML scalar.
+    writer_module._build_problem_yaml = (  # type: ignore[attr-defined]
+        lambda pid, owner, title, tags: f"pid: {pid}\nowner: {owner}\ntitle: {title}\n"
+    )
+    monkeypatch.setitem(sys.modules, "p2h", p2h_module)
+    monkeypatch.setitem(sys.modules, "p2h.hydro_writer", writer_module)
+
+    p2h_safe._install_hydro_writer_patches()
+    p2h_safe._install_hydro_writer_patches()
+    result = yaml.safe_load(
+        writer_module._build_problem_yaml("P1013", 1, title, ["O'Brien", "1024"])
+    )
+    assert result["title"] == title
+    assert isinstance(result["title"], str)
+    assert result["pid"] == "P1013"
+    assert result["owner"] == 1
+    assert result["tag"] == ["O'Brien", "1024"]
 
 
 def test_p2h_doall_patch_repairs_permissions_before_running(

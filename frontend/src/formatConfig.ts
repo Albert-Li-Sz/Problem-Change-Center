@@ -69,7 +69,7 @@ export const progressLabels: Record<
 };
 
 export const projectUrl =
-  "https://github.com/LMTINSUZHOU/Problem-Change-Center";
+  "https://github.com/Albert-Li-Sz/Problem-Change-Center";
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

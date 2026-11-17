@@ -9,9 +9,11 @@ import shutil
 import subprocess  # nosec B404
 import sys
 import tempfile
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import yaml
 from defusedxml import ElementTree as DefusedET
 
 from format_bridge import (
@@ -24,6 +26,7 @@ from hoj_bridge import (
     convert_hoj_to_hydro,
     convert_hydro_to_hoj,
 )
+from statement_markup import render_polygon_sections, render_tex_with_formatting
 
 
 EXECUTABLE_SUFFIXES = {".sh", ".bash", ".exe"}
@@ -637,8 +640,28 @@ def ensure_checker_lang_auto(config_yaml: str) -> str:
     return result
 
 
+def build_hydro_problem_yaml(pid: str, owner: int, title: str, tags: list[str]) -> str:
+    # Plain interpolation turns titles such as "1024" into a YAML number.
+    # Hydro rejects non-string titles when importing problem.yaml.
+    return yaml.safe_dump(
+        {
+            "pid": str(pid),
+            "owner": owner,
+            "title": str(title),
+            "tag": tags,
+            "nSubmit": 0,
+            "nAccept": 0,
+        },
+        allow_unicode=True,
+        sort_keys=False,
+    )
+
+
 def _install_hydro_writer_patches() -> None:
     import p2h.hydro_writer as hydro_writer
+
+    if hasattr(hydro_writer, "_build_problem_yaml"):
+        hydro_writer._build_problem_yaml = build_hydro_problem_yaml
 
     original = getattr(hydro_writer, "_build_config_yaml", None)
     if original is None or getattr(original, "_p2h_safe_checker_language_patch", False):
@@ -651,6 +674,58 @@ def _install_hydro_writer_patches() -> None:
     hydro_writer._build_config_yaml = build_config_yaml_with_checker_language_auto
 
 
+def _install_statement_patches() -> None:
+    try:
+        import p2h.statement_markdown as statement_markdown
+    except ModuleNotFoundError as exc:
+        if exc.name in {"p2h", "p2h.statement_markdown"}:
+            return
+        raise
+
+    def wrap(original: Any) -> Any:
+        @wraps(original)
+        def render(text: str) -> str:
+            return render_tex_with_formatting(text, original)
+
+        render._p2h_safe_text_formatting_patch = True  # type: ignore[attr-defined]
+        return render
+
+    for name in ("tex_to_markdown", "tex_block_to_markdown"):
+        original = getattr(statement_markdown, name, None)
+        if original is None or getattr(
+            original, "_p2h_safe_text_formatting_patch", False
+        ):
+            continue
+        patched = wrap(original)
+        setattr(statement_markdown, name, patched)
+        # These modules may already have imported the renderer directly.
+        for module_name in ("p2h.polygon_reader", "p2h.cli"):
+            module = sys.modules.get(module_name)
+            if module is not None and getattr(module, name, None) is original:
+                setattr(module, name, patched)
+
+    try:
+        import p2h.polygon_reader as polygon_reader
+    except ModuleNotFoundError as exc:
+        if exc.name == "p2h.polygon_reader":
+            return
+        raise
+    original_sections = getattr(polygon_reader, "_sections_to_markdown", None)
+    if original_sections is not None and not getattr(
+        original_sections, "_p2h_safe_sections_patch", False
+    ):
+
+        def sections_to_markdown(sections_dir: Path, *, is_interactive: bool) -> str:
+            return render_polygon_sections(
+                sections_dir,
+                is_interactive=is_interactive,
+                renderer=statement_markdown.tex_block_to_markdown,
+            )
+
+        sections_to_markdown._p2h_safe_sections_patch = True  # type: ignore[attr-defined]
+        polygon_reader._sections_to_markdown = sections_to_markdown
+
+
 def _install_p2h_patches() -> Any:
     try:
         _install_hydro_writer_patches()
@@ -658,6 +733,7 @@ def _install_p2h_patches() -> Any:
         if exc.name not in {"p2h", "p2h.hydro_writer"}:
             raise
 
+    _install_statement_patches()
     p2h_convert = _load_p2h_convert()
     p2h_convert._collect_tools_from_script = collect_tools_from_script
 

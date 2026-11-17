@@ -70,17 +70,24 @@ class JobPaths:
 
 
 class Storage:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, *, job_index=None, backfill: bool = True
+    ) -> None:
         self.settings = settings
         self.jobs_dir = settings.data_dir / "jobs"
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.job_index = JobIndex(settings.data_dir / "jobs.sqlite3")
+        self.job_index = (
+            job_index
+            if job_index is not None
+            else JobIndex(settings.data_dir / "jobs.sqlite3")
+        )
         self._upload_lock = asyncio.Lock()
         self._log_lock = threading.Lock()
         self._metadata_lock = threading.RLock()
         self._change_condition = threading.Condition()
         self._change_revisions: dict[str, int] = {}
-        self._backfill_job_index()
+        if backfill:
+            self._backfill_job_index()
 
     def _backfill_job_index(self) -> None:
         existing_ids: set[str] = set()
@@ -117,11 +124,13 @@ class Storage:
         parent_job_id: str,
         repair_request: RepairRequest,
         uploads: list[UploadFile],
+        *,
+        reserved_job_id: str | None = None,
     ) -> tuple[str, dict[str, object]]:
         try:
             async with self._upload_lock:
                 return await self._create_repair_job_locked(
-                    parent_job_id, repair_request, uploads
+                    parent_job_id, repair_request, uploads, reserved_job_id
                 )
         finally:
             for upload in uploads:
@@ -132,6 +141,7 @@ class Storage:
         parent_job_id: str,
         repair_request: RepairRequest,
         uploads: list[UploadFile],
+        reserved_job_id: str | None = None,
     ) -> tuple[str, dict[str, object]]:
         parent = self.read_metadata(parent_job_id)
         if parent.status != "failed":
@@ -162,7 +172,9 @@ class Storage:
                 detail="Stored job limit reached; delete an existing job and retry",
             )
         parent_size = self.paths_for(parent_job_id).upload_path.stat().st_size
-        existing_bytes = self.total_storage_bytes()
+        # Walking the data directory, copying and hashing can each take seconds;
+        # keep them off the event loop so other requests are still served.
+        existing_bytes = await asyncio.to_thread(self.total_storage_bytes)
         if existing_bytes + parent_size > self.settings.max_storage_bytes:
             raise HTTPException(
                 status_code=507,
@@ -199,17 +211,21 @@ class Storage:
                 detail="Repair uploads do not match the confirmed repair plan",
             )
 
-        job_id = uuid.uuid4().hex
+        job_id = reserved_job_id or uuid.uuid4().hex
         paths = self.paths_for(job_id)
+        if paths.root.exists():
+            raise HTTPException(status_code=409, detail="Repair job already exists")
         try:
             paths.input_dir.mkdir(parents=True, exist_ok=False)
             paths.work_dir.mkdir()
             paths.output_dir.mkdir()
             paths.logs_path.write_text("", encoding="utf-8")
-            _copy_file_bounded(
-                self.paths_for(parent_job_id).upload_path, paths.upload_path
+            await asyncio.to_thread(
+                _copy_file_bounded,
+                self.paths_for(parent_job_id).upload_path,
+                paths.upload_path,
             )
-            source_hash = _sha256_file(paths.upload_path)
+            source_hash = await asyncio.to_thread(_sha256_file, paths.upload_path)
         except Exception:
             shutil.rmtree(paths.root, ignore_errors=True)
             raise
@@ -349,7 +365,7 @@ class Storage:
                 status_code=507,
                 detail="Stored job limit reached; delete an existing job and retry",
             )
-        existing_bytes = self.total_storage_bytes()
+        existing_bytes = await asyncio.to_thread(self.total_storage_bytes)
         if existing_bytes >= self.settings.max_storage_bytes:
             raise HTTPException(
                 status_code=507,

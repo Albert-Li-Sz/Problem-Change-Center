@@ -1,4 +1,4 @@
-import { Dispatch, MutableRefObject, SetStateAction, useEffect } from "react";
+import { Dispatch, MutableRefObject, SetStateAction, useEffect, useRef, useState } from "react";
 
 import {
   ConversionReport,
@@ -44,6 +44,18 @@ export function useJobLifecycle({
   setReport,
   setError
 }: JobLifecycleOptions): void {
+  // Restarting a failed or cancelled job keeps its id, so the id alone cannot
+  // tell the effect below that a new run needs a fresh subscription.
+  const active = job?.status === "queued" || job?.status === "running";
+  const [run, setRun] = useState(0);
+  const previous = useRef({ id: job?.id, active });
+  useEffect(() => {
+    const restarted =
+      previous.current.id === job?.id && !previous.current.active && active;
+    previous.current = { id: job?.id, active };
+    if (restarted) setRun((value) => value + 1);
+  }, [job?.id, active]);
+
   useEffect(() => {
     if (!job || (job.status !== "queued" && job.status !== "running")) return;
     const jobId = job.id;
@@ -117,7 +129,10 @@ export function useJobLifecycle({
       closeStream = subscribeToJobEvents(
         jobId,
         {
-          onOpen: stopPolling,
+          onOpen: () => {
+            reconnectAttempts = 0;
+            stopPolling();
+          },
           onJob: (nextJob) => {
             if (!isCurrent()) return;
             terminal = !["queued", "running"].includes(nextJob.status);
@@ -155,11 +170,14 @@ export function useJobLifecycle({
               return;
             }
             schedulePoll(0);
-            if (reconnectAttempts < sseRetryDelaysMs.length) {
-              const delay = sseRetryDelaysMs[reconnectAttempts];
-              reconnectAttempts += 1;
-              reconnectTimer = window.setTimeout(connect, delay);
-            }
+            // Polling downloads the whole log each time, so it only bridges
+            // the gap: keep retrying the stream at the longest delay.
+            const delay =
+              sseRetryDelaysMs[
+                Math.min(reconnectAttempts, sseRetryDelaysMs.length - 1)
+              ];
+            reconnectAttempts += 1;
+            reconnectTimer = window.setTimeout(connect, delay);
           }
         },
         eventCursor
@@ -175,5 +193,5 @@ export function useJobLifecycle({
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       closeStream?.();
     };
-  }, [job?.id, requestEpoch, setError, setJob, setLogs, setReport]);
+  }, [job?.id, run, requestEpoch, setError, setJob, setLogs, setReport]);
 }

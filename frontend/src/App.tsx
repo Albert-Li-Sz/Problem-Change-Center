@@ -212,6 +212,8 @@ export default function App() {
       });
       if (requestEpoch.current !== epoch) return;
       setJob(nextJob);
+      setLogs("");
+      setReport(null);
     } catch (err) {
       if (requestEpoch.current !== epoch) return;
       setError(err instanceof Error ? err.message : "任务启动失败");

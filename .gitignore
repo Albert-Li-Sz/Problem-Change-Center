@@ -18,3 +18,8 @@ __pycache__/
 .DS_Store
 .playwright-mcp/
 *.log
+.env.public
+.public-dev/
+.coverage
+*.swp
+*.swo

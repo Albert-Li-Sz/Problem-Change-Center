@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import Settings
@@ -199,12 +200,18 @@ async def enforce_request_security(
             "Untrusted Host header",
         )
 
-    if (
+    needs_key = (
         settings.is_external
         and request.method != "OPTIONS"
         and request.url.path not in _AUTH_EXEMPT_PATHS
-        and not _valid_access_key(request, settings)
-    ):
+    )
+    key_valid = needs_key and _cached_access_key(request, settings)
+    if needs_key and not key_valid and not _access_key_known(settings):
+        # PBKDF2 is deliberately slow, so it runs off the event loop and only
+        # until one key has passed. After that there is a single known-good
+        # key, and anything else is rejected by the cheap comparison above.
+        key_valid = await run_in_threadpool(_valid_access_key, request, settings)
+    if needs_key and not key_valid:
         limiter = _request_rate_limiter(request)
         allowed, retry_after = limiter.check(
             _client_identity(request),
@@ -383,9 +390,41 @@ def _host_allowed(host: str, allowed_hosts: tuple[str, ...]) -> bool:
     )
 
 
+# SHA-256 of the key that last passed PBKDF2, per configured hash. It lives in
+# memory only and lets later requests skip the slow derivation.
+_VERIFIED_KEYS: dict[str, bytes] = {}
+
+
+def _supplied_key_digest(request: Request) -> bytes | None:
+    supplied = request.headers.get("x-p2h-access-key", "")
+    if not supplied:
+        return None
+    try:
+        return hashlib.sha256(supplied.encode("utf-8")).digest()
+    except UnicodeError:
+        return None
+
+
+def _access_key_known(settings: Settings) -> bool:
+    return (settings.access_key_hash or "") in _VERIFIED_KEYS
+
+
+def _cached_access_key(request: Request, settings: Settings) -> bool:
+    known = _VERIFIED_KEYS.get(settings.access_key_hash or "")
+    supplied = _supplied_key_digest(request)
+    return (
+        known is not None
+        and supplied is not None
+        and hmac.compare_digest(known, supplied)
+    )
+
+
 def _valid_access_key(request: Request, settings: Settings) -> bool:
     encoded = settings.access_key_hash
     if not encoded:
+        return False
+    supplied_digest = _supplied_key_digest(request)
+    if supplied_digest is None:
         return False
     try:
         algorithm, iterations_text, salt_hex, expected_hex = encoded.split("$", 3)
@@ -400,7 +439,10 @@ def _valid_access_key(request: Request, settings: Settings) -> bool:
         ).hex()
     except (UnicodeError, ValueError):
         return False
-    return hmac.compare_digest(digest, expected_hex)
+    if not hmac.compare_digest(digest, expected_hex):
+        return False
+    _VERIFIED_KEYS[encoded] = supplied_digest
+    return True
 
 
 def _unsafe_origin_error(request: Request, settings: Settings) -> str | None:

@@ -30,6 +30,14 @@ def build_docker_command(
 ) -> list[str]:
     runner_image = _runner_image_for_request(settings.runner_image, request)
     cmd = _base_docker_command(settings, job_id, paths, runner_image)
+    return cmd + conversion_arguments(settings, paths, request)
+
+
+def conversion_arguments(
+    settings: Settings, paths: JobPaths, request: JobRequest
+) -> list[str]:
+    """Build converter arguments independently of its execution environment."""
+    cmd: list[str] = []
 
     if not request.is_legacy_request:
         _append_package_convert_args(cmd, request, paths, settings)
@@ -150,6 +158,11 @@ def _runner_image_for_request(image: str, request: JobRequest) -> str:
         return image
 
     prefix, name, suffix = _split_image_name(image)
+    if suffix.startswith("@"):
+        # A digest identifies the Wine image only; the plain runner has a
+        # different digest that cannot be derived from it. The Wine image
+        # contains the full converter, so keep using it.
+        return image
     if name.endswith("-wine"):
         return f"{prefix}{name.removesuffix('-wine')}{suffix}"
     return image

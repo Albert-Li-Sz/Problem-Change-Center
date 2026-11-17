@@ -68,6 +68,7 @@ COPY package_converter.py /opt/package_converter.py
 COPY package_repair.py /opt/package_repair.py
 COPY progress.py /opt/progress.py
 COPY p2h_safe.py /opt/p2h_safe.py
+COPY statement_markup.py /opt/statement_markup.py
 RUN chmod +x /usr/local/bin/p2h-entrypoint \
   && PYTHONPATH=/opt python -c 'import package_converter'
 

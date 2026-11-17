@@ -192,7 +192,7 @@ exit 1
     fake_docker.chmod(fake_docker.stat().st_mode | 0o100)
     environment = os.environ.copy()
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
-    image = "ghcr.io/lmtinsuzhou/p2h-runner@sha256:" + "a" * 64
+    image = "ghcr.io/albert-li-sz/p2h-runner@sha256:" + "a" * 64
 
     completed = subprocess.run(
         [
@@ -222,6 +222,87 @@ exit 1
     assert "P2H_FRONTEND_PORT=11452\n" in (project_root / ".env").read_text(
         encoding="utf-8"
     )
+
+
+@pytest.mark.parametrize(
+    ("options", "answers", "images"),
+    [
+        (
+            ["--interactive"],
+            "1\ny\n1\n",
+            [
+                "ghcr.io/albert-li-sz/p2h-runner-wine:main",
+                "ghcr.io/albert-li-sz/p2h-runner:main",
+            ],
+        ),
+        (
+            ["--non-interactive", "--no-wine", "--runner-source", "prebuilt"],
+            "",
+            ["ghcr.io/albert-li-sz/p2h-runner:main"],
+        ),
+        (
+            [
+                "--non-interactive",
+                "--runner-image",
+                "registry.example:5000/team/runner-wine:test-wine",
+            ],
+            "",
+            [
+                "registry.example:5000/team/runner-wine:test-wine",
+                "registry.example:5000/team/runner:test-wine",
+            ],
+        ),
+        (
+            [
+                "--non-interactive",
+                "--runner-image",
+                "ghcr.io/example/runner-wine@sha256:" + "a" * 64,
+            ],
+            "",
+            ["ghcr.io/example/runner-wine@sha256:" + "a" * 64],
+        ),
+    ],
+)
+def test_installer_pulls_current_namespace_and_companion_runner(
+    tmp_path: Path, options: list[str], answers: str, images: list[str]
+) -> None:
+    project = tmp_path / "project"
+    (project / "scripts").mkdir(parents=True)
+    shutil.copy2(PROJECT_ROOT / "scripts/install.sh", project / "scripts/install.sh")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pulled = tmp_path / "pulled.txt"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        f"#!/usr/bin/env bash\n"
+        'if [[ "${1:-}" == info ]]; then exit 0; fi\n'
+        f'if [[ "${{1:-}}" == pull ]]; then printf "%s\\n" "$2" >> "{pulled}"; exit 0; fi\n'
+        "exit 1\n"
+    )
+    docker.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+    env.pop("P2H_PREBUILT_RUNNER_IMAGE", None)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(project / "scripts/install.sh"),
+            "--skip-backend",
+            "--skip-frontend",
+            *options,
+        ],
+        cwd=project,
+        env=env,
+        input=answers,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert pulled.read_text().splitlines() == images
+    assert f"P2H_RUNNER_IMAGE={images[0]}\n" in (project / ".env").read_text()
 
 
 def test_installer_hashes_external_access_key_without_persisting_plaintext(
