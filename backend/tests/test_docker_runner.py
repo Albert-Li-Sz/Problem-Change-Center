@@ -73,7 +73,10 @@ def test_docker_command_includes_security_flags_and_safe_mode() -> None:
     cap_adds = [cmd[index + 1] for index, item in enumerate(cmd) if item == "--cap-add"]
     assert cap_adds == ["SYS_ADMIN", "SETUID", "SETGID", "SETPCAP", "DAC_OVERRIDE"]
     assert "--security-opt" in cmd
-    assert "no-new-privileges:true" in cmd
+    security_opts = [
+        cmd[index + 1] for index, item in enumerate(cmd) if item == "--security-opt"
+    ]
+    assert security_opts == ["no-new-privileges:true", "apparmor=unconfined"]
     assert "--pids-limit" in cmd
     assert "--memory" in cmd
     assert "--cpus" in cmd

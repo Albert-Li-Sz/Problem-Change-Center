@@ -114,6 +114,13 @@ def _base_docker_command(
         "DAC_OVERRIDE",
         "--security-opt",
         "no-new-privileges:true",
+        # runner/entrypoint.sh makes the root mount private and unmounts
+        # /result inside a fresh namespace before dropping every capability.
+        # Docker's default AppArmor profile denies those mount operations
+        # ("cannot change root filesystem propagation: Permission denied").
+        # Hosts without AppArmor ignore this option.
+        "--security-opt",
+        "apparmor=unconfined",
         "--pids-limit",
         str(_effective_pids_limit(settings, runner_image)),
         "--memory",

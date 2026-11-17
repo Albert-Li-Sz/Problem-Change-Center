@@ -1,5 +1,9 @@
 # 版本变更
 
+## 0.8.1 — 2026-11-17
+
+- 修复启用 AppArmor 的 Linux 主机（如 Ubuntu）上转换失败、报 `unshare: cannot change root filesystem propagation: Permission denied` 的问题：runner 容器改用 `--security-opt apparmor=unconfined`，让入口脚本能在独立 mount 命名空间里隐藏结果挂载；转换器仍在丢弃全部 capability 后运行，seccomp、只读根文件系统和断网限制不变。
+
 ## 0.8.0 — 2026-11-17
 
 - 移除访问控制：删除外部部署模式、`X-P2H-Access-Key` 访问密钥、页面访问验证、外部模式限流与来源校验，以及 `P2H_DEPLOYMENT_MODE`、`P2H_ACCESS_KEY_HASH`、`P2H_RATE_LIMIT_*` 配置；旧 `.env` 中残留的这些变量会被忽略。

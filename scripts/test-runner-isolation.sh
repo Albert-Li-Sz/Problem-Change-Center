@@ -34,6 +34,7 @@ chmod 777 "$audit_dir/result"
   --cap-add SETPCAP \
   --cap-add DAC_OVERRIDE \
   --security-opt no-new-privileges:true \
+  --security-opt apparmor=unconfined \
   --pids-limit 32 \
   --tmpfs /work:rw,exec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=700 \
   --tmpfs /output:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=700 \

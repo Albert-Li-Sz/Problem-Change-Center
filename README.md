@@ -7,7 +7,7 @@ Online Judge 的 ZIP 题包。
 与多题包，使用统一的 `ProblemBundle` 中间模型保留题面、样例、测试数据、分组、
 checker、interactor、附件和标程，并对无法无损映射的内容生成结构化报告。
 
-当前版本：`0.8.0`
+当前版本：`0.8.1`
 
 版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
 
