@@ -4,6 +4,7 @@ import ipaddress
 import math
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,7 +38,10 @@ def _int_env(
 
 
 def _size_env(name: str, default: str) -> str:
-    value = os.getenv(name, default).strip()
+    return _size_value(name, os.getenv(name, default).strip())
+
+
+def _size_value(name: str, value: str) -> str:
     if len(value) > 32:
         raise ValueError(f"{name} must be a positive Docker size such as 512m or 1g")
     match = _SIZE_RE.fullmatch(value)
@@ -53,8 +57,7 @@ def _size_env(name: str, default: str) -> str:
     return value
 
 
-def _positive_number_env(name: str, default: str) -> str:
-    value = os.getenv(name, default).strip()
+def _positive_number_value(name: str, value: str) -> str:
     try:
         parsed = float(value)
     except ValueError as exc:
@@ -62,6 +65,30 @@ def _positive_number_env(name: str, default: str) -> str:
     if not math.isfinite(parsed) or parsed <= 0:
         raise ValueError(f"{name} must be a positive number")
     return value
+
+
+AUTO = "auto"
+
+
+def _auto_or(name: str, default: str, parse: Callable[[str, str], str]) -> str:
+    value = os.getenv(name, default).strip()
+    if value.lower() == AUTO:
+        return AUTO
+    return parse(name, value)
+
+
+def _optional_positive_int_env(name: str) -> int | None:
+    """Return None for "auto" (or unset), otherwise a positive integer."""
+    value = os.getenv(name, AUTO).strip()
+    if value.lower() == AUTO:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer or auto") from exc
+    if parsed < 1:
+        raise ValueError(f"{name} must be a positive integer or auto")
+    return parsed
 
 
 def _nonempty_env(name: str, default: str) -> str:
@@ -119,6 +146,7 @@ class Settings:
     docker_tmp_size: str
     docker_work_size: str
     docker_output_size: str = "1g"
+    docker_doall_jobs: int | None = None
     max_concurrent_jobs: int = 2
     max_stored_jobs: int = 100
     max_storage_bytes: int = 10 * 1024 * 1024 * 1024
@@ -168,8 +196,9 @@ class Settings:
             max_upload_bytes=max_upload_bytes,
             job_timeout_seconds=_int_env("P2H_JOB_TIMEOUT_SECONDS", 7200),
             job_ttl_seconds=_int_env("P2H_JOB_TTL_SECONDS", 24 * 60 * 60),
-            docker_memory=_size_env("P2H_DOCKER_MEMORY", "3g"),
-            docker_cpus=_positive_number_env("P2H_DOCKER_CPUS", "2"),
+            docker_memory=_auto_or("P2H_DOCKER_MEMORY", AUTO, _size_value),
+            docker_cpus=_auto_or("P2H_DOCKER_CPUS", AUTO, _positive_number_value),
+            docker_doall_jobs=_optional_positive_int_env("P2H_DOALL_JOBS"),
             docker_pids_limit=_int_env(
                 "P2H_DOCKER_PIDS_LIMIT", 1024, allow_minus_one=True
             ),

@@ -1,5 +1,11 @@
 # 版本变更
 
+## 0.8.2 — 2026-11-17
+
+- Polygon 包按题并行执行 `doall.sh` 和本地重编译：每道题独立运行、独立 `TMPDIR`，日志行加 `[题目名]` 前缀；任一题失败会立即终止其余题。并行数由 `P2H_DOALL_JOBS` 控制，默认等于 runner CPU 数，设为 `1` 恢复原来的逐题执行。
+- runner 资源默认自动推算：`P2H_DOCKER_CPUS=auto` 取 Docker 主机 CPU 的一半，`P2H_DOCKER_MEMORY=auto` 按每核 1 GiB 分配（不少于 3 GiB）；主机内存的一半不足时按内存折算取较小值。资源从 `docker info` 读取，Docker Desktop 下即为其虚拟机配置。安装器新生成的配置写入 `auto`，`update` 会把旧版自动生成的 `P2H_DOCKER_MEMORY=3g`、`P2H_DOCKER_CPUS=2` 改为 `auto`，手动改过的值保持不变。
+- 修复 Linux 主机上转换全部完成后仍以失败结束、日志出现 `cp: failed to preserve ownership ... Operation not permitted` 的问题：runner 不再用 `cp -a` 复制结果，而是以结果目录属主的身份解包，产物归后端运行用户所有。
+
 ## 0.8.1 — 2026-11-17
 
 - 修复启用 AppArmor 的 Linux 主机（如 Ubuntu）上转换失败、报 `unshare: cannot change root filesystem propagation: Permission denied` 的问题：runner 容器改用 `--security-opt apparmor=unconfined`，让入口脚本能在独立 mount 命名空间里隐藏结果挂载；转换器仍在丢弃全部 capability 后运行，seccomp、只读根文件系统和断网限制不变。

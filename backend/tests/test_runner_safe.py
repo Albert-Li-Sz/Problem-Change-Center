@@ -2,6 +2,7 @@ import importlib
 import os
 import subprocess
 import sys
+import time
 import types
 import zipfile
 from pathlib import Path
@@ -455,3 +456,100 @@ def test_p2h_doall_patch_turns_read_r_pause_into_failure(
     with pytest.raises(subprocess.CalledProcessError):
         patched_convert._run_doall_for_all(tmp_path, ["sum"], verbose=False)
     assert "BASH_ENV" not in os.environ
+
+
+def _install_fake_p2h(monkeypatch, calls: list[str]):
+    p2h_module = types.ModuleType("p2h")
+    p2h_module.__path__ = []  # type: ignore[attr-defined]
+    convert_module = types.ModuleType("p2h.convert")
+
+    def run_doall(work_root: Path, slugs: list[str], *, verbose: bool = False) -> str:
+        calls.append("upstream")
+        return "upstream"
+
+    convert_module._run_doall_for_all = run_doall  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "p2h", p2h_module)
+    monkeypatch.setitem(sys.modules, "p2h.convert", convert_module)
+    return p2h_safe._install_p2h_patches()
+
+
+def _write_doall(root: Path, slug: str, body: str) -> None:
+    problem = root / "problems" / slug
+    problem.mkdir(parents=True)
+    (problem / "doall.sh").write_text(f"#!/usr/bin/env bash\n{body}", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("value", "count", "expected"),
+    [(None, 5, 1), ("4", 5, 4), ("8", 3, 3), ("0", 5, 1), ("x", 5, 1), ("99", 99, 64)],
+)
+def test_doall_parallelism_reads_environment(
+    monkeypatch, value: str | None, count: int, expected: int
+) -> None:
+    if value is None:
+        monkeypatch.delenv("P2H_DOALL_JOBS", raising=False)
+    else:
+        monkeypatch.setenv("P2H_DOALL_JOBS", value)
+
+    assert p2h_safe.doall_parallelism(count) == expected
+
+
+def test_parallel_doall_runs_problems_together_with_prefixed_output(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    # Each problem waits until the other has started, so this only passes when
+    # both doall.sh scripts run at the same time.
+    for slug in ("alpha", "beta"):
+        _write_doall(
+            tmp_path,
+            slug,
+            f'touch "../../started-{slug}"\n'
+            "for _ in $(seq 100); do\n"
+            "  [ -e ../../started-alpha ] && [ -e ../../started-beta ] && break\n"
+            "  sleep 0.05\n"
+            "done\n"
+            "[ -e ../../started-alpha ] && [ -e ../../started-beta ]\n"
+            'echo "tmp=$TMPDIR"\n'
+            "mkdir -p tests && printf 'x\\r\\n' > tests/01\n",
+        )
+    calls: list[str] = []
+    monkeypatch.setenv("P2H_DOALL_JOBS", "2")
+    patched = _install_fake_p2h(monkeypatch, calls)
+
+    patched._run_doall_for_all(tmp_path, ["alpha", "beta"], verbose=True)
+
+    output = capsys.readouterr().out
+    assert calls == []
+    assert "running doall.sh for 2 problem(s), 2 at a time" in output
+    for slug in ("alpha", "beta"):
+        assert f"[{slug}] doall done" in output
+        assert f"[{slug}] tmp={tmp_path / '.p2h-doall-tmp' / slug}" in output
+        assert (tmp_path / "problems" / slug / "tests" / "01").read_bytes() == b"x\n"
+    assert not (tmp_path / ".p2h-doall-tmp").exists()
+
+
+def test_parallel_doall_failure_stops_other_problems(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_doall(tmp_path, "broken", "sleep 0.2\nexit 3\n")
+    _write_doall(tmp_path, "slow", "sleep 30\ntouch ../../slow-finished\n")
+    monkeypatch.setenv("P2H_DOALL_JOBS", "2")
+    patched = _install_fake_p2h(monkeypatch, [])
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"\[broken\] doall.sh exited with code 3"):
+        patched._run_doall_for_all(tmp_path, ["broken", "slow"], verbose=False)
+
+    assert time.monotonic() - started < 10
+    assert not (tmp_path / "slow-finished").exists()
+
+
+def test_single_doall_job_keeps_upstream_runner(tmp_path: Path, monkeypatch) -> None:
+    _write_doall(tmp_path, "alpha", "exit 0\n")
+    _write_doall(tmp_path, "beta", "exit 0\n")
+    calls: list[str] = []
+    monkeypatch.setenv("P2H_DOALL_JOBS", "1")
+    patched = _install_fake_p2h(monkeypatch, calls)
+
+    assert patched._run_doall_for_all(tmp_path, ["alpha", "beta"]) == "upstream"
+    assert calls == ["upstream"]

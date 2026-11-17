@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import math
+import os
 import re
 import shutil
+import threading
 
 # Docker is invoked with a fixed argv and shell=False.
 import subprocess  # nosec B404
 import zipfile
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .config import Settings
+from .config import AUTO, Settings
 from .schemas import JobRequest
 from .storage import JobPaths
 
@@ -19,6 +23,94 @@ DEFAULT_MAX_ARCHIVE_MEMBER_BYTES = 256 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_COMPRESSION_RATIO = 200.0
 DEFAULT_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES = 16 * 1024 * 1024
 CONTAINER_TMP_PATH = "/tmp"  # nosec B108
+
+
+GIB = 1024**3
+# Auto-sized runners never get less memory than the previous fixed default:
+# Wine and the tmpfs work areas (which count towards --memory) need it.
+MIN_AUTO_MEMORY_GIB = 3
+
+
+@dataclass(frozen=True)
+class RunnerResources:
+    cpus: str
+    memory: str
+    doall_jobs: int
+
+
+@dataclass(frozen=True)
+class HostCapacity:
+    cpus: int
+    memory_bytes: int
+
+
+_host_capacity_lock = threading.Lock()
+_host_capacity_cache: dict[str, HostCapacity] = {}
+
+
+def auto_slot_count(capacity: HostCapacity) -> int:
+    """Half of the Docker host's CPUs, at 1 GiB of memory per CPU.
+
+    When half of the host memory cannot cover one GiB per CPU, the smaller
+    memory-based count wins.
+    """
+    by_cpu = capacity.cpus // 2
+    by_memory = capacity.memory_bytes // GIB // 2
+    return max(1, min(by_cpu, by_memory))
+
+
+def runner_resources(settings: Settings) -> RunnerResources:
+    slots = 1
+    if AUTO in (settings.docker_cpus, settings.docker_memory):
+        slots = auto_slot_count(docker_host_capacity(settings.docker_bin))
+    cpus = settings.docker_cpus
+    if cpus == AUTO:
+        cpus = str(slots)
+    memory = settings.docker_memory
+    if memory == AUTO:
+        memory = f"{max(slots, MIN_AUTO_MEMORY_GIB)}g"
+    doall_jobs = settings.docker_doall_jobs
+    if doall_jobs is None:
+        doall_jobs = max(1, math.floor(float(cpus)))
+    return RunnerResources(cpus=cpus, memory=memory, doall_jobs=doall_jobs)
+
+
+def docker_host_capacity(docker_bin: str) -> HostCapacity:
+    """CPUs and memory of the machine that runs the containers.
+
+    Docker Desktop runs containers in a VM, so ask the daemon rather than this
+    process. Only successful answers are cached.
+    """
+    with _host_capacity_lock:
+        cached = _host_capacity_cache.get(docker_bin)
+    if cached is not None:
+        return cached
+    try:
+        completed = subprocess.run(  # nosec B603
+            [docker_bin, "info", "--format", "{{.NCPU}} {{.MemTotal}}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        ncpu_text, memory_text = completed.stdout.split()
+        capacity = HostCapacity(cpus=int(ncpu_text), memory_bytes=int(memory_text))
+        if completed.returncode != 0 or capacity.cpus < 1 or capacity.memory_bytes < 1:
+            raise ValueError("docker info returned no capacity")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return _local_capacity()
+    with _host_capacity_lock:
+        _host_capacity_cache[docker_bin] = capacity
+    return capacity
+
+
+def _local_capacity() -> HostCapacity:
+    cpus = os.cpu_count() or 1
+    try:
+        memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (OSError, ValueError, AttributeError):
+        memory = 0
+    return HostCapacity(cpus=cpus, memory_bytes=memory if memory > 0 else 2 * GIB)
 
 
 def container_name(job_id: str) -> str:
@@ -63,6 +155,7 @@ def _base_docker_command(
     settings: Settings, job_id: str, paths: JobPaths, runner_image: str
 ) -> list[str]:
     is_wine_runner = _runner_requires_amd64(runner_image)
+    resources = runner_resources(settings)
     max_archive_bytes = parse_size_bytes(settings.docker_work_size)
     max_archive_member_bytes = min(max_archive_bytes, DEFAULT_MAX_ARCHIVE_MEMBER_BYTES)
     archive_env_vars = [
@@ -71,6 +164,7 @@ def _base_docker_command(
         f"P2H_MAX_ARCHIVE_MEMBER_BYTES={max_archive_member_bytes}",
         f"P2H_MAX_ARCHIVE_COMPRESSION_RATIO={DEFAULT_MAX_ARCHIVE_COMPRESSION_RATIO:g}",
         f"P2H_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES={DEFAULT_MIN_ARCHIVE_COMPRESSION_RATIO_BYTES}",
+        f"P2H_DOALL_JOBS={resources.doall_jobs}",
     ]
     env_vars = ["TMPDIR=/work", "XDG_CACHE_HOME=/work/.cache", *archive_env_vars]
     extra_tmpfs: list[str] = []
@@ -124,9 +218,9 @@ def _base_docker_command(
         "--pids-limit",
         str(_effective_pids_limit(settings, runner_image)),
         "--memory",
-        settings.docker_memory,
+        resources.memory,
         "--cpus",
-        settings.docker_cpus,
+        resources.cpus,
         "--tmpfs",
         f"{CONTAINER_TMP_PATH}:rw,noexec,nosuid,nodev,size={settings.docker_tmp_size}",
         "--tmpfs",

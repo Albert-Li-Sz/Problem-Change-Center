@@ -132,3 +132,38 @@ def test_allowed_hosts_and_origins_are_normalized(
 
     assert settings.allowed_hosts == ("converter.example.com", "*")
     assert settings.allowed_origins == ("*",)
+
+
+def test_runner_resources_default_to_auto(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("P2H_DOCKER_CPUS", "P2H_DOCKER_MEMORY", "P2H_DOALL_JOBS"):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.docker_cpus == "auto"
+    assert settings.docker_memory == "auto"
+    assert settings.docker_doall_jobs is None
+
+
+def test_runner_resources_accept_auto_in_any_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("P2H_DOCKER_CPUS", " AUTO ")
+    monkeypatch.setenv("P2H_DOCKER_MEMORY", "Auto")
+    monkeypatch.setenv("P2H_DOALL_JOBS", "3")
+
+    settings = Settings.from_env()
+
+    assert settings.docker_cpus == "auto"
+    assert settings.docker_memory == "auto"
+    assert settings.docker_doall_jobs == 3
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "many"])
+def test_doall_jobs_must_be_positive_integer(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("P2H_DOALL_JOBS", value)
+
+    with pytest.raises(ValueError, match="P2H_DOALL_JOBS"):
+        Settings.from_env()

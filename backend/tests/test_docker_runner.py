@@ -1,3 +1,4 @@
+import dataclasses
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,11 +6,15 @@ from tempfile import TemporaryDirectory
 import pytest
 from app.config import Settings
 
+from app import docker_runner
 from app.docker_runner import (
+    HostCapacity,
     _runner_image_for_request,
+    auto_slot_count,
     build_docker_command,
     pack_output,
     parse_size_bytes,
+    runner_resources,
 )
 from app.schemas import JobRequest
 from app.storage import JobPaths
@@ -665,3 +670,119 @@ def test_pack_output_rejects_empty_converter_output() -> None:
 )
 def test_parse_size_bytes(value: str, expected: int) -> None:
     assert parse_size_bytes(value) == expected
+
+
+GIB = 1024**3
+
+
+@pytest.mark.parametrize(
+    ("cpus", "memory_gib", "slots"),
+    [
+        (16, 64, 8),  # half the CPUs, plenty of memory
+        (16, 8, 4),  # half the memory only covers 4 GiB, so 4 wins
+        (12, 6, 3),
+        (2, 64, 1),
+        (1, 1, 1),  # never below one
+    ],
+)
+def test_auto_slots_use_half_cpus_and_one_gib_each(
+    cpus: int, memory_gib: int, slots: int
+) -> None:
+    capacity = HostCapacity(cpus=cpus, memory_bytes=memory_gib * GIB)
+
+    assert auto_slot_count(capacity) == slots
+
+
+def test_auto_runner_resources_follow_docker_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        docker_runner,
+        "docker_host_capacity",
+        lambda _bin: HostCapacity(cpus=16, memory_bytes=31 * GIB),
+    )
+    settings = dataclasses.replace(
+        _settings(tmp_path), docker_cpus="auto", docker_memory="auto"
+    )
+
+    resources = runner_resources(settings)
+
+    assert (resources.cpus, resources.memory, resources.doall_jobs) == ("8", "8g", 8)
+
+
+def test_auto_memory_keeps_previous_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        docker_runner,
+        "docker_host_capacity",
+        lambda _bin: HostCapacity(cpus=4, memory_bytes=16 * GIB),
+    )
+    settings = dataclasses.replace(
+        _settings(tmp_path), docker_cpus="auto", docker_memory="auto"
+    )
+
+    resources = runner_resources(settings)
+
+    assert (resources.cpus, resources.memory, resources.doall_jobs) == ("2", "3g", 2)
+
+
+def test_explicit_runner_resources_skip_docker_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_bin: str) -> HostCapacity:
+        raise AssertionError("docker info must not be queried")
+
+    monkeypatch.setattr(docker_runner, "docker_host_capacity", fail)
+    settings = dataclasses.replace(
+        _settings(tmp_path), docker_cpus="1.5", docker_memory="2g"
+    )
+    assert runner_resources(settings) == docker_runner.RunnerResources("1.5", "2g", 1)
+
+    settings = dataclasses.replace(settings, docker_doall_jobs=4)
+    assert runner_resources(settings).doall_jobs == 4
+
+
+def test_docker_command_passes_resources_and_doall_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        docker_runner,
+        "docker_host_capacity",
+        lambda _bin: HostCapacity(cpus=8, memory_bytes=64 * GIB),
+    )
+    settings = dataclasses.replace(
+        _settings(tmp_path), docker_cpus="auto", docker_memory="auto"
+    )
+    paths = JobPaths(tmp_path / "jobs" / ("a" * 32))
+    paths.input_dir.mkdir(parents=True)
+    paths.output_dir.mkdir(parents=True)
+    request = JobRequest(job_id="a" * 32, pid_start="P1000", owner=1, run_doall=True)
+
+    cmd = build_docker_command(settings, request.job_id, paths, request)
+
+    assert cmd[cmd.index("--cpus") + 1] == "4"
+    assert cmd[cmd.index("--memory") + 1] == "4g"
+    assert "P2H_DOALL_JOBS=4" in cmd
+
+
+def test_docker_host_capacity_reads_docker_info(tmp_path: Path) -> None:
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\necho 12 34359738368\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    capacity = docker_runner.docker_host_capacity(str(fake))
+
+    assert capacity == HostCapacity(cpus=12, memory_bytes=32 * GIB)
+
+
+def test_docker_host_capacity_falls_back_to_this_machine(tmp_path: Path) -> None:
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    capacity = docker_runner.docker_host_capacity(str(fake))
+
+    assert capacity.cpus >= 1
+    assert capacity.memory_bytes > 0
+    assert str(fake) not in docker_runner._host_capacity_cache

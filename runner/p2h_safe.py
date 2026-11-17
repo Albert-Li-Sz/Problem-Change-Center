@@ -6,9 +6,13 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess  # nosec B404
 import sys
 import tempfile
+import threading
+from collections.abc import Callable, Iterable
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -37,6 +41,10 @@ WINE_EXE_RE = re.compile(
     r"(?P<target>[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.exe)"
 )
 MAX_POLYGON_SCRIPT_BYTES = 2 * 1024 * 1024
+DOALL_JOBS_ENV = "P2H_DOALL_JOBS"
+MAX_DOALL_JOBS = 64
+DOALL_TMP_DIRNAME = ".p2h-doall-tmp"
+_OUTPUT_LOCK = threading.Lock()
 
 STRICT_DOALL_BASH_ENV = """\
 read() {
@@ -217,8 +225,144 @@ def normalize_polygon_doall_inputs(root: Path, slugs: list[str]) -> int:
     return normalized
 
 
+def doall_parallelism(problem_count: int) -> int:
+    """Number of problems whose doall.sh may run at the same time.
+
+    The backend sets P2H_DOALL_JOBS from the runner's CPU limit. A missing or
+    invalid value keeps the original one-problem-at-a-time behaviour.
+    """
+
+    try:
+        jobs = int(os.environ.get(DOALL_JOBS_ENV, "1").strip())
+    except ValueError:
+        jobs = 1
+    return max(1, min(jobs, MAX_DOALL_JOBS, problem_count))
+
+
+def _emit(text: str, *, stderr: bool = False) -> None:
+    # print() issues separate writes for the text and the newline, so lines
+    # from concurrent problems could otherwise be spliced together.
+    stream = sys.stderr if stderr else sys.stdout
+    with _OUTPUT_LOCK:
+        stream.write(f"{text}\n")
+        stream.flush()
+
+
+def _map_problems(
+    function: Callable[[str], int], slugs: Iterable[str], jobs: int
+) -> list[int]:
+    slug_list = list(slugs)
+    if jobs <= 1 or len(slug_list) <= 1:
+        return [function(slug) for slug in slug_list]
+    with ThreadPoolExecutor(max_workers=min(jobs, len(slug_list))) as pool:
+        return list(pool.map(function, slug_list))
+
+
+class _ParallelDoall:
+    """Run each problem's doall.sh concurrently with prefixed output."""
+
+    def __init__(self, p2h_convert: Any, work_root: Path, *, verbose: bool) -> None:
+        self.p2h_convert = p2h_convert
+        self.work_root = work_root
+        self.verbose = verbose
+        self.cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._processes: dict[str, subprocess.Popen[bytes]] = {}
+
+    def run(self, slugs: list[str], jobs: int) -> None:
+        _emit(f"running doall.sh for {len(slugs)} problem(s), {jobs} at a time")
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = [pool.submit(self._run_problem, slug) for slug in slugs]
+            done, _pending = wait(futures, return_when=FIRST_EXCEPTION)
+            failed = [future for future in done if future.exception() is not None]
+            if failed:
+                self.cancelled.set()
+                self._kill_running()
+                for future in futures:
+                    future.cancel()
+        errors = [
+            future.exception()
+            for future in futures
+            if not future.cancelled() and future.exception() is not None
+        ]
+        if errors:
+            first = errors[0]
+            assert first is not None  # nosec B101
+            raise first
+
+    def _run_problem(self, slug: str) -> None:
+        if self.cancelled.is_set():
+            return
+        problem_root = self.work_root / "problems" / slug
+        if not (problem_root / "doall.sh").exists():
+            if self.verbose:
+                _emit(f"[{slug}] skip doall (missing doall.sh)")
+            return
+
+        make_executable = getattr(self.p2h_convert, "_make_scripts_executable", None)
+        if callable(make_executable):
+            make_executable(problem_root)
+        temp_dir = self.work_root / DOALL_TMP_DIRNAME / slug
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env.setdefault("PATH", "/usr/bin:/bin:/usr/local/bin")
+        # Generators written for a single doall often use fixed temp names.
+        env["TMPDIR"] = str(temp_dir)
+
+        if self.verbose:
+            _emit(f"[{slug}] running doall.sh")
+        with self._lock:
+            if self.cancelled.is_set():
+                return
+            # The argv is fixed; doall.sh is the uploaded script the user asked
+            # to run, confined to the runner sandbox. A separate session lets a
+            # failure elsewhere stop this problem's whole process tree.
+            process = subprocess.Popen(  # nosec B603 B607
+                ["bash", "doall.sh"],
+                cwd=problem_root,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            self._processes[slug] = process
+        try:
+            assert process.stdout is not None  # nosec B101
+            for raw_line in process.stdout:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                _emit(f"[{slug}] {line}" if line else f"[{slug}]")
+            returncode = process.wait()
+        finally:
+            with self._lock:
+                self._processes.pop(slug, None)
+            if process.poll() is None:
+                _kill_process_group(process)
+
+        if self.cancelled.is_set():
+            return
+        if returncode != 0:
+            raise RuntimeError(f"[{slug}] doall.sh exited with code {returncode}")
+        if self.verbose:
+            _emit(f"[{slug}] doall done")
+
+    def _kill_running(self) -> None:
+        with self._lock:
+            processes = list(self._processes.values())
+        for process in processes:
+            _kill_process_group(process)
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
 def prepare_native_polygon_doall(
-    work_root: Path, slugs: list[str], *, verbose: bool = False
+    work_root: Path, slugs: list[str], *, verbose: bool = False, jobs: int = 1
 ) -> int:
     """Replace source-backed Wine commands with native Linux executables.
 
@@ -228,124 +372,130 @@ def prepare_native_polygon_doall(
     amd64 container plus Wine adds a second emulation layer.
     """
 
-    rebuilt = 0
-    for slug in slugs:
-        problem_root = work_root / "problems" / slug
-        if not problem_root.is_dir():
-            continue
+    return sum(
+        _map_problems(
+            lambda slug: _prepare_native_problem(work_root, slug, verbose=verbose),
+            slugs,
+            jobs,
+        )
+    )
 
-        scripts = _polygon_shell_scripts(problem_root)
-        wine_targets: set[str] = set()
-        script_text: dict[Path, str] = {}
-        unsupported_wine_syntax = False
-        for script in scripts:
-            text = _read_polygon_script(script)
-            if text is None:
+
+def _prepare_native_problem(work_root: Path, slug: str, *, verbose: bool) -> int:
+    rebuilt = 0
+    problem_root = work_root / "problems" / slug
+    if not problem_root.is_dir():
+        return 0
+
+    scripts = _polygon_shell_scripts(problem_root)
+    wine_targets: set[str] = set()
+    script_text: dict[Path, str] = {}
+    unsupported_wine_syntax = False
+    for script in scripts:
+        text = _read_polygon_script(script)
+        if text is None:
+            unsupported_wine_syntax = True
+            break
+        script_text[script] = text
+        matches = list(WINE_EXE_RE.finditer(text))
+        if re.search(r"(?<![A-Za-z0-9_-])wine(?:64)?[ \t]+", text):
+            matched_starts = {match.start() for match in matches}
+            wine_starts = {
+                match.start()
+                for match in re.finditer(r"(?<![A-Za-z0-9_-])wine[ \t]+", text)
+            }
+            if wine_starts != matched_starts:
                 unsupported_wine_syntax = True
                 break
-            script_text[script] = text
-            matches = list(WINE_EXE_RE.finditer(text))
-            if re.search(r"(?<![A-Za-z0-9_-])wine(?:64)?[ \t]+", text):
-                matched_starts = {match.start() for match in matches}
-                wine_starts = {
-                    match.start()
-                    for match in re.finditer(r"(?<![A-Za-z0-9_-])wine[ \t]+", text)
-                }
-                if wine_starts != matched_starts:
-                    unsupported_wine_syntax = True
-                    break
-            wine_targets.update(
-                _normalize_wine_target(match.group("target")) for match in matches
+        wine_targets.update(
+            _normalize_wine_target(match.group("target")) for match in matches
+        )
+
+    if unsupported_wine_syntax or not wine_targets:
+        return 0
+
+    source_map = _polygon_native_source_map(problem_root)
+    towin_target = "files/towin.exe"
+    compile_targets = wine_targets - {towin_target}
+    if not compile_targets.issubset(source_map):
+        if verbose:
+            missing = ", ".join(sorted(compile_targets - source_map))
+            _emit(
+                f"[{slug}] native doall fallback unavailable; "
+                f"missing supported source for: {missing}"
             )
+        return 0
 
-        if unsupported_wine_syntax or not wine_targets:
-            continue
-
-        source_map = _polygon_native_source_map(problem_root)
-        towin_target = "files/towin.exe"
-        compile_targets = wine_targets - {towin_target}
-        if not compile_targets.issubset(source_map):
-            if verbose:
-                missing = ", ".join(sorted(compile_targets - source_map))
-                print(
-                    f"[{slug}] native doall fallback unavailable; "
-                    f"missing supported source for: {missing}"
+    with tempfile.TemporaryDirectory(
+        prefix=".p2h-native-build-", dir=work_root
+    ) as build_dir_text:
+        build_dir = Path(build_dir_text)
+        compiled: dict[str, Path] = {}
+        compile_total = len(compile_targets)
+        try:
+            for index, target in enumerate(sorted(compile_targets), start=1):
+                source, source_type = source_map[target]
+                output = build_dir / f"{index:04d}.exe"
+                command = _native_compile_command(source, source_type, output)
+                _emit(
+                    f"[{slug}] native compile {index}/{compile_total}: {target}",
                 )
-            continue
-
-        with tempfile.TemporaryDirectory(
-            prefix=".p2h-native-build-", dir=work_root
-        ) as build_dir_text:
-            build_dir = Path(build_dir_text)
-            compiled: dict[str, Path] = {}
-            compile_total = len(compile_targets)
-            try:
-                for index, target in enumerate(sorted(compile_targets), start=1):
-                    source, source_type = source_map[target]
-                    output = build_dir / f"{index:04d}.exe"
-                    command = _native_compile_command(source, source_type, output)
-                    print(
-                        f"[{slug}] native compile {index}/{compile_total}: {target}",
-                        flush=True,
+                # Compiler name and flags are runner-controlled; uploaded
+                # paths are passed as argv and shell execution is disabled.
+                completed = subprocess.run(  # nosec B603
+                    command,
+                    cwd=problem_root,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if completed.returncode != 0:
+                    detail = (completed.stderr or completed.stdout).strip()
+                    if len(detail) > 2000:
+                        detail = detail[-2000:]
+                    raise RuntimeError(
+                        f"failed to rebuild {target} from "
+                        f"{source.relative_to(problem_root)}"
+                        + (f": {detail}" if detail else "")
                     )
-                    # Compiler name and flags are runner-controlled; uploaded
-                    # paths are passed as argv and shell execution is disabled.
-                    completed = subprocess.run(  # nosec B603
-                        command,
-                        cwd=problem_root,
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=180,
-                    )
-                    if completed.returncode != 0:
-                        detail = (completed.stderr or completed.stdout).strip()
-                        if len(detail) > 2000:
-                            detail = detail[-2000:]
-                        raise RuntimeError(
-                            f"failed to rebuild {target} from "
-                            f"{source.relative_to(problem_root)}"
-                            + (f": {detail}" if detail else "")
-                        )
-                    output.chmod(0o755)
-                    compiled[target] = output
-            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-                print(
-                    f"[{slug}] native doall fallback failed: {exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                continue
-
-            for target, built_binary in compiled.items():
-                destination = _safe_problem_path(problem_root, target)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(built_binary, destination)
-                destination.chmod(0o755)
-
-            if towin_target in wine_targets:
-                towin = _safe_problem_path(problem_root, towin_target)
-                towin.parent.mkdir(parents=True, exist_ok=True)
-                towin.write_text(
-                    "#!/usr/bin/env bash\n"
-                    "set -e\n"
-                    'if [ "$#" -ne 1 ]; then exit 2; fi\n'
-                    "sed 's/\\r$//' -- \"$1\"\n",
-                    encoding="utf-8",
-                )
-                towin.chmod(0o755)
-
-            for script, text in script_text.items():
-                rewritten = WINE_EXE_RE.sub(_native_wine_replacement, text)
-                if rewritten != text:
-                    script.write_text(rewritten, encoding="utf-8")
-
-            _make_polygon_doall_fail_fast(problem_root)
-            rebuilt += len(compiled)
-            print(
-                f"[{slug}] native compile complete: {len(compiled)} executable(s)",
-                flush=True,
+                output.chmod(0o755)
+                compiled[target] = output
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            _emit(
+                f"[{slug}] native doall fallback failed: {exc}",
+                stderr=True,
             )
+            return 0
+
+        for target, built_binary in compiled.items():
+            destination = _safe_problem_path(problem_root, target)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(built_binary, destination)
+            destination.chmod(0o755)
+
+        if towin_target in wine_targets:
+            towin = _safe_problem_path(problem_root, towin_target)
+            towin.parent.mkdir(parents=True, exist_ok=True)
+            towin.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -e\n"
+                'if [ "$#" -ne 1 ]; then exit 2; fi\n'
+                "sed 's/\\r$//' -- \"$1\"\n",
+                encoding="utf-8",
+            )
+            towin.chmod(0o755)
+
+        for script, text in script_text.items():
+            rewritten = WINE_EXE_RE.sub(_native_wine_replacement, text)
+            if rewritten != text:
+                script.write_text(rewritten, encoding="utf-8")
+
+        _make_polygon_doall_fail_fast(problem_root)
+        rebuilt = len(compiled)
+        _emit(
+            f"[{slug}] native compile complete: {len(compiled)} executable(s)",
+        )
 
     return rebuilt
 
@@ -777,11 +927,11 @@ def _install_p2h_patches() -> Any:
             work_root: Path, slugs: list[str], *args: Any, **kwargs: Any
         ) -> Any:
             work_root = Path(work_root)
+            verbose = bool(kwargs.get("verbose"))
+            jobs = doall_parallelism(len(slugs))
             for slug in slugs:
                 _make_polygon_doall_fail_fast(work_root / "problems" / slug)
-            prepare_native_polygon_doall(
-                work_root, slugs, verbose=bool(kwargs.get("verbose"))
-            )
+            prepare_native_polygon_doall(work_root, slugs, verbose=verbose, jobs=jobs)
             ensure_polygon_wine_is_usable(work_root, slugs)
             normalized_inputs = normalize_polygon_doall_inputs(work_root, slugs)
             if normalized_inputs and kwargs.get("verbose"):
@@ -797,8 +947,15 @@ def _install_p2h_patches() -> Any:
             previous_bash_env = os.environ.get("BASH_ENV")
             os.environ["BASH_ENV"] = str(bash_env)
             try:
-                result = original(work_root, slugs, *args, **kwargs)
+                if jobs > 1 and not args and set(kwargs) <= {"verbose"}:
+                    _ParallelDoall(p2h_convert, work_root, verbose=verbose).run(
+                        slugs, jobs
+                    )
+                    result = None
+                else:
+                    result = original(work_root, slugs, *args, **kwargs)
             finally:
+                shutil.rmtree(work_root / DOALL_TMP_DIRNAME, ignore_errors=True)
                 if previous_bash_env is None:
                     os.environ.pop("BASH_ENV", None)
                 else:

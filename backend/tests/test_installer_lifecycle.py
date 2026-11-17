@@ -363,3 +363,42 @@ def test_lifecycle_options_are_scoped_to_their_command(sandbox: Sandbox) -> None
         "only valid with: ./install.sh update" in _install(sandbox, "--no-pull").stderr
     )
     assert sandbox.run("uninstall", "--systemd").returncode == 1
+
+
+def test_new_config_sizes_runner_automatically(sandbox: Sandbox) -> None:
+    assert _install(sandbox).returncode == 0
+
+    config = sandbox.config.read_text()
+    assert "P2H_DOCKER_CPUS=auto\n" in config
+    assert "P2H_DOCKER_MEMORY=auto\n" in config
+    assert "P2H_DOALL_JOBS=auto\n" in config
+
+
+def test_reinstall_migrates_only_old_generated_runner_defaults(
+    sandbox: Sandbox,
+) -> None:
+    assert _install(sandbox).returncode == 0
+    text = sandbox.config.read_text()
+    sandbox.config.write_text(
+        text.replace("P2H_DOCKER_MEMORY=auto", "P2H_DOCKER_MEMORY=3g").replace(
+            "P2H_DOCKER_CPUS=auto", "P2H_DOCKER_CPUS=2"
+        )
+    )
+
+    completed = _install(sandbox)
+
+    assert completed.returncode == 0, completed.stderr
+    config = sandbox.config.read_text()
+    assert "P2H_DOCKER_CPUS=auto\n" in config
+    assert "P2H_DOCKER_MEMORY=auto\n" in config
+    assert "follow this machine" in completed.stdout
+
+    sandbox.config.write_text(
+        config.replace("P2H_DOCKER_MEMORY=auto", "P2H_DOCKER_MEMORY=3g").replace(
+            "P2H_DOCKER_CPUS=auto", "P2H_DOCKER_CPUS=4"
+        )
+    )
+    assert _install(sandbox).returncode == 0
+    config = sandbox.config.read_text()
+    assert "P2H_DOCKER_CPUS=4\n" in config
+    assert "P2H_DOCKER_MEMORY=3g\n" in config

@@ -7,7 +7,7 @@ Online Judge 的 ZIP 题包。
 与多题包，使用统一的 `ProblemBundle` 中间模型保留题面、样例、测试数据、分组、
 checker、interactor、附件和标程，并对无法无损映射的内容生成结构化报告。
 
-当前版本：`0.8.1`
+当前版本：`0.8.2`
 
 版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -485,11 +485,12 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
 | `P2H_JOB_STAGE_TIMEOUT_SECONDS` | `1800` | 单阶段超时 |
 | `P2H_JOB_PROBLEM_TIMEOUT_SECONDS` | `1200` | 单题超时 |
 | `P2H_JOB_TTL_SECONDS` | `86400` | 终态任务保留时间 |
-| `P2H_MAX_CONCURRENT_JOBS` | `2` | 最大并发任务数 |
+| `P2H_MAX_CONCURRENT_JOBS` | `2` | 最大并发任务数；每个任务各占一份 runner CPU 和内存 |
 | `P2H_MAX_STORED_JOBS` | `100` | 最大保存任务数 |
 | `P2H_MAX_STORAGE_BYTES` | `10737418240` | 任务存储上限 |
-| `P2H_DOCKER_MEMORY` | `3g` | runner 内存；tmpfs（工作区、输出、临时目录）中的数据也计入，应不小于三者之和 |
-| `P2H_DOCKER_CPUS` | `2` | runner CPU |
+| `P2H_DOCKER_CPUS` | `auto` | 每个 runner 的 CPU；`auto` 取 Docker 主机 CPU 的一半，若主机内存的一半不够每核 1 GiB，则按内存折算取较小值 |
+| `P2H_DOCKER_MEMORY` | `auto` | 每个 runner 的内存；`auto` 为每核 1 GiB、不少于 `3g`。tmpfs（工作区、输出、临时目录）中的数据也计入 |
+| `P2H_DOALL_JOBS` | `auto` | Polygon 包同时执行 `doall.sh`（及本地重编译）的题目数；`auto` 等于 runner CPU 数（向下取整），设为 `1` 恢复逐题执行 |
 | `P2H_DOCKER_WORK_SIZE` | `1g` | 工作区 tmpfs |
 | `P2H_DOCKER_OUTPUT_SIZE` | `1g` | 输出 tmpfs |
 | `P2H_ALLOWED_HOSTS` | `*` | 允许访问后端的 Host 头（主机名/IP） |

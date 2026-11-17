@@ -60,6 +60,19 @@ run_converter() {
   "${drop_privileges[@]}" python /opt/p2h_safe.py "$@"
 }
 
+# Copy NUL-separated names relative to /output into the host result mount.
+# /output is read as root, but files are created as the owner of the /result
+# bind mount: the runner has no CAP_CHOWN, so "cp -a" cannot keep the
+# converter uid there (GNU cp then fails as root), and root-owned results
+# would be unreadable for a backend that runs as a normal host user.
+copy_to_result() {
+  local owner
+  owner="$(stat -c '%u:%g' /result)"
+  tar -C /output --null -T - -cf - \
+    | setpriv --reuid="${owner%%:*}" --regid="${owner##*:}" --clear-groups \
+      tar -C /result -xpf - --no-same-owner
+}
+
 runner_status=0
 run_converter "$@" || runner_status=$?
 
@@ -69,11 +82,11 @@ if [[ -d /result ]]; then
       printf 'error: converter output contains a symbolic link\n' >&2
       exit 1
     fi
-    cp -a /output/. /result/
+    find /output -mindepth 1 -maxdepth 1 -printf '%P\0' | copy_to_result
   elif [[ -f /output/.p2h-report.json && ! -L /output/.p2h-report.json ]]; then
     # Failed matrix conversions still expose their structured diagnostics. Do
     # not copy any other output: writers may have left incomplete artifacts.
-    cp -- /output/.p2h-report.json /result/.p2h-report.json
+    printf '.p2h-report.json\0' | copy_to_result
   fi
 fi
 

@@ -873,6 +873,25 @@ pull_runner() {
   fi
 }
 
+# Configurations generated before 0.8.2 pinned the runner to the old fixed
+# defaults. Switch exactly those values to automatic sizing; anything the
+# administrator changed is left alone.
+migrate_runner_resources() {
+  local env_file="$1"
+  local temp_file=""
+  grep -Fxq 'P2H_DOCKER_MEMORY=3g' "$env_file" || return 0
+  grep -Fxq 'P2H_DOCKER_CPUS=2' "$env_file" || return 0
+  temp_file="$(mktemp "${env_file}.tmp.XXXXXX")"
+  chmod 600 "$temp_file"
+  awk '
+    $0 == "P2H_DOCKER_MEMORY=3g" { print "P2H_DOCKER_MEMORY=auto"; next }
+    $0 == "P2H_DOCKER_CPUS=2" { print "P2H_DOCKER_CPUS=auto"; next }
+    { print }
+  ' "$env_file" >"$temp_file"
+  mv "$temp_file" "$env_file"
+  log "Runner CPU and memory now follow this machine: P2H_DOCKER_CPUS=auto, P2H_DOCKER_MEMORY=auto"
+}
+
 write_env_file() {
   local env_file="$CONFIG_FILE"
   local runner_image="p2h-runner"
@@ -900,6 +919,7 @@ write_env_file() {
     if [[ -n "$APT_MIRROR" ]] && ! grep -q '^P2H_APT_MIRROR=' "$env_file"; then
       warn "Custom apt mirror was used for this build, but existing .env was not changed. Add P2H_APT_MIRROR=$APT_MIRROR if you want future manual builds to reuse it."
     fi
+    migrate_runner_resources "$env_file"
     return
   fi
 
@@ -927,8 +947,9 @@ P2H_MAX_CONCURRENT_JOBS=2
 P2H_MAX_STORED_JOBS=100
 P2H_MAX_STORAGE_BYTES=10737418240
 P2H_MAX_LOG_BYTES=10485760
-P2H_DOCKER_MEMORY=3g
-P2H_DOCKER_CPUS=2
+P2H_DOCKER_MEMORY=auto
+P2H_DOCKER_CPUS=auto
+P2H_DOALL_JOBS=auto
 P2H_DOCKER_PIDS_LIMIT=1024
 P2H_DOCKER_WINE_PIDS_LIMIT=4096
 P2H_DOCKER_WINE_HOME_SIZE=4g
