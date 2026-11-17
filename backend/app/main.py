@@ -125,7 +125,7 @@ async def lifespan(application: FastAPI):  # type: ignore[no-untyped-def]
 
 app = FastAPI(
     title="OJ Package Converter",
-    version="0.8.2",
+    version="0.8.3",
     lifespan=lifespan,
 )
 

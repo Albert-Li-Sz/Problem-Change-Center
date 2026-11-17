@@ -82,7 +82,7 @@ def test_numeric_hydro_titles_keep_their_original_text(
 
 
 def test_multilingual_icpc_numeric_titles_keep_leading_zeros(tmp_path: Path) -> None:
-    source = _icpc(tmp_path, **{"sum/problem.yaml": "name: {en: 00042, zh: 0}\n"})
+    source = _icpc(tmp_path, **{"sum/problem.yaml": "name: {en: 0, zh: 00042}\n"})
     output = tmp_path / "out"
 
     convert_package(source, output, source_format="icpc", target_format="hydro")

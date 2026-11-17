@@ -7,7 +7,7 @@ Online Judge 的 ZIP 题包。
 与多题包，使用统一的 `ProblemBundle` 中间模型保留题面、样例、测试数据、分组、
 checker、interactor、附件和标程，并对无法无损映射的内容生成结构化报告。
 
-当前版本：`0.8.2`
+当前版本：`0.8.3`
 
 版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -434,6 +434,13 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
   下划线、删除线和上下标；字体族命令保留正文内容。公式、verbatim 和行内代码
   会受到保护，避免命令或字面内容被后续转换误改。
 - `center` 环境中的文字、图片和图注都会保留。
+- 多语言题面全部转换：每种有文字题面（statement sections、HTML 或 TeX）的语言
+  各输出一个 `problem_<语言>.md`（如 `problem_zh.md`、`problem_en.md`、
+  `problem_ru.md`），只有 PDF 的语言不转为 Markdown。中文排在第一位并决定题名，
+  没有中文时依次取英文和其他语言；各语言的图片合并到 `additional_file/`，
+  同名文件以中文版为准。
+- 只能保存一份题面的目标格式（如 QDUOJ、HOJ）取中文题面，
+  其余语言在转换报告中记为丢失；DOMjudge 附带 PDF 题面时优先选择有 PDF 的中文版。
 - 缺少预生成答案时，需要显式启用 `doall.sh`，或重新导出包含答案的题包。
 
 ### HydroOJ
@@ -442,6 +449,8 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
   `testdata/config.yaml`、数据和 `additional_file/`。
 - 支持 ACM/OI、文件 IO、子任务依赖、checker、interactor、模板、附件和标程。
 - 题名和题目标识按文本读取及写出，保留 `0`、前导零和长数字题名。
+- 任何来源的多语言题面在转换时都以中文为第一语言：中文题面排在最前，有中文题名时
+  作为主题名。
 
 ### ICPC 题包（DOMjudge / Kattis 兼容）
 

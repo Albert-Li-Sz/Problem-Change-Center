@@ -11,6 +11,7 @@ import subprocess  # nosec B404
 import sys
 import tempfile
 import threading
+import zipfile
 from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from functools import wraps
@@ -29,6 +30,11 @@ from hoj_bridge import (
     convert_hoj_to_domjudge,
     convert_hoj_to_hydro,
     convert_hydro_to_hoj,
+)
+from polygon_statements import (
+    PolygonStatement,
+    order_languages,
+    read_polygon_statements,
 )
 from statement_markup import render_polygon_sections, render_tex_with_formatting
 
@@ -876,6 +882,194 @@ def _install_statement_patches() -> None:
         polygon_reader._sections_to_markdown = sections_to_markdown
 
 
+# Statements read for a problem, kept until the upstream loop writes its zip.
+_PENDING_STATEMENTS: dict[str, list[PolygonStatement]] = {}
+
+
+def write_hydro_problem_zip(
+    hydro_writer: Any,
+    *,
+    problem: Any,
+    output_dir: Path,
+    local_id: int,
+    pid: str,
+    owner: int,
+    tags: list[str],
+    statements: list[PolygonStatement],
+) -> Path:
+    """Upstream write_problem_zip, with one problem_<code>.md per language."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = hydro_writer._next_available_zip_path(
+        output_dir, hydro_writer._safe_filename(problem.title or problem.slug)
+    )
+
+    with tempfile.TemporaryDirectory(prefix="p2h-") as td:
+        root = Path(td) / str(local_id)
+        testdata = root / "testdata"
+        testdata.mkdir(parents=True, exist_ok=True)
+
+        (root / "problem.yaml").write_text(
+            hydro_writer._build_problem_yaml(pid, owner, problem.title, tags),
+            encoding="utf-8",
+        )
+        for statement in statements:
+            (root / f"problem_{statement.code}.md").write_text(
+                statement.markdown, encoding="utf-8"
+            )
+
+        test_files = [
+            (
+                case.input_name or f"tests{case.index:02d}.in",
+                case.output_name or f"tests{case.index:02d}.out",
+            )
+            for case in problem.tests
+        ]
+        (testdata / "config.yaml").write_text(
+            hydro_writer._build_config_yaml(
+                problem.time_ms,
+                problem.memory_mb,
+                test_files=test_files,
+                is_interactive=problem.is_interactive,
+                interactor_name=problem.interactor_name,
+                checker_name=problem.checker_name,
+            ),
+            encoding="utf-8",
+        )
+        for case, (input_name, output_name) in zip(
+            problem.tests, test_files, strict=True
+        ):
+            (testdata / input_name).write_bytes(case.input_data)
+            (testdata / output_name).write_bytes(case.output_data)
+
+        for name, data in problem.testdata_files:
+            target = testdata / name
+            if target.exists():
+                raise ValueError(f"testdata file collision: {name}")
+            target.write_bytes(data)
+
+        if problem.additional_files:
+            additional = root / "additional_file"
+            for name, data in problem.additional_files:
+                target = additional / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    zf.write(path, path.relative_to(root.parent).as_posix())
+
+    return zip_path
+
+
+def _merge_additional_files(
+    polygon_reader: Any, base: Path, statements: list[PolygonStatement]
+) -> list[tuple[str, bytes]]:
+    # Images of every language; on a name clash the primary language wins.
+    merged: dict[str, bytes] = {}
+    for statement in statements:
+        for name, data in polygon_reader._extract_additional_files(
+            base, statement.directory
+        ):
+            merged.setdefault(name, data)
+    return sorted(merged.items())
+
+
+def _install_multilingual_statement_patches(p2h_convert: Any) -> None:
+    original_read = getattr(p2h_convert, "read_problem", None)
+    original_write = getattr(p2h_convert, "write_problem_zip", None)
+    if (
+        original_read is None
+        or original_write is None
+        or getattr(original_read, "_p2h_safe_multilingual_patch", False)
+    ):
+        return
+    try:
+        import p2h.hydro_writer as hydro_writer
+        import p2h.polygon_reader as polygon_reader
+    except ModuleNotFoundError as exc:
+        if exc.name in {"p2h", "p2h.hydro_writer", "p2h.polygon_reader"}:
+            return
+        raise
+
+    def read_problem_with_all_statements(
+        work_root: Path, slug: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        # Chinese decides the Hydro title, whatever the contest default is.
+        kwargs["statement_language"] = "chinese"
+        problem = original_read(work_root, slug, *args, **kwargs)
+        base = Path(work_root) / "problems" / slug
+        root = DefusedET.fromstring((base / "problem.xml").read_bytes())
+        statements = read_polygon_statements(
+            base,
+            root,
+            is_interactive=bool(problem.is_interactive),
+            sections_to_markdown=polygon_reader._sections_to_markdown,
+            html_to_markdown=polygon_reader.html_to_markdown,
+            tex_to_markdown=polygon_reader.tex_to_markdown,
+            on_error=lambda language, exc: _emit(
+                f"warning: [{slug}] skipped {language} statement: {exc}",
+                stderr=True,
+            ),
+        )
+        if statements:
+            problem.statement_md = statements[0].markdown
+            problem.additional_files = _merge_additional_files(
+                polygon_reader, base, statements
+            )
+            if kwargs.get("verbose"):
+                codes = ", ".join(statement.code for statement in statements)
+                _emit(f"[{slug}] statement languages: {codes}")
+        _PENDING_STATEMENTS[slug] = statements
+        return problem
+
+    def write_problem_zip_with_all_statements(*args: Any, **kwargs: Any) -> Path:
+        problem = kwargs.get("problem")
+        statements = (
+            _PENDING_STATEMENTS.pop(problem.slug, None) if problem is not None else None
+        )
+        if args or not statements:
+            # No readable statement: keep the upstream placeholder problem_zh.md.
+            return original_write(*args, **kwargs)
+        return write_hydro_problem_zip(hydro_writer, statements=statements, **kwargs)
+
+    read_problem_with_all_statements._p2h_safe_multilingual_patch = True  # type: ignore[attr-defined]
+    p2h_convert.read_problem = read_problem_with_all_statements
+    p2h_convert.write_problem_zip = write_problem_zip_with_all_statements
+
+
+def domjudge_language_preference(
+    problem_dir: Path, *, with_statement: bool
+) -> list[str]:
+    """Chinese first. DOMjudge keeps one statement PDF, so with --with-statement
+    languages that actually have a PDF come before those that do not."""
+    try:
+        root = DefusedET.fromstring((problem_dir / "problem.xml").read_bytes())
+    except (OSError, DefusedET.ParseError):
+        return order_languages(["chinese", "english", "russian"])
+    names = root.find("names")
+    statements = root.find("statements")
+    languages = order_languages(
+        [
+            "chinese",
+            "english",
+            *(
+                node.attrib.get("language", "")
+                for node in (names.findall("name") if names is not None else [])
+            ),
+        ]
+    )
+    if not with_statement or statements is None:
+        return languages
+    with_pdf = {
+        node.attrib.get("language", "").strip().lower()
+        for node in statements.findall("statement")
+        if node.attrib.get("type") == "application/pdf" and node.attrib.get("path")
+    }
+    return sorted(languages, key=lambda language: language not in with_pdf)
+
+
 def _install_p2h_patches() -> Any:
     try:
         _install_hydro_writer_patches()
@@ -886,6 +1080,7 @@ def _install_p2h_patches() -> Any:
     _install_statement_patches()
     p2h_convert = _load_p2h_convert()
     p2h_convert._collect_tools_from_script = collect_tools_from_script
+    _install_multilingual_statement_patches(p2h_convert)
 
     original_detect = getattr(p2h_convert, "_detect_missing_doall_tools", None)
     if original_detect is not None and not getattr(
@@ -1270,7 +1465,7 @@ def _convert_domjudge(argv: list[str]) -> int:
         format="%(levelname)s: %(message)s",
     )
 
-    from p2d import ConvertOptions, DomjudgeOptions, convert
+    from p2d import ConvertOptions, DomjudgeOptions, GlobalConfig, convert
     from p2h.polygon_reader import list_problem_slugs_from_names
 
     p2h_convert = _install_p2h_patches()
@@ -1342,6 +1537,11 @@ def _convert_domjudge(argv: list[str]) -> int:
                     short_name=code,
                     options=ConvertOptions(
                         output=output_zip,
+                        global_config=GlobalConfig(
+                            language_preference=domjudge_language_preference(
+                                problem_dir, with_statement=args.with_statement
+                            )
+                        ),
                         options=DomjudgeOptions(
                             color=args.color,
                             force_default_validator=args.default_validator,

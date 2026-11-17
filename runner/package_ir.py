@@ -173,6 +173,35 @@ class Problem:
     extra: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
+def statement_language_rank(language: str) -> int:
+    """0 for Simplified Chinese, 1 other Chinese, 2 English, 3 anything else."""
+    tag = language.strip().replace("_", "-").casefold()
+    if tag in {"zh", "cn", "chinese"} or tag.startswith(("zh-cn", "zh-hans", "zh-sg")):
+        return 0
+    if tag.startswith("zh-"):
+        return 1
+    if tag in {"en", "english"} or tag.startswith("en-"):
+        return 2
+    return 3
+
+
+def prefer_chinese(problem: "Problem") -> None:
+    """Make Chinese the first statement and the main title when present.
+
+    Writers that keep a single statement use the first one."""
+    problem.statements.sort(key=lambda item: statement_language_rank(item.language))
+    chinese_titles = sorted(
+        (
+            (statement_language_rank(language), title)
+            for language, title in problem.titles.items()
+            if title and statement_language_rank(language) < 2
+        ),
+        key=lambda item: item[0],
+    )
+    if chinese_titles:
+        problem.title = chinese_titles[0][1]
+
+
 @dataclass
 class ProblemBundle:
     source_format: str

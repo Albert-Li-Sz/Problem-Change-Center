@@ -17,7 +17,7 @@ from typing import Any, Iterable
 import format_bridge as bridge
 from adapters import ADAPTERS, READABLE_FORMATS, WRITABLE_FORMATS
 from package_adapters import choose_detected_format, detect_extracted
-from package_ir import ProblemBundle, write_report
+from package_ir import ProblemBundle, prefer_chinese, write_report
 from package_repair import populate_repair_suggestions, repair_source_archive
 from progress import ProgressReporter
 
@@ -417,6 +417,8 @@ def _run_polygon_route(
         intermediate_root, workspace / "polygon-ir", (), budget, reporter
     )
     bundle.source_format = "polygon"
+    for problem in bundle.problems:
+        prefer_chinese(problem)
     reporter.phase(
         "validate_ir",
         detail="validating Polygon intermediate representation",
@@ -655,6 +657,8 @@ def convert_package(
                 message=message,
             )
             raise ValueError(message) from exc
+        for problem in bundle.problems:
+            prefer_chinese(problem)
         bundle.applied_repairs = applied_repairs
         if source_override_candidates:
             bundle.add_issue(
