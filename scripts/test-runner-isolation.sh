@@ -12,7 +12,7 @@ if [[ -n "${P2H_ISOLATION_AUDIT_ROOT:-}" ]]; then
   }
   audit_dir="$(mktemp -d "$P2H_ISOLATION_AUDIT_ROOT/.p2h-isolation-audit.XXXXXXXX")"
 else
-  audit_dir="$(mktemp -d -t p2h-isolation-audit)"
+  audit_dir="$(mktemp -d -t p2h-isolation-audit.XXXXXXXX)"
 fi
 
 cleanup() {
