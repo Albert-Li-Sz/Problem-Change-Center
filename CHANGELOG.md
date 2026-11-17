@@ -1,5 +1,12 @@
 # 版本变更
 
+## 0.8.0 — 2026-11-17
+
+- 移除访问控制：删除外部部署模式、`X-P2H-Access-Key` 访问密钥、页面访问验证、外部模式限流与来源校验，以及 `P2H_DEPLOYMENT_MODE`、`P2H_ACCESS_KEY_HASH`、`P2H_RATE_LIMIT_*` 配置；旧 `.env` 中残留的这些变量会被忽略。
+- 前后端默认改为监听 `127.0.0.1`（仅本机）。安装器新增 `--bind 127.0.0.1|0.0.0.0`、`--local`、`--lan` 及交互选项，`./scripts/start.sh --lan` 可临时监听 `0.0.0.0` 供内网团队协作；systemd 后端服务改为读取 `P2H_BACKEND_HOST`。
+- 安装脚本重做为 `./install.sh [install|update|uninstall]`：`update` 拉取代码后用新版安装器刷新后端依赖、前端构建和已配置的 runner 镜像并重启服务；`uninstall` 删除服务、依赖和构建产物，`--purge` 额外删除配置与数据目录，`--remove-images` 删除 runner 镜像。重复安装时默认保留已有 `.env`。
+- 新增可选 systemd 后台服务（`--systemd` 或交互安装时选择）：由 `deploy/systemd/*.service.in` 模板生成，以安装用户身份从当前目录运行并读取 `.env`，开机自启；安装器只刷新或删除指向当前目录的服务。移除不再使用的 `deploy/production.env.example`，`production-check.sh` 默认检查当前目录的 `.env`。
+
 ## 0.7.4 — 2026-11-17（main 同步）
 
 - 修正默认安装脚本、文档和页脚的仓库及镜像地址，统一使用 `Albert-Li-Sz/Problem-Change-Center` 与 `ghcr.io/albert-li-sz/`。

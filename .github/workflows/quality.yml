@@ -81,19 +81,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
           shellcheck install.sh scripts/*.sh runner/entrypoint.sh
-      - name: Validate external deployment configuration
+      - name: Validate deployment configuration
         run: |
           config_file="$(mktemp)"
-          P2H_ACCESS_KEY=ci-external-access-key \
-            ./install.sh --non-interactive --external \
-              --site-address localhost --skip-backend --skip-frontend \
-              --skip-runner --config "$config_file" --force-config
-          grep -Fx 'P2H_DEPLOYMENT_MODE=external' "$config_file"
-          grep -Fx 'P2H_ALLOWED_ORIGINS=http://localhost:11452' "$config_file"
+          ./install.sh --non-interactive --skip-backend --skip-frontend \
+            --skip-runner --config "$config_file" --force-config
+          grep -Fx 'P2H_BACKEND_HOST=127.0.0.1' "$config_file"
+          grep -Fx 'P2H_FRONTEND_HOST=127.0.0.1' "$config_file"
           grep -Fx 'P2H_BACKEND_PORT=11451' "$config_file"
           grep -Fx 'P2H_FRONTEND_PORT=11452' "$config_file"
-          grep -E '^P2H_ACCESS_KEY_HASH=' "$config_file"
-          ! grep -F 'ci-external-access-key' "$config_file"
+          ./install.sh --non-interactive --lan --skip-backend --skip-frontend \
+            --skip-runner --config "$config_file" --force-config
+          grep -Fx 'P2H_BACKEND_HOST=0.0.0.0' "$config_file"
+          grep -Fx 'P2H_FRONTEND_HOST=0.0.0.0' "$config_file"
+          ! grep -E 'ACCESS_KEY|DEPLOYMENT_MODE' "$config_file"
 
   runner-isolation:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

@@ -7,15 +7,15 @@ Online Judge 的 ZIP 题包。
 与多题包，使用统一的 `ProblemBundle` 中间模型保留题面、样例、测试数据、分组、
 checker、interactor、附件和标程，并对无法无损映射的内容生成结构化报告。
 
-当前版本：`0.7.4`
+当前版本：`0.8.0`
 
 版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
 
 > [!IMPORTANT]
-> 内部和外部部署都监听后端 `11451`、前端 `11452`。内部模式不要求密钥，
-> 只能用于可信网络；外部模式会在进入工作台及访问 API 时校验访问密钥。
-> 项目不提供反向代理或 TLS，公网明文传输会暴露密钥，详见
-> [生产部署](#生产部署)。
+> 后端固定监听 `11451`、前端固定监听 `11452`，默认只绑定 `127.0.0.1`（仅本机
+> 可访问）。需要内网团队协作时可改为绑定 `0.0.0.0`（见
+> [局域网共享](#局域网共享)）。项目**没有登录或访问密钥**，也不提供反向代理或
+> TLS，只能在可信 LAN/VPN 中开放端口，不要直接暴露到公网。
 
 ## 功能概览
 
@@ -104,9 +104,15 @@ cd Problem-Change-Center
 1. 检查 Python、Node.js、npm、Docker 和 Docker Compose。
 2. 创建 `backend/.venv` 并安装后端依赖。
 3. 使用 `npm ci` 安装前端依赖并执行生产构建。
-4. 引导选择内部/外部部署、普通/Wine runner，以及预构建镜像或本地构建。
-5. 外部部署时采集访问地址与密钥，仅把 PBKDF2 哈希写入 `.env`。
-6. 创建权限为 `0600` 的本地 `.env`。
+4. 引导选择监听地址（`127.0.0.1` 仅本机 / `0.0.0.0` 内网共享）、普通/Wine
+   runner、预构建镜像或本地构建，以及（Linux）是否安装 systemd 后台服务。
+5. 创建权限为 `0600` 的本地 `.env`；已有 `.env` 时默认保留。
+
+`./install.sh --help` 列出全部选项。常用的非交互写法：
+
+```bash
+./install.sh --non-interactive --lan --systemd --runner-source prebuilt
+```
 
 后端使用带 SHA256 哈希的 `backend/requirements.lock` 安装。该锁文件覆盖项目支持
 的 Python 3.10+ 与 Linux、macOS、Windows 平台标记，安装时会拒绝内容与哈希
@@ -123,14 +129,89 @@ cd Problem-Change-Center
 - Web UI：[http://127.0.0.1:11452](http://127.0.0.1:11452)
 - API 文档：[http://127.0.0.1:11451/docs](http://127.0.0.1:11451/docs)
 
-按 `Ctrl+C` 同时停止前后端。
-
-也可以单独启动：
+按 `Ctrl+C` 同时停止前后端。也可以单独启动：
 
 ```bash
 ./scripts/start.sh --backend-only
 ./scripts/start.sh --frontend-only
 ```
+
+### 后台运行（systemd）
+
+Linux 上可以让安装器生成并启用两个 systemd 服务，开机自启、崩溃自动重启，无需
+保持终端：
+
+```bash
+./install.sh --systemd
+```
+
+服务以执行安装器的普通用户身份运行，直接使用当前目录的代码与 `.env`；写入
+`/etc/systemd/system` 和调用 `systemctl` 时会通过 `sudo` 申请权限（不要用
+`sudo ./install.sh`）。安装后：
+
+```bash
+sudo systemctl status oj-package-converter oj-package-converter-frontend
+sudo journalctl -u oj-package-converter -u oj-package-converter-frontend -f
+sudo systemctl restart oj-package-converter oj-package-converter-frontend
+```
+
+已经启用 systemd 服务时不要再运行 `./scripts/start.sh`，否则端口会冲突。
+
+### 更新
+
+```bash
+./install.sh update
+```
+
+更新会依次执行：`git pull --ff-only`（工作区有未提交修改时拒绝）、用新版安装器
+重装后端依赖、重新构建前端、按 `.env` 中的 `P2H_RUNNER_IMAGE` 重新拉取预构建
+镜像或重新构建本地镜像，最后刷新并重启已安装的 systemd 服务。`.env` 始终保留。
+常用变体：
+
+```bash
+./install.sh update --no-pull        # 不拉代码，只刷新依赖、前端和 runner
+./install.sh update --skip-runner    # 不刷新 runner 镜像
+```
+
+未使用 systemd 时，更新后需要重启 `./scripts/start.sh`。
+
+### 卸载
+
+```bash
+./install.sh uninstall
+```
+
+默认停止并删除本目录对应的 systemd 服务，删除 `backend/.venv`、
+`frontend/node_modules` 和 `frontend/dist`，保留 `.env` 与任务数据。追加选项：
+
+```bash
+# 同时删除 .env 和数据目录（所有任务、上传、日志和产物，不可恢复）以及 runner 镜像
+./install.sh uninstall --purge --remove-images
+```
+
+卸载需要确认，非交互环境需加 `--yes`。源码目录不会被删除，确认不再需要后自行
+删除即可。
+
+### 局域网共享
+
+默认只监听 `127.0.0.1`，其他机器无法访问。需要让同一内网的队友使用时，任选
+一种方式改为监听 `0.0.0.0`：
+
+```bash
+# 安装时直接写入 .env
+./install.sh --lan
+```
+
+```bash
+# 已安装：仅本次启动临时监听 0.0.0.0
+./scripts/start.sh --lan
+```
+
+也可以手动把 `.env` 中的 `P2H_BACKEND_HOST` 与 `P2H_FRONTEND_HOST` 都改为
+`0.0.0.0`。队友通过 `http://<本机内网 IP>:11452` 访问，浏览器会直接请求同一
+主机的 `11451` 端口，因此两个端口都需要在防火墙中对内网放行。服务没有任何登录
+或密钥校验，请只在可信网络中使用。使用 systemd 时修改 `.env` 后执行
+`sudo systemctl restart oj-package-converter oj-package-converter-frontend`。
 
 ## Linux 国内网络与清华源
 
@@ -396,7 +477,6 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
 
 | 变量 | 默认值 | 用途 |
 |---|---:|---|
-| `P2H_DEPLOYMENT_MODE` | `internal` | `internal` 或 `external` |
 | `P2H_DATA_DIR` | `~/.p2h-web-ui/backend_data` | 任务、SQLite、日志和产物 |
 | `P2H_RUNNER_IMAGE` | `p2h-runner` | runner 镜像 |
 | `P2H_MAX_UPLOAD_BYTES` | `536870912` | 上传上限 |
@@ -412,12 +492,11 @@ ProbHub 当前是只读输入格式。转换到 ICPC 时生成标准 DOMjudge/Ka
 | `P2H_DOCKER_CPUS` | `2` | runner CPU |
 | `P2H_DOCKER_WORK_SIZE` | `1g` | 工作区 tmpfs |
 | `P2H_DOCKER_OUTPUT_SIZE` | `1g` | 输出 tmpfs |
-| `P2H_ALLOWED_HOSTS` | `*` | 外部模式允许访问后端的主机名/IP |
-| `P2H_ALLOWED_ORIGINS` | `*` | 外部模式固定为 `http://HOST:11452` |
-| `P2H_ACCESS_KEY_HASH` | 空 | 外部模式必填，由安装器生成 |
-| `P2H_BACKEND_HOST` | `0.0.0.0` | 后端监听地址 |
+| `P2H_ALLOWED_HOSTS` | `*` | 允许访问后端的 Host 头（主机名/IP） |
+| `P2H_ALLOWED_ORIGINS` | `*` | 允许跨域访问后端的前端来源 |
+| `P2H_BACKEND_HOST` | `127.0.0.1` | 后端监听地址；内网共享时设为 `0.0.0.0` |
 | `P2H_BACKEND_PORT` | `11451` | 固定后端端口 |
-| `P2H_FRONTEND_HOST` | `0.0.0.0` | 前端监听地址 |
+| `P2H_FRONTEND_HOST` | `127.0.0.1` | 前端监听地址；内网共享时设为 `0.0.0.0` |
 | `P2H_FRONTEND_PORT` | `11452` | 固定前端端口 |
 
 任务索引位于 `P2H_DATA_DIR/jobs.sqlite3`，SQLite 使用 WAL 模式。每个任务仍保留
@@ -537,19 +616,18 @@ VM、gVisor、Kata Containers 或更强隔离。
 
 ## 生产部署
 
-仓库提供交互式安装器、独立 Node 静态前端服务和两个 systemd 服务：
+`./install.sh --systemd` 会根据以下模板生成两个 systemd 服务：
 
-- [deploy/production.env.example](deploy/production.env.example)
-- [deploy/systemd/oj-package-converter.service](deploy/systemd/oj-package-converter.service)
-- [deploy/systemd/oj-package-converter-frontend.service](deploy/systemd/oj-package-converter-frontend.service)
-- [scripts/production-check.sh](scripts/production-check.sh)
+- [deploy/systemd/oj-package-converter.service.in](deploy/systemd/oj-package-converter.service.in)
+- [deploy/systemd/oj-package-converter-frontend.service.in](deploy/systemd/oj-package-converter-frontend.service.in)
+- [scripts/production-check.sh](scripts/production-check.sh)（手动部署自检）
 - [完整生产部署手册](deploy/README.md)
 
 推荐拓扑：
 
 ```text
 Browser :11452
-   |  X-P2H-Access-Key (external mode)
+   |
    v
 FastAPI :11451
    |
@@ -561,14 +639,14 @@ isolated runner
 生产环境要求：
 
 - 专用 Linux 主机或 VM，安装系统 Docker Engine。
-- 服务用户加入 `docker` 组；该权限等价于主机 root，应隔离部署主机。
-- FastAPI 固定单 worker，后端/前端固定监听 `0.0.0.0:11451/11452`。
-- 内部模式只允许可信 LAN/VPN 访问；外部模式必须设置高强度访问密钥。
+- 运行服务的用户加入 `docker` 组；该权限等价于主机 root，应隔离部署主机。
+- FastAPI 固定单 worker，后端/前端固定使用 `11451/11452` 端口，默认监听
+  `127.0.0.1`，内网共享时改为 `0.0.0.0`。
+- 应用没有登录或访问密钥，只允许可信 LAN/VPN 访问。
 - 固定源码版本与 runner 镜像 digest。
 
-项目不再包含反向代理或内置 TLS。外部模式的密钥保护应用入口，但
-`http://` 上的密钥和题包仍是明文；不可信网络应通过 VPN、SSH 隧道或用户自行
-管理的上游 TLS 网关访问。应用本身始终保持 `11451/11452` 端口。
+项目不包含访问控制、反向代理或内置 TLS，`http://` 上的题包和产物均为明文；
+不可信网络应通过 VPN 或 SSH 隧道访问。应用本身始终保持 `11451/11452` 端口。
 
 推送 `v*` 标签会创建确定性的源码 `tar.gz`、SHA256 校验文件和 GitHub build
 provenance，并自动生成 GitHub Release Notes。部署时同时固定源码版本和 runner
@@ -672,11 +750,11 @@ frontend/                    React 19、Vite、TypeScript、Vitest、Playwright
 runner/                      中间模型、安全转换入口和格式兼容逻辑
 runner/adapters/             各格式读写适配器、协议、工厂与唯一注册表
 compat/                      平台版本锁和原创兼容语料
-deploy/                      systemd、生产配置和运维手册
+deploy/                      systemd 服务模板和运维手册
 scripts/                     安装、启动、扫描、预检和隔离测试
 security/                    隔离探针与安全说明
 docker-compose.yml           普通和 Wine runner 构建
-install.sh                   一键安装入口
+install.sh                   安装 / 更新 / 卸载入口
 ```
 
 ## 参与贡献

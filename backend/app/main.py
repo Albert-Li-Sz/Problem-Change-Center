@@ -28,7 +28,6 @@ from .schemas import (
     RepairRequest,
 )
 from .security import (
-    InMemoryRateLimiter,
     RequestBodyLimitMiddleware,
     enforce_request_security,
     readiness_status,
@@ -126,10 +125,7 @@ async def lifespan(application: FastAPI):  # type: ignore[no-untyped-def]
 
 app = FastAPI(
     title="OJ Package Converter",
-    version="0.7.4",
-    docs_url=None if settings.is_external else "/docs",
-    redoc_url=None if settings.is_external else "/redoc",
-    openapi_url=None if settings.is_external else "/openapi.json",
+    version="0.8.0",
     lifespan=lifespan,
 )
 
@@ -139,7 +135,6 @@ job_manager = JobManager(settings, storage, metrics)
 app.state.settings = settings
 app.state.storage = storage
 app.state.job_manager = job_manager
-app.state.rate_limiter = InMemoryRateLimiter()
 app.state.metrics = metrics
 logger = structured_logger("p2h.api")
 
@@ -195,7 +190,6 @@ app.add_middleware(
         "Accept",
         "Content-Type",
         "Last-Event-ID",
-        "X-P2H-Access-Key",
         "X-Request-ID",
     ],
 )
@@ -207,11 +201,8 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/health/live")
-def health_live() -> dict[str, str | bool]:
-    return {
-        "status": "ok",
-        "access_key_required": app.state.settings.is_external,
-    }
+def health_live() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.get("/api/health/ready", response_model=None)

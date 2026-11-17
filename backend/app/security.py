@@ -1,33 +1,24 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import re
 import shutil
 
 # Subprocess calls below use fixed argv and an administrator-configured executable.
 import subprocess  # nosec B404
 import tempfile
-import threading
-import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
-from starlette.concurrency import run_in_threadpool
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import Settings
 
 
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-_RATE_LIMIT_EXEMPT_PATHS = {"/api/health/live"}
-_AUTH_EXEMPT_PATHS = {"/api/health/live"}
 
 
 class RequestBodyTooLarge(Exception):
@@ -124,64 +115,6 @@ class RequestBodyLimitMiddleware:
             )
 
 
-@dataclass
-class _RateBucket:
-    window_started: float
-    count: int
-    last_seen: float
-
-
-class InMemoryRateLimiter:
-    """Small bounded fixed-window limiter for the single production worker."""
-
-    def __init__(self, *, max_clients: int = 10_000) -> None:
-        self.max_clients = max_clients
-        self._lock = threading.Lock()
-        self._buckets: dict[tuple[str, str], _RateBucket] = {}
-
-    def check(
-        self,
-        identity: str,
-        category: str,
-        limit: int,
-        *,
-        now: float | None = None,
-    ) -> tuple[bool, int]:
-        current = time.monotonic() if now is None else now
-        key = (identity, category)
-        with self._lock:
-            bucket = self._buckets.get(key)
-            if bucket is None or current - bucket.window_started >= 60:
-                self._buckets[key] = _RateBucket(current, 1, current)
-                self._prune(current)
-                return True, 0
-            bucket.last_seen = current
-            if bucket.count >= limit:
-                retry_after = max(1, int(60 - (current - bucket.window_started)) + 1)
-                return False, retry_after
-            bucket.count += 1
-            return True, 0
-
-    def _prune(self, now: float) -> None:
-        if len(self._buckets) <= self.max_clients:
-            return
-        expired = [
-            key
-            for key, bucket in self._buckets.items()
-            if now - bucket.last_seen >= 120
-        ]
-        for key in expired:
-            self._buckets.pop(key, None)
-        if len(self._buckets) <= self.max_clients:
-            return
-        excess = len(self._buckets) - self.max_clients
-        oldest = sorted(self._buckets, key=lambda key: self._buckets[key].last_seen)[
-            :excess
-        ]
-        for key in oldest:
-            self._buckets.pop(key, None)
-
-
 async def enforce_request_security(
     request: Request,
     call_next: Callable[[Request], Awaitable[Response]],
@@ -199,84 +132,6 @@ async def enforce_request_security(
             status.HTTP_400_BAD_REQUEST,
             "Untrusted Host header",
         )
-
-    needs_key = (
-        settings.is_external
-        and request.method != "OPTIONS"
-        and request.url.path not in _AUTH_EXEMPT_PATHS
-    )
-    key_valid = needs_key and _cached_access_key(request, settings)
-    if needs_key and not key_valid and not _access_key_known(settings):
-        # PBKDF2 is deliberately slow, so it runs off the event loop and only
-        # until one key has passed. After that there is a single known-good
-        # key, and anything else is rejected by the cheap comparison above.
-        key_valid = await run_in_threadpool(_valid_access_key, request, settings)
-    if needs_key and not key_valid:
-        limiter = _request_rate_limiter(request)
-        allowed, retry_after = limiter.check(
-            _client_identity(request),
-            "auth_failure",
-            settings.rate_limit_auth_failures_per_minute,
-        )
-        if not allowed:
-            response = _secured_error(
-                settings,
-                request_id,
-                request.url.path,
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                "Too many invalid access key attempts",
-            )
-            response.headers["Retry-After"] = str(retry_after)
-            return response
-        response = _secured_error(
-            settings,
-            request_id,
-            request.url.path,
-            status.HTTP_401_UNAUTHORIZED,
-            "Invalid or missing access key",
-        )
-        response.headers["WWW-Authenticate"] = "P2HAccessKey"
-        return response
-
-    if settings.is_external and request.method in _UNSAFE_METHODS:
-        origin_error = _unsafe_origin_error(request, settings)
-        if origin_error is not None:
-            return _secured_error(
-                settings,
-                request_id,
-                request.url.path,
-                status.HTTP_403_FORBIDDEN,
-                origin_error,
-            )
-
-    if settings.is_external and request.url.path not in _RATE_LIMIT_EXEMPT_PATHS:
-        limiter = _request_rate_limiter(request)
-        identity = _client_identity(request)
-        category = (
-            "upload"
-            if request.method == "POST"
-            and (
-                request.url.path == "/api/inspect"
-                or request.url.path.endswith("/repairs")
-            )
-            else "request"
-        )
-        limit = (
-            settings.rate_limit_uploads_per_minute
-            if category == "upload"
-            else settings.rate_limit_requests_per_minute
-        )
-        allowed, retry_after = limiter.check(identity, category, limit)
-        if not allowed:
-            response = _secured_error(
-                settings,
-                request_id,
-                request.url.path,
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                "Rate limit exceeded",
-            )
-            response.headers["Retry-After"] = str(retry_after)
-            return response
 
     response = await call_next(request)
     _apply_security_headers(response, settings, request_id, request.url.path)
@@ -390,104 +245,6 @@ def _host_allowed(host: str, allowed_hosts: tuple[str, ...]) -> bool:
     )
 
 
-# SHA-256 of the key that last passed PBKDF2, per configured hash. It lives in
-# memory only and lets later requests skip the slow derivation.
-_VERIFIED_KEYS: dict[str, bytes] = {}
-
-
-def _supplied_key_digest(request: Request) -> bytes | None:
-    supplied = request.headers.get("x-p2h-access-key", "")
-    if not supplied:
-        return None
-    try:
-        return hashlib.sha256(supplied.encode("utf-8")).digest()
-    except UnicodeError:
-        return None
-
-
-def _access_key_known(settings: Settings) -> bool:
-    return (settings.access_key_hash or "") in _VERIFIED_KEYS
-
-
-def _cached_access_key(request: Request, settings: Settings) -> bool:
-    known = _VERIFIED_KEYS.get(settings.access_key_hash or "")
-    supplied = _supplied_key_digest(request)
-    return (
-        known is not None
-        and supplied is not None
-        and hmac.compare_digest(known, supplied)
-    )
-
-
-def _valid_access_key(request: Request, settings: Settings) -> bool:
-    encoded = settings.access_key_hash
-    if not encoded:
-        return False
-    supplied_digest = _supplied_key_digest(request)
-    if supplied_digest is None:
-        return False
-    try:
-        algorithm, iterations_text, salt_hex, expected_hex = encoded.split("$", 3)
-        if algorithm != "pbkdf2_sha256":
-            return False
-        supplied = request.headers.get("x-p2h-access-key", "")
-        digest = hashlib.pbkdf2_hmac(
-            "sha256",
-            supplied.encode("utf-8"),
-            bytes.fromhex(salt_hex),
-            int(iterations_text),
-        ).hex()
-    except (UnicodeError, ValueError):
-        return False
-    if not hmac.compare_digest(digest, expected_hex):
-        return False
-    _VERIFIED_KEYS[encoded] = supplied_digest
-    return True
-
-
-def _unsafe_origin_error(request: Request, settings: Settings) -> str | None:
-    fetch_site = request.headers.get("sec-fetch-site", "").lower()
-    if fetch_site == "cross-site":
-        return "Cross-site state-changing requests are not allowed"
-    origin = request.headers.get("origin")
-    if origin is not None:
-        if origin == "null" or origin not in settings.allowed_origins:
-            return "Origin is not allowed"
-        return None
-    referer = request.headers.get("referer")
-    if referer:
-        try:
-            parsed = urlsplit(referer)
-            _ = parsed.port
-        except ValueError:
-            return "Referer origin is not allowed"
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            return "Referer origin is not allowed"
-        referer_origin = f"{parsed.scheme}://{parsed.netloc}"
-        if referer_origin not in settings.allowed_origins:
-            return "Referer origin is not allowed"
-    return None
-
-
-def _client_identity(request: Request) -> str:
-    if request.client is not None:
-        return request.client.host
-    return "unknown"
-
-
-def _request_rate_limiter(request: Request) -> InMemoryRateLimiter:
-    limiter = getattr(request.app.state, "rate_limiter", None)
-    if not isinstance(limiter, InMemoryRateLimiter):
-        limiter = InMemoryRateLimiter()
-        request.app.state.rate_limiter = limiter
-    return limiter
-
-
 def _secured_error(
     settings: Settings,
     request_id: str,
@@ -516,11 +273,6 @@ def _apply_security_headers(
     response.headers["Cross-Origin-Resource-Policy"] = "same-site"
     if path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
-    if settings.is_external:
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
-            "form-action 'none'"
-        )
 
 
 async def _json_asgi_response(

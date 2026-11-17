@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import stat
@@ -15,17 +14,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.jobs import JobManager
 from app.main import app
-from app.security import InMemoryRateLimiter
 from app.storage import JobMetadata, Storage
-
-
-ACCESS_KEY = "test-only-external-access-key"
-ACCESS_SALT = bytes.fromhex("ab" * 16)
-ACCESS_KEY_HASH = (
-    "pbkdf2_sha256$600000$"
-    f"{ACCESS_SALT.hex()}$"
-    f"{hashlib.pbkdf2_hmac('sha256', ACCESS_KEY.encode(), ACCESS_SALT, 600_000).hex()}"
-)
 
 
 def _make_zip() -> bytes:
@@ -175,29 +164,7 @@ def _client(settings: Settings) -> TestClient:
     app.state.settings = settings
     app.state.storage = Storage(settings)
     app.state.job_manager = JobManager(settings, app.state.storage)
-    app.state.rate_limiter = InMemoryRateLimiter()
     return TestClient(app)
-
-
-def _external_settings(tmp_path: Path, **changes: object) -> Settings:
-    values: dict[str, object] = {
-        "deployment_mode": "external",
-        "allowed_hosts": ("converter.example.com",),
-        "allowed_origins": ("http://converter.example.com:11452",),
-        "access_key_hash": ACCESS_KEY_HASH,
-        "rate_limit_requests_per_minute": 20,
-        "rate_limit_uploads_per_minute": 5,
-    }
-    values.update(changes)
-    return replace(_settings(tmp_path), **values)
-
-
-def _access_headers(**extra: str) -> dict[str, str]:
-    return {
-        "host": "converter.example.com",
-        "x-p2h-access-key": ACCESS_KEY,
-        **extra,
-    }
 
 
 def test_internal_wildcard_host_is_allowed(tmp_path: Path) -> None:
@@ -647,206 +614,68 @@ def test_inspect_does_not_merge_conflicting_hoj_problem_ids(tmp_path: Path) -> N
     assert payload["problems"] == [{"id": "P1001", "path": "export/A/problem_P1001"}]
 
 
-def test_external_mode_requires_access_key_and_valid_host(tmp_path: Path) -> None:
-    client = _client(_external_settings(tmp_path))
+def test_api_requires_no_access_key_and_still_validates_host(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), allowed_hosts=("converter.example.com",))
+    client = _client(settings)
 
     live = client.get("/api/health/live", headers={"host": "converter.example.com"})
-    missing = client.get("/api/health", headers={"host": "converter.example.com"})
-    wrong = client.get(
-        "/api/health",
-        headers={
-            "host": "converter.example.com",
-            "x-p2h-access-key": "wrong-key",
-        },
-    )
-    bad_host = client.get(
-        "/api/health",
-        headers={
-            "host": "attacker.example",
-            "x-p2h-access-key": ACCESS_KEY,
-        },
-    )
-    authenticated = client.get("/api/health", headers=_access_headers())
+    health = client.get("/api/health", headers={"host": "converter.example.com"})
+    bad_host = client.get("/api/health", headers={"host": "attacker.example"})
 
     assert live.status_code == 200
-    assert missing.status_code == 401
-    assert wrong.status_code == 401
-    assert wrong.json()["detail"] == "Invalid or missing access key"
+    assert live.json() == {"status": "ok"}
+    assert health.status_code == 200
+    assert "www-authenticate" not in health.headers
+    assert health.headers["cache-control"] == "no-store"
+    assert health.headers["x-content-type-options"] == "nosniff"
+    assert health.headers["x-frame-options"] == "DENY"
+    assert health.headers["cross-origin-resource-policy"] == "same-site"
+    assert len(health.headers["x-request-id"]) == 32
     assert bad_host.status_code == 400
-    assert authenticated.status_code == 200
-    assert authenticated.headers["cache-control"] == "no-store"
-    assert authenticated.headers["x-content-type-options"] == "nosniff"
-    assert authenticated.headers["x-frame-options"] == "DENY"
-    assert "strict-transport-security" not in authenticated.headers
-    assert authenticated.headers["cross-origin-resource-policy"] == "same-site"
-    assert authenticated.headers["content-security-policy"].startswith(
-        "default-src 'none'"
-    )
-    assert len(authenticated.headers["x-request-id"]) == 32
 
 
 @pytest.mark.parametrize(
-    "path",
+    ("path", "expected"),
     [
-        "/api/health/ready",
-        "/metrics",
-        f"/api/jobs/{'a' * 32}/events",
-        f"/api/jobs/{'a' * 32}/download",
+        ("/metrics", 200),
+        (f"/api/jobs/{'a' * 32}/events", 404),
+        (f"/api/jobs/{'a' * 32}/download", 404),
     ],
 )
-def test_external_mode_protects_non_live_endpoints(tmp_path: Path, path: str) -> None:
-    client = _client(_external_settings(tmp_path))
+def test_endpoints_are_reachable_without_access_key(
+    tmp_path: Path, path: str, expected: int
+) -> None:
+    client = _client(_settings(tmp_path))
 
-    assert (
-        client.get(path, headers={"host": "converter.example.com"}).status_code == 401
-    )
+    assert client.get(path).status_code == expected
 
 
-def test_external_mode_allows_authenticated_cors_preflight(tmp_path: Path) -> None:
-    # The module-level CORS middleware is initialized with the test process's
-    # default origin; app.state settings can still exercise external auth here.
+def test_cors_preflight_no_longer_advertises_access_key_header(
+    tmp_path: Path,
+) -> None:
     origin = "http://localhost:11452"
-    client = _client(_external_settings(tmp_path, allowed_origins=(origin,)))
+    client = _client(_settings(tmp_path))
 
     response = client.options(
         "/api/inspect",
         headers={
-            "host": "converter.example.com",
             "origin": origin,
             "access-control-request-method": "POST",
-            "access-control-request-headers": "x-p2h-access-key",
+            "access-control-request-headers": "content-type",
         },
     )
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == origin
-    assert "X-P2H-Access-Key" in response.headers["access-control-allow-headers"]
-
-
-def test_external_mode_exposes_authentication_errors_to_allowed_origins(
-    tmp_path: Path,
-) -> None:
-    origin = "http://localhost:11452"
-    client = _client(_external_settings(tmp_path, allowed_origins=(origin,)))
-
-    response = client.get(
-        "/api/health",
-        headers={"host": "converter.example.com", "origin": origin},
-    )
-
-    assert response.status_code == 401
-    assert response.headers["access-control-allow-origin"] == origin
-    assert response.json() == {"detail": "Invalid or missing access key"}
-
-
-def test_external_mode_blocks_cross_site_mutations(tmp_path: Path) -> None:
-    client = _client(_external_settings(tmp_path))
-    headers = _access_headers(
-        origin="http://evil.example:11452",
-        **{"sec-fetch-site": "cross-site"},
-    )
-
-    response = client.post(
-        "/api/jobs",
-        headers=headers,
-        json={
-            "job_id": "a" * 32,
-            "source_format": "hydro",
-            "target_format": "icpc",
-        },
-    )
-
-    assert response.status_code == 403
-    assert "Cross-site" in response.json()["detail"]
-
-
-def test_external_mode_rejects_malformed_referer_without_server_error(
-    tmp_path: Path,
-) -> None:
-    client = _client(_external_settings(tmp_path))
-
-    response = client.post(
-        "/api/jobs",
-        headers=_access_headers(referer="http://[invalid"),
-        json={
-            "job_id": "a" * 32,
-            "source_format": "hydro",
-            "target_format": "icpc",
-        },
-    )
-
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Referer origin is not allowed"
-
-
-def test_external_mode_rate_limit_is_enforced(tmp_path: Path) -> None:
-    settings = _external_settings(tmp_path, rate_limit_requests_per_minute=2)
-    client = _client(settings)
-    headers = _access_headers()
-
-    first = client.get("/api/jobs/not-a-job", headers=headers)
-    second = client.get("/api/jobs/not-a-job", headers=headers)
-    limited = client.get("/api/jobs/not-a-job", headers=headers)
-
-    assert first.status_code == 404
-    assert second.status_code == 404
-    assert limited.status_code == 429
-    assert int(limited.headers["retry-after"]) >= 1
-
-
-def test_external_mode_limits_auth_failures_without_locking_out_valid_key(
-    tmp_path: Path,
-) -> None:
-    settings = _external_settings(tmp_path, rate_limit_auth_failures_per_minute=2)
-    client = _client(settings)
-    invalid_headers = {
-        "host": "converter.example.com",
-        "x-p2h-access-key": "wrong-key",
-    }
-
-    assert client.get("/api/health", headers=invalid_headers).status_code == 401
-    assert client.get("/api/health", headers=invalid_headers).status_code == 401
-    limited = client.get("/api/health", headers=invalid_headers)
-
-    assert limited.status_code == 429
-    assert int(limited.headers["retry-after"]) >= 1
-    assert client.get("/api/health", headers=_access_headers()).status_code == 200
-
-
-def test_external_mode_derives_the_access_key_only_until_one_is_verified(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from app import security
-
-    monkeypatch.setattr(security, "_VERIFIED_KEYS", {})
-    calls = 0
-    original = security.hashlib.pbkdf2_hmac
-
-    def counting(*args: object, **kwargs: object) -> bytes:
-        nonlocal calls
-        calls += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(security.hashlib, "pbkdf2_hmac", counting)
-    client = _client(_external_settings(tmp_path))
-    wrong = {"host": "converter.example.com", "x-p2h-access-key": "wrong-key"}
-
-    assert client.get("/api/health", headers=wrong).status_code == 401
-    assert client.get("/api/health", headers=_access_headers()).status_code == 200
-    assert calls == 2
-    # Once a key has passed, neither valid nor invalid requests pay for PBKDF2.
-    assert client.get("/api/health", headers=_access_headers()).status_code == 200
-    assert client.get("/api/health", headers=wrong).status_code == 401
-    assert calls == 2
+    assert "X-P2H-Access-Key" not in response.headers["access-control-allow-headers"]
 
 
 def test_request_body_limit_rejects_before_upload_parsing(tmp_path: Path) -> None:
-    settings = _external_settings(tmp_path, max_request_body_bytes=64)
+    settings = replace(_settings(tmp_path), max_request_body_bytes=64)
     client = _client(settings)
 
     response = client.post(
         "/api/inspect",
-        headers=_access_headers(origin="http://converter.example.com:11452"),
         files={"file": ("large.zip", b"x" * 128, "application/zip")},
     )
 

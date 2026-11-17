@@ -228,7 +228,7 @@ exit 1
     ("options", "answers", "images"),
     [
         (
-            ["--interactive"],
+            ["--interactive", "--no-systemd"],
             "1\ny\n1\n",
             [
                 "ghcr.io/albert-li-sz/p2h-runner-wine:main",
@@ -310,27 +310,31 @@ def test_installer_pulls_current_namespace_and_companion_runner(
     assert f"P2H_RUNNER_IMAGE={images[0]}\n" in (project / ".env").read_text()
 
 
-def test_installer_hashes_external_access_key_without_persisting_plaintext(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("options", "bind"),
+    [
+        ([], "127.0.0.1"),
+        (["--local"], "127.0.0.1"),
+        (["--lan"], "0.0.0.0"),  # nosec B104
+        (["--bind", "0.0.0.0"], "0.0.0.0"),  # nosec B104
+    ],
+)
+def test_installer_writes_bind_address_without_access_control(
+    tmp_path: Path, options: list[str], bind: str
 ) -> None:
     project_root = tmp_path / "project"
     scripts_dir = project_root / "scripts"
     scripts_dir.mkdir(parents=True)
     install_script = scripts_dir / "install.sh"
     shutil.copy2(PROJECT_ROOT / "scripts" / "install.sh", install_script)
-    config_file = project_root / "external.env"
-    access_key = "correct-horse-battery-staple"
-    environment = os.environ.copy()
-    environment["P2H_ACCESS_KEY"] = access_key
+    config_file = project_root / "generated.env"
 
     completed = subprocess.run(
         [
             "bash",
             str(install_script),
             "--non-interactive",
-            "--external",
-            "--site-address",
-            "converter.example.com",
+            *options,
             "--skip-backend",
             "--skip-frontend",
             "--skip-runner",
@@ -338,7 +342,6 @@ def test_installer_hashes_external_access_key_without_persisting_plaintext(
             str(config_file),
         ],
         cwd=project_root,
-        env=environment,
         capture_output=True,
         text=True,
         timeout=10,
@@ -347,16 +350,43 @@ def test_installer_hashes_external_access_key_without_persisting_plaintext(
 
     assert completed.returncode == 0, completed.stderr
     config = config_file.read_text(encoding="utf-8")
-    assert access_key not in config
-    assert "P2H_DEPLOYMENT_MODE=external" in config
-    assert "P2H_ALLOWED_ORIGINS=http://converter.example.com:11452" in config
+    assert f"P2H_BACKEND_HOST={bind}\n" in config
+    assert f"P2H_FRONTEND_HOST={bind}\n" in config
     assert "P2H_BACKEND_PORT=11451" in config
     assert "P2H_FRONTEND_PORT=11452" in config
-    assert "P2H_ACCESS_KEY_HASH='pbkdf2_sha256$600000$" in config
+    assert "ACCESS_KEY" not in config
+    assert "DEPLOYMENT_MODE" not in config
+    assert "RATE_LIMIT" not in config
     assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+    assert ("trusted LAN" in completed.stderr) == (bind == "0.0.0.0")  # nosec B104
 
 
-def test_interactive_installer_collects_deployment_wine_and_key_choices(
+def test_installer_rejects_unsupported_bind_address(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "scripts" / "install.sh"),
+            "--non-interactive",
+            "--bind",
+            "192.168.1.10",
+            "--skip-backend",
+            "--skip-frontend",
+            "--skip-runner",
+            "--config",
+            str(tmp_path / "rejected.env"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "127.0.0.1 or 0.0.0.0" in completed.stderr
+    assert not (tmp_path / "rejected.env").exists()
+
+
+def test_interactive_installer_collects_bind_and_wine_choices(
     tmp_path: Path,
 ) -> None:
     project_root = tmp_path / "project"
@@ -365,20 +395,20 @@ def test_interactive_installer_collects_deployment_wine_and_key_choices(
     install_script = scripts_dir / "install.sh"
     shutil.copy2(PROJECT_ROOT / "scripts" / "install.sh", install_script)
     config_file = project_root / "interactive.env"
-    access_key = "interactive-access-key"
 
     completed = subprocess.run(
         [
             "bash",
             str(install_script),
             "--interactive",
+            "--no-systemd",
             "--skip-backend",
             "--skip-frontend",
             "--config",
             str(config_file),
         ],
         cwd=project_root,
-        input=f"2\ny\n3\nconverter.example.com\n{access_key}\n{access_key}\n",
+        input="2\ny\n3\n",
         capture_output=True,
         text=True,
         timeout=10,
@@ -387,7 +417,7 @@ def test_interactive_installer_collects_deployment_wine_and_key_choices(
 
     assert completed.returncode == 0, completed.stderr
     config = config_file.read_text(encoding="utf-8")
-    assert "P2H_DEPLOYMENT_MODE=external" in config
+    assert "P2H_BACKEND_HOST=0.0.0.0" in config
+    assert "P2H_FRONTEND_HOST=0.0.0.0" in config
     assert "P2H_RUNNER_IMAGE=p2h-runner-wine" in config
-    assert "P2H_ACCESS_KEY_HASH='pbkdf2_sha256$600000$" in config
-    assert access_key not in config
+    assert "ACCESS_KEY" not in config

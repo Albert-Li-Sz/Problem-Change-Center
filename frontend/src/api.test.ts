@@ -6,7 +6,6 @@ import {
   downloadJob,
   inspectZip,
   JobEventHandlers,
-  storeAccessKey,
   subscribeToJobEvents
 } from "./api";
 
@@ -17,7 +16,6 @@ vi.mock("@microsoft/fetch-event-source", () => ({
 
 describe("API error handling", () => {
   afterEach(() => {
-    sessionStorage.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -103,8 +101,7 @@ describe("API error handling", () => {
     expect((body.get("files") as File).name).toBe("1.ans");
   });
 
-  it("subscribes to typed job events with the access key header", async () => {
-    storeAccessKey("session-only-key");
+  it("subscribes to typed job events", async () => {
     vi.mocked(fetchEventSource).mockImplementation(async (_url, options) => {
       await options.onopen?.(
         new Response(null, {
@@ -151,9 +148,7 @@ describe("API error handling", () => {
 
     const [url, options] = vi.mocked(fetchEventSource).mock.calls[0];
     expect(url).toBe(`/api/jobs/${"a".repeat(32)}/events`);
-    expect(new Headers(options.headers).get("X-P2H-Access-Key")).toBe(
-      "session-only-key"
-    );
+    expect(new Headers(options.headers).get("Accept")).toBe("text/event-stream");
     expect(options.signal?.aborted).toBe(true);
     expect(handlers.onOpen).toHaveBeenCalledOnce();
     expect(handlers.onJob).toHaveBeenCalledWith(
@@ -171,8 +166,7 @@ describe("API error handling", () => {
     );
   });
 
-  it("downloads with the access key header and server-provided filename", async () => {
-    storeAccessKey("session-download-key");
+  it("downloads with the server-provided filename", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(new Blob(["zip"]), {
         status: 200,
@@ -198,10 +192,8 @@ describe("API error handling", () => {
 
     await downloadJob("a".repeat(32));
 
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(new Headers(init.headers).get("X-P2H-Access-Key")).toBe(
-      "session-download-key"
-    );
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`/api/jobs/${"a".repeat(32)}/download`);
     expect(clickedFilename).toBe("converted.zip");
     expect(createObjectURL).toHaveBeenCalledOnce();
   });

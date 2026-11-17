@@ -33,17 +33,27 @@ INSTALL_FRONTEND=1
 BUILD_FRONTEND=1
 INTERACTIVE_MODE=auto
 INTERACTIVE_ENABLED=0
-DEPLOYMENT_TARGET="${P2H_INSTALL_DEPLOYMENT:-}"
-DEPLOYMENT_EXPLICIT=0
-if [[ -n "$DEPLOYMENT_TARGET" ]]; then
-  DEPLOYMENT_EXPLICIT=1
+BIND_ADDRESS="${P2H_INSTALL_BIND:-}"
+BIND_EXPLICIT=0
+if [[ -n "$BIND_ADDRESS" ]]; then
+  BIND_EXPLICIT=1
 fi
-SITE_ADDRESS="${P2H_SITE_ADDRESS:-}"
-SITE_ORIGIN_HOST=""
-ACCESS_KEY="${P2H_ACCESS_KEY:-}"
-ACCESS_KEY_HASH="${P2H_ACCESS_KEY_HASH:-}"
 CONFIG_FILE="${P2H_CONFIG_FILE:-$ROOT_DIR/.env}"
 FORCE_CONFIG=0
+
+COMMAND=install
+COMMAND_ARGS=()
+SYSTEMD_MODE=auto
+SYSTEMD_ACTIVE=0
+SYSTEMD_UNIT_DIR="${P2H_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+BACKEND_UNIT=oj-package-converter.service
+FRONTEND_UNIT=oj-package-converter-frontend.service
+SERVICE_USER="$(id -un)"
+SERVICE_GROUP="$(id -gn)"
+GIT_PULL=1
+ASSUME_YES=0
+PURGE=0
+REMOVE_IMAGES=0
 
 log() {
   printf '\033[1;34m==>\033[0m %s\n' "$*"
@@ -68,23 +78,28 @@ is_linux() {
 
 usage() {
   cat <<'EOF'
-Usage: ./install.sh [options]
+Usage:
+  ./install.sh [install] [options]   Install or reinstall the Web UI.
+  ./install.sh update [options]      Pull the latest code and refresh everything.
+  ./install.sh uninstall [options]   Remove services and generated files.
 
-Interactively install an internal or external deployment. When stdin is not a
-terminal, the installer keeps the internal deployment defaults unless options
-or environment variables select another mode.
+Install runs interactively when stdin is a terminal. Both services listen on
+127.0.0.1 (this machine only) unless 0.0.0.0 is chosen to share the Web UI with
+a trusted LAN. Without a terminal, prompts are skipped and defaults are used.
 
-Options:
+Install options:
   --interactive          Force the interactive installation wizard.
   --non-interactive      Disable all prompts.
-  --deployment MODE      Select internal or external deployment.
-  --internal             Alias for --deployment internal.
-  --external             Alias for --deployment external.
+  --bind ADDRESS         Listen address: 127.0.0.1 (default) or 0.0.0.0.
+  --local                Alias for --bind 127.0.0.1 (this machine only).
+  --lan                  Alias for --bind 0.0.0.0 (trusted LAN access).
+  --systemd              Install and start systemd services (Linux only).
+  --no-systemd           Do not install or refresh systemd services.
   --wine                 Select the Wine-capable runner image.
   --no-wine              Select the normal runner without prompting.
   --runner-source MODE   Use prebuilt, build, or skip for the runner image.
   --runner-image IMAGE   Pull a prebuilt runner tag/digest instead of building.
-  --skip-runner          Skip Docker runner image build.
+  --skip-runner          Skip Docker runner image setup.
   --skip-backend         Skip backend virtualenv and pip install.
   --skip-frontend        Skip frontend npm install.
   --no-frontend-build    Skip npm run build after installing frontend deps.
@@ -94,32 +109,59 @@ Options:
   --apt-security URL     Debian security mirror used inside runner Docker builds.
   --build-proxy          Force passing host proxy env vars into Docker builds.
   --no-build-proxy       Do not pass host proxy env vars into Docker builds.
-  --site-address HOST    Public DNS name or IP for an external deployment.
-  --config PATH          Output path for the generated deployment configuration.
-  --force-config         Replace an existing generated configuration file.
+  --config PATH          Path of the generated configuration (default: .env).
+  --force-config         Replace an existing configuration file.
+
+Update options (the runner, build and --skip-* options above also apply):
+  --no-pull              Do not run git pull; only refresh dependencies.
+  The configuration is kept. The runner image named in it is pulled again
+  (registry image) or rebuilt (p2h-runner / p2h-runner-wine). Installed
+  systemd services are refreshed and restarted.
+
+Uninstall options:
+  --purge                Also delete the configuration and the data directory
+                         (all jobs, uploads, logs and converted packages).
+  --remove-images        Also remove the configured and local runner images.
+  -y, --yes              Do not ask for confirmation.
+  The source checkout itself is never deleted.
+
   -h, --help             Show this help.
 
 Examples:
   ./install.sh
-  ./install.sh --external
-  P2H_ACCESS_KEY='a-long-random-key' ./install.sh --non-interactive \
-    --external --site-address convert.example.com
+  ./install.sh --lan --systemd
   ./install.sh --wine
   ./install.sh --runner-image ghcr.io/albert-li-sz/p2h-runner:main
-  ./install.sh --skip-runner
-  ./install.sh --base-image registry.example.com/library/python:3.14-slim-trixie
   ./install.sh --apt-mirror https://mirrors.tuna.tsinghua.edu.cn/debian
-  ./install.sh --build-proxy
-  ./install.sh --no-build-proxy
+  ./install.sh update
+  ./install.sh update --no-pull --skip-runner
+  ./install.sh uninstall
+  ./install.sh uninstall --purge --remove-images --yes
 
 If the default Docker Hub base image is unreachable, the installer will retry
 with known mirror base images unless --base-image or P2H_PYTHON_BASE_IMAGE was
 set explicitly. Override the retry list with P2H_PYTHON_BASE_IMAGE_FALLBACKS.
 
-For non-interactive external deployment, provide P2H_ACCESS_KEY or an existing
-P2H_ACCESS_KEY_HASH. The plaintext access key is never written to disk.
+systemd services run as the user who runs the installer, directly from this
+checkout, with the generated configuration as their EnvironmentFile. Writing
+unit files and calling systemctl uses sudo; do not run the installer with sudo.
+
+The Web UI has no login. Only use --lan on a trusted network.
+P2H_INSTALL_BIND=127.0.0.1|0.0.0.0 selects the listen address like --bind.
 EOF
 }
+
+case "${1:-}" in
+  install|update|uninstall)
+    COMMAND="$1"
+    shift
+    ;;
+  help)
+    usage
+    exit 0
+    ;;
+esac
+COMMAND_ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -129,19 +171,19 @@ while [[ $# -gt 0 ]]; do
     --non-interactive)
       INTERACTIVE_MODE=off
       ;;
-    --deployment)
-      [[ $# -ge 2 ]] || die "--deployment requires internal or external"
-      DEPLOYMENT_TARGET="$2"
-      DEPLOYMENT_EXPLICIT=1
+    --bind)
+      [[ $# -ge 2 ]] || die "--bind requires 127.0.0.1 or 0.0.0.0"
+      BIND_ADDRESS="$2"
+      BIND_EXPLICIT=1
       shift
       ;;
-    --internal)
-      DEPLOYMENT_TARGET=internal
-      DEPLOYMENT_EXPLICIT=1
+    --local)
+      BIND_ADDRESS=127.0.0.1
+      BIND_EXPLICIT=1
       ;;
-    --external)
-      DEPLOYMENT_TARGET=external
-      DEPLOYMENT_EXPLICIT=1
+    --lan)
+      BIND_ADDRESS=0.0.0.0
+      BIND_EXPLICIT=1
       ;;
     --wine)
       BUILD_WINE=1
@@ -221,11 +263,6 @@ while [[ $# -gt 0 ]]; do
     --no-build-proxy)
       BUILD_PROXY_MODE=off
       ;;
-    --site-address)
-      [[ $# -ge 2 ]] || die "--site-address requires a hostname"
-      SITE_ADDRESS="$2"
-      shift
-      ;;
     --config|--production-env)
       [[ $# -ge 2 ]] || die "$1 requires a path"
       CONFIG_FILE="$2"
@@ -233,6 +270,24 @@ while [[ $# -gt 0 ]]; do
       ;;
     --force-config)
       FORCE_CONFIG=1
+      ;;
+    --systemd)
+      SYSTEMD_MODE=on
+      ;;
+    --no-systemd)
+      SYSTEMD_MODE=off
+      ;;
+    --no-pull)
+      GIT_PULL=0
+      ;;
+    --purge)
+      PURGE=1
+      ;;
+    --remove-images)
+      REMOVE_IMAGES=1
+      ;;
+    -y|--yes)
+      ASSUME_YES=1
       ;;
     -h|--help)
       usage
@@ -245,13 +300,23 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-case "$DEPLOYMENT_TARGET" in
-  ""|internal|external)
+case "$BIND_ADDRESS" in
+  ""|127.0.0.1|0.0.0.0)
     ;;
   *)
-    die "deployment mode must be internal or external"
+    die "bind address must be 127.0.0.1 or 0.0.0.0"
     ;;
 esac
+
+if [[ "$COMMAND" != uninstall && ( "$PURGE" -eq 1 || "$REMOVE_IMAGES" -eq 1 || "$ASSUME_YES" -eq 1 ) ]]; then
+  die "--purge, --remove-images and --yes are only valid with: ./install.sh uninstall"
+fi
+if [[ "$COMMAND" != update && "$GIT_PULL" -eq 0 ]]; then
+  die "--no-pull is only valid with: ./install.sh update"
+fi
+if [[ "$COMMAND" == uninstall && "$SYSTEMD_MODE" == on ]]; then
+  die "--systemd is not valid with: ./install.sh uninstall"
+fi
 
 prompt_choice() {
   local target="$1"
@@ -305,105 +370,7 @@ prompt_yes_no() {
   done
 }
 
-prompt_secret() {
-  local target="$1"
-  local prompt="$2"
-  local value=""
-
-  printf '%s: ' "$prompt" >&2
-  if [[ -t 0 ]]; then
-    if ! IFS= read -r -s value; then
-      die "interactive input ended before the access key was entered"
-    fi
-    printf '\n' >&2
-  elif ! IFS= read -r value; then
-    die "interactive input ended before the access key was entered"
-  fi
-  printf -v "$target" '%s' "$value"
-}
-
-normalize_site_address() {
-  local values=""
-  values="$($PYTHON_BIN - "$SITE_ADDRESS" <<'PY'
-import ipaddress
-import re
-import sys
-
-value = sys.argv[1].strip().rstrip(".").lower()
-if not value or len(value) > 253 or any(character.isspace() for character in value):
-    raise SystemExit(1)
-if any(marker in value for marker in ("/", "@", "?", "#", "://")):
-    raise SystemExit(1)
-try:
-    address = ipaddress.ip_address(value)
-except ValueError:
-    labels = value.split(".")
-    if any(
-        not label
-        or len(label) > 63
-        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
-        for label in labels
-    ):
-        raise SystemExit(1)
-    origin_host = value
-else:
-    value = address.compressed
-    origin_host = f"[{value}]" if address.version == 6 else value
-print(f"{value}|{origin_host}")
-PY
-)" || return 1
-  SITE_ADDRESS="${values%%|*}"
-  SITE_ORIGIN_HOST="${values#*|}"
-}
-
-validate_access_key() {
-  printf '%s' "$ACCESS_KEY" | "$PYTHON_BIN" -c '
-import sys
-
-value = sys.stdin.buffer.read()
-if not 16 <= len(value) <= 256 or any(byte < 33 or byte > 126 for byte in value):
-    raise SystemExit(1)
-'
-}
-
-validate_access_key_hash() {
-  # shellcheck disable=SC2016
-  printf '%s' "$ACCESS_KEY_HASH" | "$PYTHON_BIN" -c '
-import re
-import sys
-
-value = sys.stdin.read()
-match = re.fullmatch(
-    r"pbkdf2_sha256\$([0-9]{6,7})\$([0-9a-f]{32,64})\$([0-9a-f]{64})",
-    value,
-)
-if match is None or int(match.group(1)) < 600_000:
-    raise SystemExit(1)
-'
-}
-
-hash_access_key() {
-  # shellcheck disable=SC2016
-  ACCESS_KEY_HASH="$(printf '%s' "$ACCESS_KEY" | "$PYTHON_BIN" -c '
-import hashlib
-import secrets
-import sys
-
-value = sys.stdin.buffer.read()
-salt = secrets.token_bytes(16)
-iterations = 600_000
-digest = hashlib.pbkdf2_hmac("sha256", value, salt, iterations)
-print(f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}")
-')"
-  ACCESS_KEY=""
-  unset P2H_ACCESS_KEY
-}
-
-configure_install() {
-  local choice=""
-  local confirmed=0
-  local confirmation=""
-
+resolve_interactive_mode() {
   case "$INTERACTIVE_MODE" in
     on)
       INTERACTIVE_ENABLED=1
@@ -420,12 +387,33 @@ configure_install() {
       die "invalid interactive mode: $INTERACTIVE_MODE"
       ;;
   esac
+}
+
+configure_install() {
+  local choice=""
+  local confirmed=0
+  local install_service=0
+
+  resolve_interactive_mode
+
+  if [[ -f "$CONFIG_FILE" && "$FORCE_CONFIG" -eq 0 ]]; then
+    if [[ "$INTERACTIVE_ENABLED" -eq 1 ]]; then
+      prompt_yes_no confirmed "Configuration $CONFIG_FILE exists; replace it" n
+      if [[ "$confirmed" -eq 1 ]]; then
+        FORCE_CONFIG=1
+      else
+        log "Keeping existing configuration: $CONFIG_FILE"
+      fi
+    elif [[ "$BIND_EXPLICIT" -eq 1 ]]; then
+      die "$CONFIG_FILE already exists; pass --force-config to replace it"
+    fi
+  fi
 
   if [[ "$INTERACTIVE_ENABLED" -eq 1 ]]; then
-    printf '\nDeployment mode:\n  1) Internal network (no access key)\n  2) External network (access key required)\n' >&2
-    if [[ "$DEPLOYMENT_EXPLICIT" -eq 0 ]]; then
-      prompt_choice choice "Choose deployment mode" 1
-      [[ "$choice" == 1 ]] && DEPLOYMENT_TARGET=internal || DEPLOYMENT_TARGET=external
+    if [[ "$BIND_EXPLICIT" -eq 0 && ( ! -f "$CONFIG_FILE" || "$FORCE_CONFIG" -eq 1 ) ]]; then
+      printf '\nListen address:\n  1) 127.0.0.1 - this machine only\n  2) 0.0.0.0   - trusted LAN / team access (no login)\n' >&2
+      prompt_choice choice "Choose listen address" 1
+      [[ "$choice" == 2 ]] && BIND_ADDRESS=0.0.0.0 || BIND_ADDRESS=127.0.0.1
     fi
     if [[ "$WINE_EXPLICIT" -eq 0 ]]; then
       prompt_yes_no BUILD_WINE "Enable Wine runner support" n
@@ -439,58 +427,21 @@ configure_install() {
         3) RUNNER_SOURCE=skip ;;
       esac
     fi
+    if [[ "$SYSTEMD_MODE" == auto ]] && systemd_available; then
+      prompt_yes_no install_service "Install systemd services (run in background, start on boot)" n
+      if [[ "$install_service" -eq 1 ]]; then
+        SYSTEMD_MODE=on
+      else
+        SYSTEMD_MODE=off
+      fi
+    fi
   fi
 
-  DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET:-internal}"
-  case "$DEPLOYMENT_TARGET" in
-    internal)
-      ACCESS_KEY=""
-      ACCESS_KEY_HASH=""
-      unset P2H_ACCESS_KEY
-      ;;
-    external)
-      check_python
-      while ! normalize_site_address; do
-        if [[ "$INTERACTIVE_ENABLED" -eq 0 ]]; then
-          die "--site-address must be a valid hostname or IP for external deployment"
-        fi
-        printf 'Public hostname or IP: ' >&2
-        IFS= read -r SITE_ADDRESS || die "site address is required"
-      done
-      if [[ -n "$ACCESS_KEY_HASH" ]]; then
-        validate_access_key_hash || die "P2H_ACCESS_KEY_HASH is not a supported PBKDF2 hash"
-      else
-        while [[ "$confirmed" -eq 0 ]]; do
-          if [[ -z "$ACCESS_KEY" ]]; then
-            if [[ "$INTERACTIVE_ENABLED" -eq 0 ]]; then
-              die "P2H_ACCESS_KEY or P2H_ACCESS_KEY_HASH is required for external deployment"
-            fi
-            prompt_secret ACCESS_KEY "Access key (16-256 printable ASCII characters)"
-          fi
-          if ! validate_access_key; then
-            ACCESS_KEY=""
-            if [[ "$INTERACTIVE_ENABLED" -eq 0 ]]; then
-              die "P2H_ACCESS_KEY must contain 16-256 printable ASCII characters without spaces"
-            fi
-            warn "access key must contain 16-256 printable ASCII characters without spaces"
-            continue
-          fi
-          if [[ "$INTERACTIVE_ENABLED" -eq 1 ]]; then
-            prompt_secret confirmation "Confirm access key"
-            if [[ "$confirmation" != "$ACCESS_KEY" ]]; then
-              ACCESS_KEY=""
-              confirmation=""
-              warn "access keys did not match"
-              continue
-            fi
-          fi
-          confirmed=1
-        done
-        hash_access_key
-        confirmation=""
-      fi
-      ;;
-  esac
+  if [[ "$SYSTEMD_MODE" == on ]] && ! systemd_available; then
+    die "--systemd requires Linux with a running systemd (systemctl and /run/systemd/system)"
+  fi
+
+  BIND_ADDRESS="${BIND_ADDRESS:-127.0.0.1}"
 
   if [[ "$RUNNER_SOURCE" == prebuilt && -z "$RUNNER_IMAGE_OVERRIDE" ]]; then
     if [[ "$BUILD_WINE" -eq 1 ]]; then
@@ -500,15 +451,6 @@ configure_install() {
     fi
   fi
 
-  if [[ -f "$CONFIG_FILE" && "$FORCE_CONFIG" -eq 0 ]]; then
-    if [[ "$INTERACTIVE_ENABLED" -eq 1 ]]; then
-      prompt_yes_no confirmed "Configuration $CONFIG_FILE exists; replace it" n
-      [[ "$confirmed" -eq 1 ]] || die "configuration was not replaced"
-      FORCE_CONFIG=1
-    elif [[ "$DEPLOYMENT_EXPLICIT" -eq 1 ]]; then
-      die "$CONFIG_FILE already exists; pass --force-config to replace it"
-    fi
-  fi
 }
 
 require_cmd() {
@@ -934,9 +876,6 @@ pull_runner() {
 write_env_file() {
   local env_file="$CONFIG_FILE"
   local runner_image="p2h-runner"
-  local allowed_hosts="*"
-  local allowed_origins="*"
-  local access_key_hash=""
   local temp_file=""
   if [[ -n "$RUNNER_IMAGE_OVERRIDE" ]]; then
     runner_image="$RUNNER_IMAGE_OVERRIDE"
@@ -945,7 +884,7 @@ write_env_file() {
   fi
 
   if [[ -f "$env_file" && "$FORCE_CONFIG" -eq 0 ]]; then
-    log "Keeping existing .env"
+    log "Keeping existing configuration: $env_file"
     if [[ -n "$RUNNER_IMAGE_OVERRIDE" ]] && ! grep -Fxq "P2H_RUNNER_IMAGE=$RUNNER_IMAGE_OVERRIDE" "$env_file"; then
       warn "Prebuilt runner was pulled, but existing .env was not changed. Set P2H_RUNNER_IMAGE=$RUNNER_IMAGE_OVERRIDE manually."
     fi
@@ -964,18 +903,11 @@ write_env_file() {
     return
   fi
 
-  if [[ "$DEPLOYMENT_TARGET" == external ]]; then
-    allowed_hosts="$SITE_ADDRESS,localhost,127.0.0.1,::1"
-    allowed_origins="http://$SITE_ORIGIN_HOST:11452"
-    access_key_hash="$ACCESS_KEY_HASH"
-  fi
-
   log "Writing deployment configuration: $env_file"
   mkdir -p "$(dirname "$env_file")"
   temp_file="$(mktemp "${env_file}.tmp.XXXXXX")"
   chmod 600 "$temp_file"
   cat >"$temp_file" <<EOF
-P2H_DEPLOYMENT_MODE=$DEPLOYMENT_TARGET
 P2H_DATA_DIR=~/.p2h-web-ui/backend_data
 P2H_RUNNER_IMAGE=$runner_image
 P2H_PYTHON_BASE_IMAGE=$PYTHON_BASE_IMAGE
@@ -983,13 +915,9 @@ P2H_APT_MIRROR=$APT_MIRROR
 P2H_APT_SECURITY_MIRROR=$APT_SECURITY_MIRROR
 P2H_MAX_UPLOAD_BYTES=536870912
 P2H_MAX_REQUEST_BODY_BYTES=553648128
-P2H_RATE_LIMIT_REQUESTS_PER_MINUTE=240
-P2H_RATE_LIMIT_UPLOADS_PER_MINUTE=12
-P2H_RATE_LIMIT_AUTH_FAILURES_PER_MINUTE=10
 P2H_READINESS_TIMEOUT_SECONDS=5
-P2H_ALLOWED_HOSTS=$allowed_hosts
-P2H_ALLOWED_ORIGINS=$allowed_origins
-P2H_ACCESS_KEY_HASH='$access_key_hash'
+P2H_ALLOWED_HOSTS=*
+P2H_ALLOWED_ORIGINS=*
 P2H_JOB_TIMEOUT_SECONDS=7200
 P2H_JOB_IDLE_TIMEOUT_SECONDS=300
 P2H_JOB_STAGE_TIMEOUT_SECONDS=1800
@@ -1008,51 +936,483 @@ P2H_DOCKER_TMP_SIZE=512m
 P2H_DOCKER_WORK_SIZE=1g
 P2H_DOCKER_OUTPUT_SIZE=1g
 
-P2H_BACKEND_HOST=0.0.0.0
+P2H_BACKEND_HOST=$BIND_ADDRESS
 P2H_BACKEND_PORT=11451
-P2H_FRONTEND_HOST=0.0.0.0
+P2H_FRONTEND_HOST=$BIND_ADDRESS
 P2H_FRONTEND_PORT=11452
 EOF
   mv -f "$temp_file" "$env_file"
   chmod 600 "$env_file"
 }
 
-main() {
-  log "Installing Polygon Converter Web UI"
-  configure_install
+run_privileged() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+    return
+  fi
+  require_cmd sudo
+  sudo "$@"
+}
 
-  if [[ "$INSTALL_BACKEND" -eq 1 ]]; then
-    install_backend
+systemd_available() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  # A custom unit directory is used for staging and tests; otherwise require a
+  # Linux host that actually booted with systemd.
+  if [[ -n "${P2H_SYSTEMD_UNIT_DIR:-}" ]]; then
+    return 0
+  fi
+  is_linux && [[ -d /run/systemd/system ]]
+}
+
+systemd_units_present() {
+  [[ -f "$SYSTEMD_UNIT_DIR/$BACKEND_UNIT" || -f "$SYSTEMD_UNIT_DIR/$FRONTEND_UNIT" ]]
+}
+
+# True only when the installed units run this checkout, so another checkout's
+# services are never refreshed or removed by mistake.
+systemd_units_installed() {
+  grep -Fxqs "WorkingDirectory=$ROOT_DIR/backend" "$SYSTEMD_UNIT_DIR/$BACKEND_UNIT" \
+    || grep -Fxqs "WorkingDirectory=$ROOT_DIR" "$SYSTEMD_UNIT_DIR/$FRONTEND_UNIT"
+}
+
+config_value() {
+  local key="$1"
+  local line=""
+  local value=""
+  [[ -f "$CONFIG_FILE" ]] || return 1
+  line="$(grep -E "^${key}=" "$CONFIG_FILE" | tail -n 1)" || return 1
+  value="${line#*=}"
+  if [[ ${#value} -ge 2 && ( "$value" == \'*\' || "$value" == \"*\" ) ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  printf '%s' "$value"
+}
+
+absolute_path() {
+  local path="$1"
+  local directory=""
+  directory="$(cd "$(dirname "$path")" && pwd)" || return 1
+  printf '%s/%s' "$directory" "$(basename "$path")"
+}
+
+resolved_data_dir() {
+  local value=""
+  value="$(config_value P2H_DATA_DIR || true)"
+  value="${value:-~/.p2h-web-ui/backend_data}"
+  if [[ "$value" == "~" ]]; then
+    value="$HOME"
+  elif [[ "$value" == \~/* ]]; then
+    value="$HOME/${value#\~/}"
+  elif [[ "$value" != /* ]]; then
+    # The backend resolves relative paths from its working directory.
+    value="$ROOT_DIR/backend/$value"
+  fi
+  printf '%s' "${value%/}"
+}
+
+validate_unit_path() {
+  local label="$1"
+  local value="$2"
+  case "$value" in
+    /*) ;;
+    *) die "$label must be an absolute path for systemd: $value" ;;
+  esac
+  case "$value" in
+    *[[:space:]]*|*\"*|*\'*|*\\*|*%*|*\$*)
+      die "$label contains spaces or characters systemd cannot use safely: $value"
+      ;;
+  esac
+}
+
+render_unit() {
+  local template="$1"
+  local output="$2"
+  shift 2
+  "$PYTHON_BIN" - "$template" "$output" "$@" <<'PY'
+import re
+import sys
+
+template, output, *pairs = sys.argv[1:]
+with open(template, encoding="utf-8") as handle:
+    text = handle.read()
+for pair in pairs:
+    key, value = pair.split("=", 1)
+    text = text.replace(f"@{key}@", value)
+leftover = re.findall(r"@[A-Z_]+@", text)
+if leftover:
+    raise SystemExit(f"unrendered placeholders in {template}: {sorted(set(leftover))}")
+with open(output, "w", encoding="utf-8") as handle:
+    handle.write(text)
+PY
+}
+
+install_systemd_services() {
+  local config_path=""
+  local data_dir=""
+  local node_bin=""
+  local temp_dir=""
+
+  log "Installing systemd services: $BACKEND_UNIT, $FRONTEND_UNIT"
+  systemd_available || die "systemd services require Linux with a running systemd"
+  [[ -x "$ROOT_DIR/backend/.venv/bin/uvicorn" ]] \
+    || die "backend/.venv is missing; install the backend before enabling systemd services"
+  [[ -f "$ROOT_DIR/frontend/dist/index.html" ]] \
+    || die "frontend/dist is missing; build the frontend before enabling systemd services"
+  [[ -f "$CONFIG_FILE" ]] || die "configuration $CONFIG_FILE is missing"
+  node_bin="$(command -v node)" || die "node is required by the frontend service"
+  check_python
+  if [[ "$(id -u)" -eq 0 ]]; then
+    warn "Installing services as root; they will run as root. Prefer a normal user with sudo."
   fi
 
-  if [[ "$INSTALL_FRONTEND" -eq 1 ]]; then
-    install_frontend
+  if systemd_units_present && ! systemd_units_installed; then
+    warn "Replacing $BACKEND_UNIT/$FRONTEND_UNIT that were installed from another checkout"
   fi
 
+  config_path="$(absolute_path "$CONFIG_FILE")"
+  data_dir="$(resolved_data_dir)"
+  mkdir -p "$data_dir"
+  validate_unit_path "Project directory" "$ROOT_DIR"
+  validate_unit_path "Configuration file" "$config_path"
+  validate_unit_path "Data directory" "$data_dir"
+  validate_unit_path "Node.js executable" "$node_bin"
+
+  temp_dir="$(mktemp -d)"
+  render_unit "$ROOT_DIR/deploy/systemd/$BACKEND_UNIT.in" "$temp_dir/$BACKEND_UNIT" \
+    "ROOT_DIR=$ROOT_DIR" "ENV_FILE=$config_path" "DATA_DIR=$data_dir" \
+    "SERVICE_USER=$SERVICE_USER" "SERVICE_GROUP=$SERVICE_GROUP"
+  render_unit "$ROOT_DIR/deploy/systemd/$FRONTEND_UNIT.in" "$temp_dir/$FRONTEND_UNIT" \
+    "ROOT_DIR=$ROOT_DIR" "ENV_FILE=$config_path" "NODE_BIN=$node_bin" \
+    "SERVICE_USER=$SERVICE_USER" "SERVICE_GROUP=$SERVICE_GROUP"
+
+  run_privileged mkdir -p "$SYSTEMD_UNIT_DIR"
+  run_privileged install -m 0644 "$temp_dir/$BACKEND_UNIT" "$SYSTEMD_UNIT_DIR/$BACKEND_UNIT"
+  run_privileged install -m 0644 "$temp_dir/$FRONTEND_UNIT" "$SYSTEMD_UNIT_DIR/$FRONTEND_UNIT"
+  rm -rf "$temp_dir"
+
+  run_privileged systemctl daemon-reload
+  run_privileged systemctl enable "$BACKEND_UNIT" "$FRONTEND_UNIT"
+  run_privileged systemctl restart "$BACKEND_UNIT" "$FRONTEND_UNIT"
+  SYSTEMD_ACTIVE=1
+}
+
+remove_systemd_services() {
+  if ! systemd_units_installed; then
+    if systemd_units_present; then
+      warn "$BACKEND_UNIT/$FRONTEND_UNIT belong to another checkout and were left unchanged"
+    fi
+    return
+  fi
+  log "Removing systemd services: $BACKEND_UNIT, $FRONTEND_UNIT"
+  if command -v systemctl >/dev/null 2>&1; then
+    run_privileged systemctl disable --now "$BACKEND_UNIT" "$FRONTEND_UNIT" \
+      || warn "systemctl could not stop or disable every service; continuing"
+  fi
+  run_privileged rm -f "$SYSTEMD_UNIT_DIR/$BACKEND_UNIT" "$SYSTEMD_UNIT_DIR/$FRONTEND_UNIT"
+  if command -v systemctl >/dev/null 2>&1; then
+    run_privileged systemctl daemon-reload || true
+  fi
+}
+
+refresh_runner() {
   case "$RUNNER_SOURCE" in
     prebuilt) pull_runner ;;
     build) build_runner ;;
     skip) log "Skipping runner image setup" ;;
     *) die "invalid runner source: $RUNNER_SOURCE" ;;
   esac
+}
 
-  write_env_file
+print_access_summary() {
+  local bind=""
+  bind="$(config_value P2H_FRONTEND_HOST || true)"
+  bind="${bind:-$BIND_ADDRESS}"
 
-  cat <<EOF
-
-Install complete.
-
+  if [[ "$SYSTEMD_ACTIVE" -eq 1 ]]; then
+    cat <<EOF
+The Web UI runs in the background as systemd services and starts on boot:
+  sudo systemctl status $BACKEND_UNIT $FRONTEND_UNIT
+  sudo journalctl -u $BACKEND_UNIT -u $FRONTEND_UNIT -f
+  sudo systemctl restart $BACKEND_UNIT $FRONTEND_UNIT
+EOF
+  else
+    cat <<'EOF'
 Start the Web UI:
   ./scripts/start.sh
+EOF
+  fi
+
+  cat <<'EOF'
 
 Open:
-  http://${SITE_ORIGIN_HOST:-127.0.0.1}:11452
+  http://127.0.0.1:11452
 EOF
+  if [[ "$bind" == 0.0.0.0 ]]; then
+    printf '  http://<this-machine-LAN-IP>:11452   (teammates on the same network)\n'
+    warn "Listening on 0.0.0.0 without any login. Only expose ports 11451/11452 to a trusted LAN or VPN."
+  fi
 
-  if [[ "$DEPLOYMENT_TARGET" == external ]]; then
-    warn "External mode uses HTTP. The access key is not encrypted in transit."
-    warn "Use a VPN, SSH tunnel, or your own TLS gateway for untrusted networks."
+  cat <<'EOF'
+
+Update:     ./install.sh update
+Uninstall:  ./install.sh uninstall
+EOF
+}
+
+cmd_install() {
+  SYSTEMD_ACTIVE=0
+  log "Installing Problem Change Center Web UI"
+  configure_install
+
+  if [[ "$INSTALL_BACKEND" -eq 1 ]]; then
+    install_backend
+  fi
+  if [[ "$INSTALL_FRONTEND" -eq 1 ]]; then
+    install_frontend
+  fi
+  refresh_runner
+  write_env_file
+
+  if [[ "$SYSTEMD_MODE" == on ]]; then
+    install_systemd_services
+  elif systemd_units_installed && systemd_available; then
+    if [[ "$SYSTEMD_MODE" == off ]]; then
+      warn "systemd services are already installed and were left unchanged; remove them with ./install.sh uninstall"
+    else
+      log "Refreshing the installed systemd services"
+      install_systemd_services
+    fi
+  fi
+
+  printf '\nInstall complete.\n\n'
+  print_access_summary
+}
+
+update_source() {
+  local before=""
+  local after=""
+  local upstream=""
+
+  if ! command -v git >/dev/null 2>&1 \
+    || ! git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    warn "$ROOT_DIR is not a git checkout; skipping the source update"
+    return
+  fi
+  if ! upstream="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"; then
+    warn "The current branch has no upstream; skipping git pull"
+    return
+  fi
+  if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=no)" ]]; then
+    die "the checkout has uncommitted changes; commit or stash them, or rerun with --no-pull"
+  fi
+
+  before="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  log "Pulling the latest source from $upstream"
+  git -C "$ROOT_DIR" pull --ff-only
+  after="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  if [[ "$before" == "$after" ]]; then
+    log "Source is already up to date"
+    return
+  fi
+
+  git -C "$ROOT_DIR" log --oneline "$before..$after" | head -n 20
+  log "Continuing with the updated installer"
+  exec bash "$ROOT_DIR/scripts/install.sh" update --no-pull \
+    ${COMMAND_ARGS[@]+"${COMMAND_ARGS[@]}"}
+}
+
+configure_update_runner() {
+  local configured_image=""
+  local value=""
+
+  if [[ -z "$APT_MIRROR" ]]; then
+    APT_MIRROR="$(config_value P2H_APT_MIRROR || true)"
+  fi
+  if [[ -z "$APT_SECURITY_MIRROR" ]]; then
+    APT_SECURITY_MIRROR="$(config_value P2H_APT_SECURITY_MIRROR || true)"
+  fi
+  if [[ "$PYTHON_BASE_IMAGE_EXPLICIT" -eq 0 ]]; then
+    value="$(config_value P2H_PYTHON_BASE_IMAGE || true)"
+    if [[ -n "$value" ]]; then
+      PYTHON_BASE_IMAGE="$value"
+      PYTHON_BASE_IMAGE_EXPLICIT=1
+    fi
+  fi
+
+  if [[ "$RUNNER_SOURCE_EXPLICIT" -eq 1 ]]; then
+    if [[ "$RUNNER_SOURCE" == prebuilt && -z "$RUNNER_IMAGE_OVERRIDE" ]]; then
+      if [[ "$BUILD_WINE" -eq 1 ]]; then
+        RUNNER_IMAGE_OVERRIDE="$DEFAULT_PREBUILT_WINE_IMAGE"
+      else
+        RUNNER_IMAGE_OVERRIDE="$DEFAULT_PREBUILT_RUNNER_IMAGE"
+      fi
+    fi
+    return
+  fi
+
+  configured_image="$(config_value P2H_RUNNER_IMAGE || true)"
+  configured_image="${configured_image:-p2h-runner}"
+  case "$configured_image" in
+    p2h-runner|p2h-runner:latest)
+      RUNNER_SOURCE=build
+      [[ "$WINE_EXPLICIT" -eq 1 ]] || BUILD_WINE=0
+      ;;
+    p2h-runner-wine|p2h-runner-wine:latest)
+      RUNNER_SOURCE=build
+      [[ "$WINE_EXPLICIT" -eq 1 ]] || BUILD_WINE=1
+      ;;
+    */*)
+      RUNNER_SOURCE=prebuilt
+      RUNNER_IMAGE_OVERRIDE="$configured_image"
+      ;;
+    *)
+      warn "Runner image $configured_image is a custom local image; it is not rebuilt automatically"
+      RUNNER_SOURCE=skip
+      ;;
+  esac
+}
+
+cmd_update() {
+  SYSTEMD_ACTIVE=0
+  log "Updating Problem Change Center Web UI"
+  [[ -f "$CONFIG_FILE" ]] \
+    || die "configuration $CONFIG_FILE was not found; run ./install.sh first or pass --config"
+
+  if [[ "$GIT_PULL" -eq 1 ]]; then
+    update_source
+  fi
+  configure_update_runner
+
+  if [[ "$INSTALL_BACKEND" -eq 1 ]]; then
+    install_backend
+  fi
+  if [[ "$INSTALL_FRONTEND" -eq 1 ]]; then
+    install_frontend
+  fi
+  refresh_runner
+  write_env_file
+
+  if [[ "$SYSTEMD_MODE" == on ]] || { [[ "$SYSTEMD_MODE" == auto ]] && systemd_units_installed; }; then
+    install_systemd_services
+  fi
+
+  printf '\nUpdate complete.\n\n'
+  if [[ "$SYSTEMD_ACTIVE" -eq 0 ]]; then
+    printf 'If ./scripts/start.sh is running, stop it with Ctrl+C and start it again.\n\n'
+  fi
+  print_access_summary
+}
+
+companion_runner_image() {
+  local reference="$1"
+  local basename="${reference##*/}"
+  local suffix=""
+  [[ "$reference" != *@* ]] || return 1
+  if [[ "$basename" == *:* ]]; then
+    suffix=":${basename##*:}"
+    reference="${reference%:*}"
+  fi
+  [[ "$reference" == *-wine ]] || return 1
+  printf '%s%s' "${reference%-wine}" "$suffix"
+}
+
+remove_runner_images() {
+  local configured=""
+  local companion=""
+  local image=""
+  local images=(p2h-runner p2h-runner-wine)
+
+  if ! command -v docker >/dev/null 2>&1; then
+    warn "docker is not available; runner images were not removed"
+    return
+  fi
+  configured="$(config_value P2H_RUNNER_IMAGE || true)"
+  if [[ -n "$configured" ]]; then
+    images+=("$configured")
+    if companion="$(companion_runner_image "$configured")"; then
+      images+=("$companion")
+    fi
+  fi
+  for image in "${images[@]}"; do
+    if docker image inspect "$image" >/dev/null 2>&1; then
+      log "Removing Docker image: $image"
+      docker image rm "$image" >/dev/null || warn "could not remove Docker image $image"
+    fi
+  done
+}
+
+check_data_dir_removable() {
+  local data_dir="$1"
+  case "$data_dir" in
+    ""|/|"$HOME"|"$ROOT_DIR"|"$ROOT_DIR/backend"|"$ROOT_DIR/frontend")
+      die "refusing to delete unsafe data directory: ${data_dir:-/}"
+      ;;
+  esac
+}
+
+remove_data_dir() {
+  local data_dir="$1"
+  check_data_dir_removable "$data_dir"
+  if [[ -e "$data_dir" ]]; then
+    log "Deleting data directory: $data_dir"
+    rm -rf "$data_dir" || warn "could not delete every file in $data_dir; remove it manually"
   fi
 }
 
-main
+cmd_uninstall() {
+  local confirmed=0
+  local data_dir=""
+
+  resolve_interactive_mode
+  if [[ "$PURGE" -eq 1 ]]; then
+    data_dir="$(resolved_data_dir)"
+    check_data_dir_removable "$data_dir"
+  fi
+
+  printf 'This will remove:\n' >&2
+  if systemd_units_installed; then
+    printf '  - systemd services %s and %s\n' "$BACKEND_UNIT" "$FRONTEND_UNIT" >&2
+  fi
+  printf '  - backend/.venv, frontend/node_modules and frontend/dist\n' >&2
+  if [[ "$PURGE" -eq 1 ]]; then
+    printf '  - configuration %s\n' "$CONFIG_FILE" >&2
+    printf '  - data directory %s (all jobs, uploads, logs and outputs)\n' "$data_dir" >&2
+  fi
+  if [[ "$REMOVE_IMAGES" -eq 1 ]]; then
+    printf '  - Docker runner images\n' >&2
+  fi
+  printf 'The source checkout %s is kept.\n' "$ROOT_DIR" >&2
+
+  if [[ "$ASSUME_YES" -eq 0 ]]; then
+    if [[ "$INTERACTIVE_ENABLED" -eq 0 ]]; then
+      die "uninstall needs confirmation; rerun with --yes"
+    fi
+    prompt_yes_no confirmed "Continue" n
+    [[ "$confirmed" -eq 1 ]] || die "uninstall cancelled"
+  fi
+
+  remove_systemd_services
+  log "Removing installed dependencies and build output"
+  rm -rf "$ROOT_DIR/backend/.venv" "$ROOT_DIR/frontend/node_modules" "$ROOT_DIR/frontend/dist"
+  if [[ "$REMOVE_IMAGES" -eq 1 ]]; then
+    remove_runner_images
+  fi
+  if [[ "$PURGE" -eq 1 ]]; then
+    remove_data_dir "$data_dir"
+    log "Deleting configuration: $CONFIG_FILE"
+    rm -f "$CONFIG_FILE"
+  fi
+
+  printf '\nUninstall complete.\n'
+  if [[ "$PURGE" -eq 0 ]]; then
+    printf 'Configuration and job data were kept; use --purge to delete them.\n'
+  fi
+  printf 'Delete %s yourself if you no longer need the source code.\n' "$ROOT_DIR"
+}
+
+case "$COMMAND" in
+  install) cmd_install ;;
+  update) cmd_update ;;
+  uninstall) cmd_uninstall ;;
+  *) die "unknown command: $COMMAND" ;;
+esac

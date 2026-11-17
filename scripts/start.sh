@@ -5,14 +5,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
 RUN_BACKEND=1
 RUN_FRONTEND=1
+BIND_OVERRIDE=""
 
 usage() {
   cat <<'EOF'
 Usage: ./scripts/start.sh [options]
 
 Start the backend and built frontend servers on ports 11451 and 11452.
+Both listen on P2H_BACKEND_HOST/P2H_FRONTEND_HOST from .env (default 127.0.0.1).
 
 Options:
+  --lan              Listen on 0.0.0.0 for this run (trusted LAN access).
+  --local            Listen on 127.0.0.1 for this run (this machine only).
   --backend-only     Start only FastAPI.
   --frontend-only    Start only the built frontend server.
   -h, --help         Show this help.
@@ -21,6 +25,12 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --lan)
+      BIND_OVERRIDE=0.0.0.0
+      ;;
+    --local)
+      BIND_OVERRIDE=127.0.0.1
+      ;;
     --backend-only)
       RUN_FRONTEND=0
       ;;
@@ -39,9 +49,9 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-P2H_BACKEND_HOST_OVERRIDE="${P2H_BACKEND_HOST-}"
+P2H_BACKEND_HOST_OVERRIDE="${BIND_OVERRIDE:-${P2H_BACKEND_HOST-}}"
 P2H_BACKEND_PORT_OVERRIDE="${P2H_BACKEND_PORT-}"
-P2H_FRONTEND_HOST_OVERRIDE="${P2H_FRONTEND_HOST-}"
+P2H_FRONTEND_HOST_OVERRIDE="${BIND_OVERRIDE:-${P2H_FRONTEND_HOST-}}"
 P2H_FRONTEND_PORT_OVERRIDE="${P2H_FRONTEND_PORT-}"
 
 if [[ -f "$ROOT_DIR/.env" ]]; then
@@ -51,9 +61,10 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
 fi
 
-P2H_BACKEND_HOST="${P2H_BACKEND_HOST_OVERRIDE:-${P2H_BACKEND_HOST:-0.0.0.0}}"
+P2H_BACKEND_HOST="${P2H_BACKEND_HOST_OVERRIDE:-${P2H_BACKEND_HOST:-127.0.0.1}}"
 P2H_BACKEND_PORT="${P2H_BACKEND_PORT_OVERRIDE:-${P2H_BACKEND_PORT:-11451}}"
-P2H_FRONTEND_HOST="${P2H_FRONTEND_HOST_OVERRIDE:-${P2H_FRONTEND_HOST:-0.0.0.0}}"
+P2H_FRONTEND_HOST="${P2H_FRONTEND_HOST_OVERRIDE:-${P2H_FRONTEND_HOST:-127.0.0.1}}"
+export P2H_FRONTEND_HOST
 P2H_FRONTEND_PORT="${P2H_FRONTEND_PORT_OVERRIDE:-${P2H_FRONTEND_PORT:-11452}}"
 
 pids=()
@@ -71,13 +82,6 @@ validate_bindings() {
     printf 'error: deployment ports are fixed at backend 11451 and frontend 11452.\n' >&2
     exit 1
   fi
-  case "${P2H_DEPLOYMENT_MODE:-internal}" in
-    internal|external|local|production) ;;
-    *)
-      printf 'error: P2H_DEPLOYMENT_MODE must be internal or external.\n' >&2
-      exit 1
-      ;;
-  esac
 }
 
 print_missing_docker_help() {
@@ -217,6 +221,13 @@ if [[ "$RUN_BACKEND" -eq 1 ]]; then
 fi
 if [[ "$RUN_FRONTEND" -eq 1 ]]; then
   printf 'Frontend: http://%s:%s\n' "$P2H_FRONTEND_HOST" "$P2H_FRONTEND_PORT"
+fi
+if [[ "$P2H_BACKEND_HOST" == 0.0.0.0 || "$P2H_FRONTEND_HOST" == 0.0.0.0 ]]; then
+  printf '\nListening on all interfaces: teammates can open http://<this-machine-LAN-IP>:%s\n' "$P2H_FRONTEND_PORT"
+  printf 'warning: there is no login. Only expose ports 11451/11452 to a trusted LAN or VPN.\n' >&2
+  if [[ -n "${P2H_ALLOWED_HOSTS:-}" && ",${P2H_ALLOWED_HOSTS// /}," != *",*,"* ]]; then
+    printf 'warning: P2H_ALLOWED_HOSTS=%s; add this machine'"'"'s LAN IP or hostname (or use *) so teammates are not rejected.\n' "$P2H_ALLOWED_HOSTS" >&2
+  fi
 fi
 printf '\nPress Ctrl+C to stop.\n'
 

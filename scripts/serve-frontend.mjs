@@ -11,7 +11,7 @@ const frontendRoot = path.resolve(
   process.env.P2H_FRONTEND_ROOT || path.join(scriptDirectory, "../frontend/dist")
 );
 const frontendRootReal = await realpath(frontendRoot);
-const host = process.env.P2H_FRONTEND_HOST || "0.0.0.0";
+const host = process.env.P2H_FRONTEND_HOST || "127.0.0.1";
 const port = Number.parseInt(process.env.P2H_FRONTEND_PORT || "11452", 10);
 
 const contentTypes = new Map([

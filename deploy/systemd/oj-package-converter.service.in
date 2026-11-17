@@ -1,0 +1,47 @@
+# Template rendered by ./install.sh --systemd. Placeholders such as @ROOT_DIR@
+# are replaced with this checkout, the installing user and its configuration.
+[Unit]
+Description=Problem Change Center backend (OJ package converter API)
+Documentation=file:@ROOT_DIR@/deploy/README.md
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@ROOT_DIR@/backend
+Environment=P2H_BACKEND_HOST=127.0.0.1
+EnvironmentFile=@ENV_FILE@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@ROOT_DIR@/backend/.venv/bin/uvicorn app.main:app --host ${P2H_BACKEND_HOST} --port 11451 --workers 1 --no-proxy-headers --limit-concurrency 128 --timeout-keep-alive 5 --h11-max-incomplete-event-size 65536
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=120s
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+KillMode=control-group
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=@DATA_DIR@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

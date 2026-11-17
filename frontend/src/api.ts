@@ -1,8 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 
-const accessKeyStorageName = "p2h.access-key";
-const unauthorizedEventName = "p2h:unauthorized";
-
 function apiBaseUrl(): string {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
   if (configured) return configured.replace(/\/$/, "");
@@ -21,51 +18,8 @@ function apiUrl(path: string): string {
   return `${apiBaseUrl()}${path}`;
 }
 
-export function getStoredAccessKey(): string {
-  if (typeof window === "undefined") return "";
-  return window.sessionStorage.getItem(accessKeyStorageName) ?? "";
-}
-
-export function storeAccessKey(accessKey: string): void {
-  window.sessionStorage.setItem(accessKeyStorageName, accessKey);
-}
-
-export function clearAccessKey(): void {
-  if (typeof window === "undefined") return;
-  window.sessionStorage.removeItem(accessKeyStorageName);
-}
-
-function notifyUnauthorized(): void {
-  clearAccessKey();
-  window.dispatchEvent(new Event(unauthorizedEventName));
-}
-
-export function onUnauthorized(listener: () => void): () => void {
-  window.addEventListener(unauthorizedEventName, listener);
-  return () => window.removeEventListener(unauthorizedEventName, listener);
-}
-
-function accessHeaders(
-  initial?: HeadersInit,
-  accessKey = getStoredAccessKey()
-): Headers {
-  const headers = new Headers(initial);
-  if (accessKey) headers.set("X-P2H-Access-Key", accessKey);
-  return headers;
-}
-
-async function apiFetch(
-  path: string,
-  init: RequestInit = {},
-  accessKey = getStoredAccessKey(),
-  notifyOnUnauthorized = true
-): Promise<Response> {
-  const response = await fetch(apiUrl(path), {
-    ...init,
-    headers: accessHeaders(init.headers, accessKey)
-  });
-  if (response.status === 401 && notifyOnUnauthorized) notifyUnauthorized();
-  return response;
+async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(apiUrl(path), init);
 }
 
 export type InspectResult = {
@@ -318,16 +272,10 @@ export function subscribeToJobEvents(
   };
 
   void fetchEventSource(apiUrl(`/api/jobs/${jobId}/events${query}`), {
-    headers: Object.fromEntries(
-      accessHeaders({ Accept: "text/event-stream" }).entries()
-    ),
+    headers: { Accept: "text/event-stream" },
     signal: controller.signal,
     openWhenHidden: true,
     async onopen(response) {
-      if (response.status === 401) {
-        notifyUnauthorized();
-        throw new Error("Invalid or missing access key");
-      }
       if (!response.ok) {
         throw new Error(await responseErrorMessage(response));
       }
@@ -414,29 +362,4 @@ export async function downloadJob(jobId: string): Promise<void> {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
-}
-
-export async function accessConfiguration(): Promise<{
-  accessKeyRequired: boolean;
-}> {
-  const response = await fetch(apiUrl("/api/health/live"), {
-    headers: { Accept: "application/json" }
-  });
-  const payload = await parseResponse<{
-    status: string;
-    access_key_required?: boolean;
-  }>(response);
-  return { accessKeyRequired: payload.access_key_required === true };
-}
-
-export async function verifyAccessKey(accessKey: string): Promise<boolean> {
-  const response = await apiFetch(
-    "/api/health",
-    { headers: { Accept: "application/json" } },
-    accessKey,
-    false
-  );
-  if (response.status === 401) return false;
-  await parseResponse<{ status: string }>(response);
-  return true;
 }

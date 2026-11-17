@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 from app.config import Settings
 from app.security import (
-    InMemoryRateLimiter,
     RequestBodyLimitMiddleware,
     readiness_status,
 )
@@ -73,16 +72,6 @@ def test_streamed_request_body_limit_counts_actual_bytes(tmp_path: Path) -> None
     assert sent[0]["status"] == 413
 
 
-def test_rate_limiter_resets_after_window() -> None:
-    limiter = InMemoryRateLimiter()
-
-    assert limiter.check("203.0.113.1", "request", 1, now=10) == (True, 0)
-    allowed, retry_after = limiter.check("203.0.113.1", "request", 1, now=11)
-    assert allowed is False
-    assert retry_after > 0
-    assert limiter.check("203.0.113.1", "request", 1, now=70) == (True, 0)
-
-
 def test_readiness_checks_storage_docker_and_runner(tmp_path: Path) -> None:
     fake_docker = tmp_path / "fake-docker"
     fake_docker.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
@@ -110,39 +99,37 @@ def test_readiness_fails_closed_when_docker_is_missing(tmp_path: Path) -> None:
     assert checks["runner_image"] == "unchecked"
 
 
-def test_deployment_templates_use_fixed_ports_and_system_docker() -> None:
+def test_systemd_templates_use_fixed_ports_and_safe_defaults() -> None:
     project_root = Path(__file__).resolve().parents[2]
-    service = (project_root / "deploy/systemd/oj-package-converter.service").read_text(
-        encoding="utf-8"
-    )
-    frontend_service = (
-        project_root / "deploy/systemd/oj-package-converter-frontend.service"
+    service = (
+        project_root / "deploy/systemd/oj-package-converter.service.in"
     ).read_text(encoding="utf-8")
-    production_env = (project_root / "deploy/production.env.example").read_text(
-        encoding="utf-8"
-    )
+    frontend_service = (
+        project_root / "deploy/systemd/oj-package-converter-frontend.service.in"
+    ).read_text(encoding="utf-8")
     frontend_server = (project_root / "scripts/serve-frontend.mjs").read_text(
         encoding="utf-8"
     )
     gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
 
     assert "After=network-online.target docker.service" in service
-    assert "Requires=docker.service" in service
-    assert "SupplementaryGroups=docker" in service
-    assert "--host 0.0.0.0 --port 11451" in service
+    assert "EnvironmentFile=@ENV_FILE@" in service
+    assert "Environment=P2H_BACKEND_HOST=127.0.0.1" in service
+    assert "--host ${P2H_BACKEND_HOST} --port 11451" in service
     assert "--workers 1" in service
     assert "--no-proxy-headers" in service
     assert "--limit-concurrency 128" in service
-    assert "NoNewPrivileges=true" in service
-    assert "ProtectSystem=strict" in service
-    assert "CapabilityBoundingSet=" in service
+    assert "ReadWritePaths=@DATA_DIR@" in service
+    for unit in (service, frontend_service):
+        assert "User=@SERVICE_USER@" in unit
+        assert "NoNewPrivileges=true" in unit
+        assert "ProtectSystem=strict" in unit
+        assert "CapabilityBoundingSet=" in unit
+        # Services run as the installing login user: never wipe its IPC objects.
+        assert "RemoveIPC" not in unit
+    assert "Environment=P2H_FRONTEND_HOST=127.0.0.1" in frontend_service
     assert "serve-frontend.mjs" in frontend_service
-    assert "NoNewPrivileges=true" in frontend_service
-    assert "P2H_BACKEND_PORT=11451" in production_env
-    assert "P2H_FRONTEND_PORT=11452" in production_env
-    assert "P2H_ACCESS_KEY_HASH=" in production_env
-    assert "DOCKER_HOST" not in production_env
-    assert "rootless" not in production_env.lower()
+    assert 'process.env.P2H_FRONTEND_HOST || "127.0.0.1"' in frontend_server
     assert 'response.setHeader("Content-Security-Policy"' in frontend_server
     assert "frontendRootReal" in frontend_server
-    assert "production.env" in gitignore.splitlines()
+    assert ".env" in gitignore.splitlines()
