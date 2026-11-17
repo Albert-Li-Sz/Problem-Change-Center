@@ -272,11 +272,12 @@ def test_installer_pulls_current_namespace_and_companion_runner(
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     pulled = tmp_path / "pulled.txt"
+    calls = tmp_path / "docker-calls.txt"
     docker = fake_bin / "docker"
     docker.write_text(
         f"#!/usr/bin/env bash\n"
         'if [[ "${1:-}" == info ]]; then exit 0; fi\n'
-        f'if [[ "${{1:-}}" == pull ]]; then printf "%s\\n" "$2" >> "{pulled}"; exit 0; fi\n'
+        f'if [[ "${{1:-}}" == pull ]]; then printf "%s\\n" "${{@: -1}}" >> "{pulled}"; printf "%s\\n" "$*" >> "{calls}"; exit 0; fi\n'
         "exit 1\n"
     )
     docker.chmod(0o755)
@@ -302,6 +303,10 @@ def test_installer_pulls_current_namespace_and_companion_runner(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert pulled.read_text().splitlines() == images
+    if "runner-wine" in images[0]:
+        assert (
+            calls.read_text().splitlines()[0].startswith("pull --platform linux/amd64 ")
+        )
     assert f"P2H_RUNNER_IMAGE={images[0]}\n" in (project / ".env").read_text()
 
 

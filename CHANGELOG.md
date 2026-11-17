@@ -10,3 +10,4 @@
 - runner 默认内存调整为 3 GiB，并对退出码 137 增加内存耗尽提示；Docker CI 固定使用兼容 Wine 的 Engine 29.9.3。
 - 增加安装向导镜像选择、Wine 配套镜像和转换内容保留回归。版本标签 `v0.7.4` 保持不变，`main` 为滚动维护分支。
 - 修正隔离校验脚本的 GNU/BSD mktemp 兼容性，避免 Linux 夜间检查在创建临时目录时退出。
+- Wine 镜像拉取时明确指定 `linux/amd64`，修复 ARM Docker 主机按原生架构查找 Wine manifest 而失败的问题。

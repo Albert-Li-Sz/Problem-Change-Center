@@ -198,6 +198,7 @@ npm_config_registry=https://registry.npmmirror.com \
 
 选择带标签的 Wine 镜像时，安装脚本会同时拉取同版本的普通 runner，供其他格式
 转换使用；使用 digest 固定 Wine 镜像时，各类转换继续使用该镜像。
+Wine 镜像拉取时指定 `linux/amd64`，可用于已配置 amd64 仿真的 ARM Docker 主机。
 
 生产环境不要长期跟随可变的 `main` 标签，应固定发布 digest：
 

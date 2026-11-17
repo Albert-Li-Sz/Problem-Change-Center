@@ -905,10 +905,16 @@ EOF
 pull_runner() {
   local reference="$RUNNER_IMAGE_OVERRIDE"
   local basename="${reference##*/}"
+  local image_name="${basename%%@*}"
   local suffix=""
+  image_name="${image_name%%:*}"
   log "Pulling prebuilt Docker runner image: $RUNNER_IMAGE_OVERRIDE"
   check_docker_access
-  docker pull "$RUNNER_IMAGE_OVERRIDE"
+  if [[ "$image_name" == *-wine ]]; then
+    docker pull --platform linux/amd64 "$RUNNER_IMAGE_OVERRIDE"
+  else
+    docker pull "$RUNNER_IMAGE_OVERRIDE"
+  fi
   # Tagged Wine runners route non-Polygon requests to the corresponding plain
   # image. A digest identifies only one image and is never rewritten by the API.
   if [[ "$reference" == *@* ]]; then
